@@ -229,7 +229,7 @@ impl FixedHeapArena {
     fn allocate_page(&self) -> Option<*mut u8> {
         let page = self
             .next_page
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < USER_HEAP_PAGES).then_some(current + 1)
             })
             .ok()?;

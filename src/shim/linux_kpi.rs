@@ -742,7 +742,7 @@ unsafe extern "C" fn test_allocate(
         return sisyphus_driver_abi::STATUS_INVALID_ARGUMENT;
     }
     if TEST_ALLOCATE_FAILURES
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
             remaining.checked_sub(1)
         })
         .is_ok()
@@ -770,7 +770,7 @@ unsafe extern "C" fn test_deallocate(
     alignment: usize,
 ) -> sisyphus_driver_abi::Status {
     if TEST_DEALLOCATE_FAILURES
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
             remaining.checked_sub(1)
         })
         .is_ok()
@@ -999,15 +999,18 @@ mod tests {
         let mut exact = [0x55_i8; 8];
         assert_eq!(
             unsafe { linux_strscpy(exact.as_mut_ptr(), c"arach".as_ptr(), exact.len()) },
-            7
+            5
         );
-        assert_eq!(exact.map(|byte| byte as u8), *b"arach\0");
+        assert_eq!(
+            exact.map(|byte| byte as u8),
+            [b'a', b'r', b'a', b'c', b'h', 0, 0x55, 0x55]
+        );
         let mut truncated = [0x55_i8; 4];
         assert_eq!(
             unsafe { linux_strscpy(truncated.as_mut_ptr(), c"arach".as_ptr(), truncated.len(),) },
             -E2BIG
         );
-        assert_eq!(truncated.map(|byte| byte as u8), *b"bou\0");
+        assert_eq!(truncated.map(|byte| byte as u8), *b"ara\0");
         let untouched = truncated;
         assert_eq!(
             unsafe { linux_strscpy(truncated.as_mut_ptr(), c"ignored".as_ptr(), 0) },

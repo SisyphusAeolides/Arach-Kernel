@@ -123,7 +123,8 @@ pub unsafe fn initialize(mmio: &dyn MmioService) -> Result<LocalApicInfo, Status
     if state.is_some() {
         return Err(STATUS_BUSY);
     }
-    let features = core::arch::x86_64::__cpuid(1);
+    // SAFETY: CPUID leaf one is mandatory in x86_64 mode.
+    let features = unsafe { core::arch::x86_64::__cpuid(1) };
     if features.edx & (1 << 9) == 0 {
         return Err(STATUS_UNSUPPORTED);
     }

@@ -16,16 +16,20 @@ impl Architecture for X86_64 {
     const MAXIMUM_CPUS: usize = 256;
 
     fn hardware_thread_id() -> u32 {
-        let maximum_leaf = core::arch::x86_64::__cpuid(0).eax;
+        // SAFETY: CPUID is available in 64-bit mode and leaf zero is always
+        // defined. Later leaves are queried only after checking the maximum.
+        let maximum_leaf = unsafe { core::arch::x86_64::__cpuid(0) }.eax;
         for leaf in [0x1f, 0x0b] {
             if maximum_leaf >= leaf {
-                let topology = core::arch::x86_64::__cpuid_count(leaf, 0);
+                // SAFETY: `leaf` is supported according to leaf zero.
+                let topology = unsafe { core::arch::x86_64::__cpuid_count(leaf, 0) };
                 if topology.ebx != 0 {
                     return topology.edx;
                 }
             }
         }
-        core::arch::x86_64::__cpuid(1).ebx >> 24
+        // SAFETY: CPUID leaf one is mandatory on x86_64.
+        unsafe { core::arch::x86_64::__cpuid(1) }.ebx >> 24
     }
 
     fn counter_sample() -> u64 {
@@ -182,9 +186,11 @@ pub unsafe fn invalidate_page(address: usize) {
 /// The caller must execute at ring 0 during serialized bootstrap before any
 /// page tables containing the no-execute bit can become active.
 pub unsafe fn enable_execute_disable() -> Result<(), ExecuteDisableError> {
-    let maximum_extended_leaf = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+    // SAFETY: The extended maximum-leaf query is defined on x86_64.
+    let maximum_extended_leaf = unsafe { core::arch::x86_64::__cpuid(0x8000_0000) }.eax;
     if maximum_extended_leaf < 0x8000_0001
-        || core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 20) == 0
+        // SAFETY: The preceding maximum-leaf check admits this query.
+        || unsafe { core::arch::x86_64::__cpuid(0x8000_0001) }.edx & (1 << 20) == 0
     {
         return Err(ExecuteDisableError::Unsupported);
     }

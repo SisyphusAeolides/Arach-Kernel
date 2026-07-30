@@ -462,10 +462,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         halt();
     }
     let Some(push_virtual) = direct_map_address(push_module.start.as_u64()) else {
-        let _ = writeln!(
-            serial,
-            "Arach: Push boot module is outside the direct map"
-        );
+        let _ = writeln!(serial, "Arach: Push boot module is outside the direct map");
         halt();
     };
     // SAFETY: The validated module range is immutable bootloader-owned memory
@@ -494,10 +491,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         halt();
     }
     let Some(crest_virtual) = direct_map_address(crest_module.start.as_u64()) else {
-        let _ = writeln!(
-            serial,
-            "Arach: Crest boot module is outside the direct map"
-        );
+        let _ = writeln!(serial, "Arach: Crest boot module is outside the direct map");
         halt();
     };
     // SAFETY: The validated module range is immutable bootloader-owned memory
@@ -543,11 +537,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                     halt();
                 }
                 let Some(virtual_address) = direct_map_address(module.start.as_u64()) else {
-                    let _ = writeln!(
-                        serial,
-                        "Arach: {} module is outside the direct map",
-                        $label
-                    );
+                    let _ = writeln!(serial, "Arach: {} module is outside the direct map", $label);
                     halt();
                 };
                 // SAFETY: this bounded module range is supplied by Granite or
@@ -910,10 +900,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     let local_apic = match unsafe { interrupts::initialize_local_apic(mmio) } {
         Ok(info) => info,
         Err(status) => {
-            let _ = writeln!(
-                serial,
-                "Arach: local APIC initialization failed: {status}"
-            );
+            let _ = writeln!(serial, "Arach: local APIC initialization failed: {status}");
             halt();
         }
     };
@@ -1099,10 +1086,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         let _ = writeln!(serial, "Arach: fabric release failed: {error:?}");
         halt();
     }
-    let _ = writeln!(
-        serial,
-        "Arach: capability-gated fabric work cycle verified"
-    );
+    let _ = writeln!(serial, "Arach: capability-gated fabric work cycle verified");
 
     let policy_control = authority.grant::<PolicyControl>();
     if let Err(error) = arach::aether::initialize(&policy_control) {
@@ -1170,10 +1154,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     ) {
         Ok(initialized) => initialized,
         Err(error) => {
-            let _ = writeln!(
-                serial,
-                "Arach: Black Lab initialization failed: {error:?}"
-            );
+            let _ = writeln!(serial, "Arach: Black Lab initialization failed: {error:?}");
             halt();
         }
     };
@@ -1195,10 +1176,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         }
     };
     if let Err(error) = process_backend.install_thermal_page(&pid1, &process_install) {
-        let _ = writeln!(
-            serial,
-            "Arach: PID1 thermal page mapping failed: {error:?}"
-        );
+        let _ = writeln!(serial, "Arach: PID1 thermal page mapping failed: {error:?}");
         halt();
     }
 
@@ -1222,10 +1200,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
 
     {
         if let Err(error) = process_backend.install_nexus_plane(&pid1, &process_install) {
-            let _ = writeln!(
-                serial,
-                "Arach: PID1 nexus plane mapping failed: {error:?}"
-            );
+            let _ = writeln!(serial, "Arach: PID1 nexus plane mapping failed: {error:?}");
             halt();
         }
     }
@@ -1277,10 +1252,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         CREST_ENTRY_FILE_OFFSET,
         CREST_EXPECTED_SHA256,
     ) {
-        let _ = writeln!(
-            serial,
-            "Arach: Crest package manifest rejected: {error:?}"
-        );
+        let _ = writeln!(serial, "Arach: Crest package manifest rejected: {error:?}");
         halt();
     }
     if crest_manifest.service_class != CREST_SERVICE_CLASS {
@@ -1336,10 +1308,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         CREST_INITIAL_STACK_PAGES,
         &process_install,
     ) {
-        let _ = writeln!(
-            serial,
-            "Arach: Crest stack installation failed: {error:?}"
-        );
+        let _ = writeln!(serial, "Arach: Crest stack installation failed: {error:?}");
         halt();
     }
     let crest_stack = match process_backend.prepare_initial_stack(
@@ -1587,10 +1556,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         ) {
             Ok(authorization) => authorization,
             Err(error) => {
-                let _ = writeln!(
-                    serial,
-                    "Arach: e1000 live authorization failed: {error:?}"
-                );
+                let _ = writeln!(serial, "Arach: e1000 live authorization failed: {error:?}");
                 halt();
             }
         };
@@ -1638,10 +1604,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         ) {
             Ok(lease) => lease,
             Err(error) => {
-                let _ = writeln!(
-                    serial,
-                    "Arach: e1000 bus-master enable rejected: {error:?}"
-                );
+                let _ = writeln!(serial, "Arach: e1000 bus-master enable rejected: {error:?}");
                 halt();
             }
         };
@@ -1684,10 +1647,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                 e1000_dma_authority.reborrow(),
                 e1000_pci_configuration.reborrow(),
             );
-            let _ = writeln!(
-                serial,
-                "Arach: e1000 DMA arena was not physically retained"
-            );
+            let _ = writeln!(serial, "Arach: e1000 DMA arena was not physically retained");
             halt();
         };
         let info = match initialize_e1000(&window, rings) {
@@ -1856,10 +1816,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                 );
             }
             Err(error) => {
-                let _ = writeln!(
-                    serial,
-                    "Arach: e1000 DHCP acquisition rejected: {error:?}"
-                );
+                let _ = writeln!(serial, "Arach: e1000 DHCP acquisition rejected: {error:?}");
             }
         }
         // The retained bus-master lease names the exact same kernel-only DMA
@@ -2277,19 +2234,17 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                                         halt();
                                     }
                                 };
-                                let iova_aperture = match IovaRange::new(
-                                    0,
-                                    EARLY_MAPPED_PHYSICAL_LIMIT,
-                                ) {
-                                    Ok(aperture) => aperture,
-                                    Err(error) => {
-                                        let _ = writeln!(
-                                            serial,
-                                            "Arach: xHCI VT-d IOVA aperture rejected: {error:?}"
-                                        );
-                                        halt();
-                                    }
-                                };
+                                let iova_aperture =
+                                    match IovaRange::new(0, EARLY_MAPPED_PHYSICAL_LIMIT) {
+                                        Ok(aperture) => aperture,
+                                        Err(error) => {
+                                            let _ = writeln!(
+                                                serial,
+                                                "Arach: xHCI VT-d IOVA aperture rejected: {error:?}"
+                                            );
+                                            halt();
+                                        }
+                                    };
                                 let mut domain = match IommuDomain::isolate_device(
                                     &backend,
                                     scope.requester(),
@@ -2857,8 +2812,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                             };
                             let root = debt.debt_root(xhci_secret);
                             if root == 0 {
-                                let _ =
-                                    writeln!(serial, "Arach: xHCI mutation debt audit failed");
+                                let _ = writeln!(serial, "Arach: xHCI mutation debt audit failed");
                                 halt();
                             }
                             if let Err(error) = xhci_census.insert_mutation_debt(debt) {
@@ -3036,18 +2990,12 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     let device_summary = match arach::drivers::device_census::publish_boot_census(device_census) {
         Ok(summary) => summary,
         Err(error) => {
-            let _ = writeln!(
-                serial,
-                "Arach: device census publication failed: {error:?}"
-            );
+            let _ = writeln!(serial, "Arach: device census publication failed: {error:?}");
             halt();
         }
     };
     if arach::drivers::device_census::boot_census_summary() != Some(device_summary) {
-        let _ = writeln!(
-            serial,
-            "Arach: retained device census verification failed"
-        );
+        let _ = writeln!(serial, "Arach: retained device census verification failed");
         halt();
     }
     for claim in xhci_claims.claims().iter().copied() {
@@ -3157,8 +3105,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                 halt();
             }
         }
-        if let Err(error) =
-            arach::drivers::firmware_display::bind_crest_presenter(firmware_object)
+        if let Err(error) = arach::drivers::firmware_display::bind_crest_presenter(firmware_object)
         {
             let _ = writeln!(serial, "Arach: Crest presenter binding failed: {error:?}");
             halt();
@@ -3196,10 +3143,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         kairos.processors, kairos.memory_regions, kairos.io_devices, kairos.domains
     );
     if let Err(error) = ignition.subsystems_ready() {
-        let _ = writeln!(
-            serial,
-            "Arach: ignition subsystem phase failed: {error:?}"
-        );
+        let _ = writeln!(serial, "Arach: ignition subsystem phase failed: {error:?}");
         halt();
     }
 
@@ -3323,10 +3267,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         }
     }
     if let Err(error) = ignition.interrupts_ready() {
-        let _ = writeln!(
-            serial,
-            "Arach: ignition interrupt phase failed: {error:?}"
-        );
+        let _ = writeln!(serial, "Arach: ignition interrupt phase failed: {error:?}");
         halt();
     }
     if let Err(error) = ignition.userland_ready() {
@@ -3377,10 +3318,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         match crest_manifest.bind_formal_authority(formal_attestation.authority_root) {
             Ok(package) => package,
             Err(error) => {
-                let _ = writeln!(
-                    serial,
-                    "Arach: Crest package authority rejected: {error:?}"
-                );
+                let _ = writeln!(serial, "Arach: Crest package authority rejected: {error:?}");
                 halt();
             }
         };
@@ -3430,10 +3368,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     let pid1_snapshot = match lifecycle::mark_running(pid1_handle) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            let _ = writeln!(
-                serial,
-                "Arach: measured PID1 activation failed: {error:?}"
-            );
+            let _ = writeln!(serial, "Arach: measured PID1 activation failed: {error:?}");
             halt();
         }
     };
@@ -3441,19 +3376,13 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         || lifecycle::current_handle() != Some(pid1_handle)
         || pid1_handle.pid != lifecycle::INIT_PID
     {
-        let _ = writeln!(
-            serial,
-            "Arach: measured PID1 authority publication failed"
-        );
+        let _ = writeln!(serial, "Arach: measured PID1 authority publication failed");
         halt();
     }
     let mut ring_registry = match DomainRegistry::<4>::new(kernel_page_table_root.as_u64()) {
         Ok(registry) => registry,
         Err(error) => {
-            let _ = writeln!(
-                serial,
-                "Arach: privilege-domain registry failed: {error:?}"
-            );
+            let _ = writeln!(serial, "Arach: privilege-domain registry failed: {error:?}");
             halt();
         }
     };
@@ -3526,10 +3455,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
             committed_transition,
         )
     } {
-        let _ = writeln!(
-            serial,
-            "Arach: persistent PID1 transfer failed: {error:?}"
-        );
+        let _ = writeln!(serial, "Arach: persistent PID1 transfer failed: {error:?}");
     }
     halt()
 }

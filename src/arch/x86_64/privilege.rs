@@ -584,11 +584,7 @@ pub unsafe fn run_user_probe(
     PROBE_RETURNED.store(false, Ordering::Release);
 
     unsafe extern "C" {
-        fn arach_enter_ring3_probe(
-            entry_point: usize,
-            stack_pointer: usize,
-            page_table_root: u64,
-        );
+        fn arach_enter_ring3_probe(entry_point: usize, stack_pointer: usize, page_table_root: u64);
     }
     // SAFETY: The caller and validation above establish the assembly entry
     // contract. The user breakpoint handler redirects return to the saved

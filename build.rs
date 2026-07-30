@@ -28,6 +28,8 @@ fn main() {
     let granite_layout = workspace.join("formal/agda/GraniteLayout.agda");
     let hermes_wire = workspace.join("formal/agda/HermesWire.agda");
     let crest_overlay = workspace.join("formal/agda/CrestOverlay.agda");
+    let cosmic_compatibility = workspace.join("formal/idris2/CosmicCompatibility.idr");
+    let cosmic_stack = workspace.join("formal/agda/CosmicStack.agda");
     let driver_digest = measured_source(&driver_lifecycle);
     let package_digest = measured_source(&package_transaction);
     let crucible_digest = measured_source(&crucible);
@@ -41,6 +43,8 @@ fn main() {
     let granite_layout_digest = measured_source(&granite_layout);
     let hermes_wire_digest = measured_source(&hermes_wire);
     let crest_overlay_digest = measured_source(&crest_overlay);
+    let cosmic_compatibility_digest = measured_source(&cosmic_compatibility);
+    let cosmic_stack_digest = measured_source(&cosmic_stack);
     println!("cargo:rerun-if-changed={}", driver_lifecycle.display());
     println!("cargo:rerun-if-changed={}", package_transaction.display());
     println!("cargo:rerun-if-changed={}", crucible.display());
@@ -54,6 +58,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", granite_layout.display());
     println!("cargo:rerun-if-changed={}", hermes_wire.display());
     println!("cargo:rerun-if-changed={}", crest_overlay.display());
+    println!("cargo:rerun-if-changed={}", cosmic_compatibility.display());
+    println!("cargo:rerun-if-changed={}", cosmic_stack.display());
     println!(
         "cargo:rustc-env=SISYPHUS_DRIVER_PROOF_SHA256={}",
         encode_sha256(driver_digest)
@@ -106,6 +112,14 @@ fn main() {
         "cargo:rustc-env=SISYPHUS_CREST_OVERLAY_PROOF_SHA256={}",
         encode_sha256(crest_overlay_digest)
     );
+    println!(
+        "cargo:rustc-env=ARACH_COSMIC_COMPATIBILITY_PROOF_SHA256={}",
+        encode_sha256(cosmic_compatibility_digest)
+    );
+    println!(
+        "cargo:rustc-env=ARACH_COSMIC_STACK_PROOF_SHA256={}",
+        encode_sha256(cosmic_stack_digest)
+    );
 
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-changed=src/bootstrap.S");
@@ -113,7 +127,9 @@ fn main() {
     println!("cargo:rerun-if-changed=include/sisyphus/driver.h");
     println!("cargo:rerun-if-changed=include/sisyphus/gpu.h");
     println!("cargo:rerun-if-changed=drivers/reference/reference_driver.c");
+    println!("cargo:rerun-if-changed=fortran/arach_control.f90");
     println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=FC");
     println!("cargo:rerun-if-env-changed=AR");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("none") {
@@ -132,6 +148,8 @@ fn main() {
             granite_layout_digest,
             hermes_wire_digest,
             crest_overlay_digest,
+            cosmic_compatibility_digest,
+            cosmic_stack_digest,
         );
         let linker_script = PathBuf::from(
             env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
@@ -196,41 +214,89 @@ fn main() {
         );
     }
 
-    if env::var_os("CARGO_FEATURE_REFERENCE_DRIVER").is_none() {
+    let build_reference_driver = env::var_os("CARGO_FEATURE_REFERENCE_DRIVER").is_some();
+    let build_fortran_control = env::var_os("CARGO_FEATURE_FORTRAN_CONTROL").is_some();
+    if !build_reference_driver && !build_fortran_control {
         return;
     }
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
-    let object = out_dir.join("reference_driver.o");
-    let archive = out_dir.join("libreference_driver.a");
-    let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
     let ar = env::var_os("AR").unwrap_or_else(|| "ar".into());
 
-    run(
-        Command::new(cc)
+    if build_reference_driver {
+        let object = out_dir.join("reference_driver.o");
+        let archive = out_dir.join("libreference_driver.a");
+        let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
+        let mut compile_driver = Command::new(cc);
+        compile_driver
             .arg("-std=c11")
             .arg("-ffreestanding")
             .arg("-fno-stack-protector")
             .arg("-fvisibility=hidden")
             .arg("-Wall")
             .arg("-Wextra")
-            .arg("-Werror")
+            .arg("-Werror");
+        add_position_flags(&mut compile_driver);
+        compile_driver
             .arg("-I")
             .arg(Path::new("include"))
             .arg("-c")
             .arg("drivers/reference/reference_driver.c")
             .arg("-o")
-            .arg(&object),
-        "C reference-driver compilation",
-    );
+            .arg(&object);
+        run(&mut compile_driver, "C reference-driver compilation");
 
-    run(
-        Command::new(ar).arg("crs").arg(&archive).arg(&object),
-        "C reference-driver archive creation",
-    );
+        run(
+            Command::new(&ar).arg("crs").arg(&archive).arg(&object),
+            "C reference-driver archive creation",
+        );
 
-    println!("cargo:rustc-link-search=native={}", out_dir.display());
-    println!("cargo:rustc-link-lib=static=reference_driver");
+        println!("cargo:rustc-link-search=native={}", out_dir.display());
+        println!("cargo:rustc-link-lib=static=reference_driver");
+    }
+
+    if build_fortran_control {
+        let object = out_dir.join("arach_control.o");
+        let archive = out_dir.join("libarach_fortran.a");
+        let fc = env::var_os("FC").unwrap_or_else(|| "gfortran".into());
+        let mut compile_fortran = Command::new(fc);
+        compile_fortran
+            .arg("-c")
+            .arg("-O2")
+            .arg("-J")
+            .arg(&out_dir)
+            .arg("-fno-stack-protector")
+            .arg("-fno-asynchronous-unwind-tables")
+            .arg("-Wall")
+            .arg("-Wextra")
+            .arg("-Werror");
+        add_position_flags(&mut compile_fortran);
+        compile_fortran
+            .arg("fortran/arach_control.f90")
+            .arg("-o")
+            .arg(&object);
+        run(&mut compile_fortran, "Fortran control-kernel compilation");
+
+        run(
+            Command::new(ar).arg("crs").arg(&archive).arg(&object),
+            "Fortran control-kernel archive creation",
+        );
+
+        println!("cargo:rustc-link-search=native={}", out_dir.display());
+        println!("cargo:rustc-link-lib=static=arach_fortran");
+    }
+}
+
+fn add_position_flags(command: &mut Command) {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("none") {
+        command
+            .arg("-fno-pic")
+            .arg("-fno-pie")
+            .arg("-mno-red-zone")
+            .arg("-mcmodel=kernel");
+    } else {
+        command.arg("-fPIC");
+    }
 }
 
 fn measured_source(path: &Path) -> [u8; 32] {
@@ -268,6 +334,8 @@ fn verify_formal_attestation(
     granite_layout_digest: [u8; 32],
     hermes_wire_digest: [u8; 32],
     crest_overlay_digest: [u8; 32],
+    cosmic_compatibility_digest: [u8; 32],
+    cosmic_stack_digest: [u8; 32],
 ) {
     let path = workspace.join("target/formal/verified.lock");
     println!("cargo:rerun-if-changed={}", path.display());
@@ -282,7 +350,8 @@ fn verify_formal_attestation(
 driver_lifecycle_sha256={}\npackage_transaction_sha256={}\n\
 crucible_sha256={}\naegis_lifecycle_sha256={}\nargus_markup_sha256={}\ngranite_boot_sha256={}\n\
 hermes_authority_sha256={}\ncrest_shell_sha256={}\nprivilege_rings_sha256={}\nargus_layout_sha256={}\n\
-granite_layout_sha256={}\nhermes_wire_sha256={}\ncrest_overlay_sha256={}\n",
+granite_layout_sha256={}\nhermes_wire_sha256={}\ncrest_overlay_sha256={}\n\
+cosmic_compatibility_sha256={}\ncosmic_stack_sha256={}\n",
         encode_sha256(driver_digest),
         encode_sha256(package_digest),
         encode_sha256(crucible_digest),
@@ -296,6 +365,8 @@ granite_layout_sha256={}\nhermes_wire_sha256={}\ncrest_overlay_sha256={}\n",
         encode_sha256(granite_layout_digest),
         encode_sha256(hermes_wire_digest),
         encode_sha256(crest_overlay_digest),
+        encode_sha256(cosmic_compatibility_digest),
+        encode_sha256(cosmic_stack_digest),
     );
     assert_eq!(
         actual, expected,

@@ -1,0 +1,66 @@
+# Sisyphus-OS migration plan
+
+Sisyphus-OS is the source repository for Arach and its future component
+repositories. It remains read-only migration input until the retirement gate at
+the end of this document passes.
+
+## Inventory
+
+| Sisyphus-OS path | Destination | Current state |
+|---|---|---|
+| `kernel/boulder/` | `Arach-Kernel` | Source imported and renamed; host requalification in progress |
+| `core/*` | Separate core repositories, temporarily integrated in Arach | Imported snapshot |
+| `libraries/driver-abi/` | Driver ABI repository | Imported snapshot |
+| `libraries/slope/` | Slope ABI repository | Imported snapshot |
+| `boot/granite/` | Granite boot repository | Not migrated |
+| `userland/push/` | Push PID 1 repository | Not migrated |
+| `userland/corinth/` | Corinth package repository | Not migrated |
+| `userland/crest/` | Crest experimental desktop repository | Not migrated; not on the COSMIC critical path |
+| `userland/cerebral/` | Cerebral repository | Not migrated |
+| `userland/crest-wayland/` | Crest Wayland experiment repository | Not migrated |
+| `tools/reality-gate/` | Qualification tooling repository | Not migrated |
+| `scripts/`, `docs/`, `assets/`, target JSON | Appropriate component repositories | Partially migrated |
+
+Repository names are provisional until the split is approved. Use history
+filtering (`git filter-repo` or subtree split) so authorship and commit identity
+are retained; do not create repositories by copying only the latest files.
+
+## Dependency direction
+
+```text
+Granite ──measured image──► Arach Kernel
+                              │
+Driver ABI ◄──────────────────┤
+Slope ABI  ◄──────────────────┼──► Push PID 1
+                              │         │
+                              │         └──► COSMIC session/services
+                              └────────────► Linux ABI/device compatibility
+
+Idris/Agda specifications ──verified manifests──► all release gates
+Fortran numerical kernels ──freestanding C ABI──► Arach safe wrappers
+```
+
+Component repositories must pin released dependencies by immutable tag and
+digest. Local path dependencies are allowed only in an explicit integration
+workspace.
+
+Existing external projects—libinput-rs, elan-guardian, tuned-rs and ccze-rs—
+remain separate and are integrated through the contracts in
+[`SYSTEM_COMPONENTS.md`](SYSTEM_COMPONENTS.md). They are not copied into the
+kernel repository.
+
+## Retirement gate
+
+Sisyphus-OS may be archived only after all of these are mechanically checked:
+
+1. every tracked source, document, script, asset, issue, release, and tag has a
+   recorded destination or an explicit discard decision;
+2. every destination contains preserved history, license information, and a
+   successful standalone CI run;
+3. a clean integration checkout can build without reading Sisyphus-OS;
+4. Arach boots through Granite and launches a measured Push artifact;
+5. the migration manifest maps old commit IDs to destination commit IDs;
+6. the old repository README points to every new home.
+
+Archive the old repository before considering deletion. Archival preserves
+links and provenance while preventing accidental new development.

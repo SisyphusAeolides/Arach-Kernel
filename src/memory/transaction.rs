@@ -38,11 +38,7 @@ arach_rtm_call:
 );
 
 unsafe extern "C" {
-    fn arach_rtm_call(
-        function: unsafe extern "C" fn() -> i32,
-        result: *mut i32,
-        status: *mut u32,
-    );
+    fn arach_rtm_call(function: unsafe extern "C" fn() -> i32, result: *mut i32, status: *mut u32);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,8 +75,11 @@ pub enum TransactionError {
 }
 
 pub fn rtm_available() -> bool {
-    let maximum_leaf = core::arch::x86_64::__cpuid(0).eax;
-    maximum_leaf >= 7 && core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 11) != 0
+    // SAFETY: CPUID leaf zero is always available in x86_64 mode.
+    let maximum_leaf = unsafe { core::arch::x86_64::__cpuid(0) }.eax;
+    maximum_leaf >= 7
+        // SAFETY: Leaf seven is queried only when leaf zero reports it.
+        && unsafe { core::arch::x86_64::__cpuid_count(7, 0) }.ebx & (1 << 11) != 0
 }
 
 /// Executes a no-argument foreign call inside an Intel RTM transaction.

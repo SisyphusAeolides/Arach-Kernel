@@ -21,6 +21,9 @@ const ARGUS_LAYOUT_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_ARGUS_LAYOUT_P
 const GRANITE_LAYOUT_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_LAYOUT_PROOF_SHA256"));
 const HERMES_WIRE_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_HERMES_WIRE_PROOF_SHA256"));
 const CREST_OVERLAY_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_CREST_OVERLAY_PROOF_SHA256"));
+const COSMIC_COMPATIBILITY_SHA256: [u8; 32] =
+    parse_sha256(env!("ARACH_COSMIC_COMPATIBILITY_PROOF_SHA256"));
+const COSMIC_STACK_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_STACK_PROOF_SHA256"));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FormalAttestation {
@@ -38,6 +41,8 @@ pub struct FormalAttestation {
     pub granite_layout_sha256: [u8; 32],
     pub hermes_wire_sha256: [u8; 32],
     pub crest_overlay_sha256: [u8; 32],
+    pub cosmic_compatibility_sha256: [u8; 32],
+    pub cosmic_stack_sha256: [u8; 32],
     pub authority_root: u64,
 }
 
@@ -57,6 +62,8 @@ impl FormalAttestation {
             GRANITE_LAYOUT_SHA256,
             HERMES_WIRE_SHA256,
             CREST_OVERLAY_SHA256,
+            COSMIC_COMPATIBILITY_SHA256,
+            COSMIC_STACK_SHA256,
         ]);
         Self {
             schema_version: FORMAL_SCHEMA_VERSION,
@@ -73,6 +80,8 @@ impl FormalAttestation {
             granite_layout_sha256: GRANITE_LAYOUT_SHA256,
             hermes_wire_sha256: HERMES_WIRE_SHA256,
             crest_overlay_sha256: CREST_OVERLAY_SHA256,
+            cosmic_compatibility_sha256: COSMIC_COMPATIBILITY_SHA256,
+            cosmic_stack_sha256: COSMIC_STACK_SHA256,
             authority_root,
         }
     }
@@ -92,6 +101,8 @@ impl FormalAttestation {
             && !all_zero(self.granite_layout_sha256)
             && !all_zero(self.hermes_wire_sha256)
             && !all_zero(self.crest_overlay_sha256)
+            && !all_zero(self.cosmic_compatibility_sha256)
+            && !all_zero(self.cosmic_stack_sha256)
             && distinct_roots([
                 self.driver_lifecycle_sha256,
                 self.package_transaction_sha256,
@@ -106,6 +117,8 @@ impl FormalAttestation {
                 self.granite_layout_sha256,
                 self.hermes_wire_sha256,
                 self.crest_overlay_sha256,
+                self.cosmic_compatibility_sha256,
+                self.cosmic_stack_sha256,
             ])
             && self.authority_root
                 == fold_roots([
@@ -122,12 +135,14 @@ impl FormalAttestation {
                     self.granite_layout_sha256,
                     self.hermes_wire_sha256,
                     self.crest_overlay_sha256,
+                    self.cosmic_compatibility_sha256,
+                    self.cosmic_stack_sha256,
                 ])
             && self.authority_root != 0
     }
 }
 
-const fn fold_roots(roots: [[u8; 32]; 13]) -> u64 {
+const fn fold_roots(roots: [[u8; 32]; 15]) -> u64 {
     let mut state = 0x5349_5359_5048_5553_u64;
     let mut root_index = 0;
     while root_index < roots.len() {
@@ -175,7 +190,7 @@ const fn equal_digest(left: [u8; 32], right: [u8; 32]) -> bool {
     true
 }
 
-const fn distinct_roots(roots: [[u8; 32]; 13]) -> bool {
+const fn distinct_roots(roots: [[u8; 32]; 15]) -> bool {
     let mut left = 0;
     while left < roots.len() {
         let mut right = left + 1;
@@ -236,5 +251,12 @@ mod tests {
         let attestation = FormalAttestation::current();
         assert!(!all_zero(attestation.crest_shell_sha256));
         assert!(!all_zero(attestation.crest_overlay_sha256));
+    }
+
+    #[test]
+    fn cosmic_release_models_are_bound_into_the_authority_root() {
+        let attestation = FormalAttestation::current();
+        assert!(!all_zero(attestation.cosmic_compatibility_sha256));
+        assert!(!all_zero(attestation.cosmic_stack_sha256));
     }
 }

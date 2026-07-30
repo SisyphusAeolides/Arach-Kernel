@@ -33,6 +33,8 @@ pub mod er_epr_memory;
 pub mod fabric;
 pub mod fabric_weave;
 pub mod formal_attestation;
+#[cfg(feature = "fortran-control")]
+pub mod fortran_control;
 pub mod futamura;
 pub mod ghost_chronicle;
 pub mod hodge_cech;

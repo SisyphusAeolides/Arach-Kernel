@@ -1,0 +1,35 @@
+name: Arach validation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-c-fortran:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gfortran
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          components: rustfmt,rust-src
+      - run: cargo fmt --all -- --check
+      - run: cargo check --workspace --all-targets
+      - run: cargo test --workspace --all-targets
+      - name: Reject generated build products
+        run: test -z "$(git ls-files | grep -E '(^target/|\.(o|a|rlib|rmeta)$)' || true)"
+
+  idris-agda:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y build-essential chezscheme libgmp-dev xz-utils
+      - uses: actions/cache@v4
+        with:
+          path: target/formal/toolchains
+          key: arach-formal-idris2-0.8.0-agda-2.8.0-v1
+      - run: scripts/bootstrap-formal-toolchains.sh
