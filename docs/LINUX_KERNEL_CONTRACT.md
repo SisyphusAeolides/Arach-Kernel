@@ -59,11 +59,40 @@ x86-64 relocations, and models transactional seal, init, init-discard, cleanup,
 rollback and release through a kernel-backend contract. Unit tests exercise
 those ownership transitions, including failed init and retryable cleanup.
 
-That is not runtime qualification. The backend is not yet connected to Arach's
-native page tables and execution dispatcher, Linux special sections still need
-their runtime processors, and no admitted module has executed in an Arach boot.
-`current_arach_evidence()` therefore grants no NVIDIA-runtime credit until a
-native integration suite supplies those observations.
+The x86-64 tree now also contains a capability-gated native module-memory
+owner. It reserves the unused final 1 GiB kernel PML3 slot, keeps module images
+within signed PC-relative reach of linked kernel text, stages content in
+non-present zeroed frames, publishes exact RX/R/RW leaf permissions, revokes
+init pages, and quarantines virtual extents whenever page-table detachment or
+physical reclamation is incomplete. Host fault-injection tests cover stale
+handles, conflicting hierarchy ownership, allocation failure, partial page
+table publication, failed seal rollback, partial init discard, TLB flush
+ordering, and retryable reclamation.
+
+That is still not runtime qualification. The module-memory owner is not yet
+wired into the transactional loader, Arach has no qualified synchronous
+all-CPU TLB implementation for this path, Linux special sections still need
+their runtime processors, and no admitted module has executed in an Arach
+boot. `current_arach_evidence()` therefore grants no NVIDIA-runtime credit
+until a native integration suite supplies those observations.
+
+### Native x86-64 module window
+
+The linked Arach kernel occupies PML3 slot 510 in the final PML4 entry. Native
+Linux modules are assigned PML3 slot 511, the canonical range
+`0xffffffffc0000000..0xffffffffffffffff`. The module-memory owner divides that
+range into exclusive 2 MiB extents and allocates private PML1 tables for each
+reservation. A reservation is inaccessible while bytes and relocations are
+written; the final seal is the first operation that installs present leaf
+entries.
+
+The upper hierarchy must remain supervisor-only, writable, executable, and
+free of huge-page aliases. Reusing an extent is permitted only after every
+leaf has been revoked, its PML2 links have been detached, and a synchronous
+kernel-range TLB invalidation has completed on every CPU that shares the
+hierarchy. The `LinuxModuleTlb` implementation is therefore an explicit unsafe
+architecture contract. A local `invlpg` loop alone is insufficient for SMP
+qualification.
 
 ## External-Kbuild smoke test
 

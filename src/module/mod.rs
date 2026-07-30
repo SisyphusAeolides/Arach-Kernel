@@ -6,3 +6,4 @@ pub mod linux_loader;
 pub mod loader;
 pub mod pe_loader;
 pub mod relocator;
+pub mod x86_64_memory;
