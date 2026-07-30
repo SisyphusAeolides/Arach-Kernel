@@ -16,6 +16,7 @@ use crate::module::linux_loader::{
 use crate::module::x86_64_memory::{
     LinuxModuleMapping, LinuxModuleTlb, X86_64LinuxModuleMemory, X86_64ModuleMapError,
 };
+use crate::module::x86_64_native::X86_64LinuxPreSealReceipt;
 use crate::process::x86_64::ProcessFrameMemory;
 
 const MODULE_STATE_COMING: u32 = 1;
@@ -46,7 +47,7 @@ impl X86_64LinuxModuleIdentityProcessor {
         mapping: LinuxModuleMapping,
         plan: &LinuxKoLoadPlan<'_>,
         special_sections: &[LinuxKoSpecialSection<'_>],
-    ) -> Result<LinuxKoSpecialSectionCoverage, LinuxModuleIdentityError<Memory::Error>>
+    ) -> Result<X86_64LinuxPreSealReceipt, LinuxModuleIdentityError<Memory::Error>>
     where
         Memory: ProcessFrameMemory,
         Tlb: LinuxModuleTlb,
@@ -75,7 +76,8 @@ impl X86_64LinuxModuleIdentityProcessor {
         )?;
         let mut coverage = LinuxKoSpecialSectionCoverage::empty();
         coverage.acknowledge(LinuxKoSpecialSectionKind::ModuleIdentity);
-        Ok(coverage)
+        let state_offset = add_offset(identity.image_offset, self.abi.state_offset)?;
+        Ok(X86_64LinuxPreSealReceipt::new(coverage, Some(state_offset)))
     }
 
     fn prepare_fields<Memory, Tlb>(

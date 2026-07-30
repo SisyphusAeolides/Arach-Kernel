@@ -17,6 +17,33 @@ use crate::process::x86_64::ProcessFrameMemory;
 
 pub const LINUX_MODULE_NAME_BYTES: usize = 56;
 
+/// Auditable metadata produced while the module image is still inaccessible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct X86_64LinuxPreSealReceipt {
+    coverage: LinuxKoSpecialSectionCoverage,
+    module_state_offset: Option<usize>,
+}
+
+impl X86_64LinuxPreSealReceipt {
+    pub const fn new(
+        coverage: LinuxKoSpecialSectionCoverage,
+        module_state_offset: Option<usize>,
+    ) -> Self {
+        Self {
+            coverage,
+            module_state_offset,
+        }
+    }
+
+    pub const fn coverage(self) -> LinuxKoSpecialSectionCoverage {
+        self.coverage
+    }
+
+    pub const fn module_state_offset(self) -> Option<usize> {
+        self.module_state_offset
+    }
+}
+
 /// Pre-publication processing for one fully relocated Linux module image.
 ///
 /// # Safety
@@ -40,7 +67,7 @@ where
         reservation: LinuxModuleMapping,
         plan: &LinuxKoLoadPlan<'_>,
         special_sections: &[LinuxKoSpecialSection<'_>],
-    ) -> Result<LinuxKoSpecialSectionCoverage, Self::Error>;
+    ) -> Result<X86_64LinuxPreSealReceipt, Self::Error>;
 }
 
 /// Serialized control transfer into a committed Linux module.
@@ -66,6 +93,7 @@ pub enum X86_64LinuxBackendError<MemoryError, PreSealError, ExecutorError> {
     DuplicateModuleName,
     InvalidSpecialSectionInventory,
     IncompleteSpecialSectionCoverage,
+    InvalidModuleState,
     InvalidLifecycle,
     InvalidLifecycleAddress,
 }
@@ -86,6 +114,7 @@ pub struct X86_64LinuxModule {
     name_length: u8,
     base: u64,
     size: usize,
+    module_state_offset: usize,
     lifecycle: X86_64LinuxModuleLifecycle,
     init_discard_complete: bool,
 }
@@ -101,6 +130,10 @@ impl X86_64LinuxModule {
 
     pub const fn size(&self) -> usize {
         self.size
+    }
+
+    pub const fn module_state_offset(&self) -> usize {
+        self.module_state_offset
     }
 
     pub const fn lifecycle(&self) -> X86_64LinuxModuleLifecycle {
@@ -124,6 +157,7 @@ where
     pre_seal: PreSeal,
     executor: Executor,
     prepared_generations: [u32; MAXIMUM_LIVE_LINUX_MODULES],
+    prepared_state_offsets: [usize; MAXIMUM_LIVE_LINUX_MODULES],
     live_generations: [u32; MAXIMUM_LIVE_LINUX_MODULES],
     live_name_lengths: [u8; MAXIMUM_LIVE_LINUX_MODULES],
     live_names: [[u8; LINUX_MODULE_NAME_BYTES]; MAXIMUM_LIVE_LINUX_MODULES],
@@ -147,6 +181,7 @@ where
             pre_seal,
             executor,
             prepared_generations: [0; MAXIMUM_LIVE_LINUX_MODULES],
+            prepared_state_offsets: [usize::MAX; MAXIMUM_LIVE_LINUX_MODULES],
             live_generations: [0; MAXIMUM_LIVE_LINUX_MODULES],
             live_name_lengths: [0; MAXIMUM_LIVE_LINUX_MODULES],
             live_names: [[0; LINUX_MODULE_NAME_BYTES]; MAXIMUM_LIVE_LINUX_MODULES],
@@ -184,6 +219,27 @@ where
 
     fn prepared(&self, mapping: LinuxModuleMapping) -> bool {
         self.prepared_generations[Self::mapping_slot(mapping)] == mapping.generation()
+    }
+
+    fn clear_prepared(&mut self, mapping: LinuxModuleMapping) {
+        let slot = Self::mapping_slot(mapping);
+        self.prepared_generations[slot] = 0;
+        self.prepared_state_offsets[slot] = usize::MAX;
+    }
+
+    fn valid_module_state(plan: &LinuxKoLoadPlan<'_>, offset: usize) -> bool {
+        let Some(end) = offset.checked_add(core::mem::size_of::<u32>()) else {
+            return false;
+        };
+        plan.regions().iter().any(|region| {
+            let Some(region_end) = region.image_offset.checked_add(region.size) else {
+                return false;
+            };
+            region.writable
+                && !region.executable
+                && offset >= region.image_offset
+                && end <= region_end
+        })
     }
 
     fn registry_matches(&self, module: &X86_64LinuxModule) -> bool {
@@ -305,14 +361,19 @@ where
         let special_sections = plan
             .special_sections()
             .map_err(|_| X86_64LinuxBackendError::InvalidSpecialSectionInventory)?;
-        let coverage = self
+        let receipt = self
             .pre_seal
             .prepare(&mut self.memory, reservation, plan, &special_sections)
             .map_err(X86_64LinuxBackendError::PreSeal)?;
-        if coverage != LinuxKoSpecialSectionCoverage::from_sections(&special_sections) {
+        if receipt.coverage() != LinuxKoSpecialSectionCoverage::from_sections(&special_sections) {
             return Err(X86_64LinuxBackendError::IncompleteSpecialSectionCoverage);
         }
+        let state_offset = receipt
+            .module_state_offset()
+            .filter(|offset| Self::valid_module_state(plan, *offset))
+            .ok_or(X86_64LinuxBackendError::InvalidModuleState)?;
         self.prepared_generations[slot] = reservation.generation();
+        self.prepared_state_offsets[slot] = state_offset;
         Ok(())
     }
 
@@ -327,7 +388,6 @@ where
         self.memory
             .seal(reservation, regions)
             .map_err(X86_64LinuxBackendError::Memory)?;
-        self.prepared_generations[Self::mapping_slot(reservation)] = 0;
         Ok(())
     }
 
@@ -342,6 +402,9 @@ where
         if self.name_is_live(name) {
             return Err(X86_64LinuxBackendError::DuplicateModuleName);
         }
+        if !self.prepared(reservation) {
+            return Err(X86_64LinuxBackendError::InvalidLifecycle);
+        }
         let base = self
             .memory
             .mapping_base(reservation)
@@ -350,22 +413,28 @@ where
             .memory
             .mapping_size(reservation)
             .map_err(X86_64LinuxBackendError::Memory)?;
+        let slot = Self::mapping_slot(reservation);
+        let module_state_offset = self.prepared_state_offsets[slot];
+        if module_state_offset == usize::MAX {
+            return Err(X86_64LinuxBackendError::InvalidModuleState);
+        }
         self.memory
             .commit(reservation)
             .map_err(X86_64LinuxBackendError::Memory)?;
 
-        let slot = Self::mapping_slot(reservation);
         let mut stored_name = [0; LINUX_MODULE_NAME_BYTES];
         stored_name[..name.len()].copy_from_slice(name);
         self.live_generations[slot] = reservation.generation();
         self.live_name_lengths[slot] = name.len() as u8;
         self.live_names[slot] = stored_name;
+        self.clear_prepared(reservation);
         Ok(X86_64LinuxModule {
             mapping: reservation,
             name: stored_name,
             name_length: name.len() as u8,
             base,
             size,
+            module_state_offset,
             lifecycle: X86_64LinuxModuleLifecycle::Committed,
             init_discard_complete: true,
         })
@@ -435,7 +504,7 @@ where
     }
 
     fn abort(&mut self, reservation: Self::Reservation) {
-        self.prepared_generations[Self::mapping_slot(reservation)] = 0;
+        self.clear_prepared(reservation);
         let result = self.memory.abort(reservation);
         self.note_reclamation_result(result);
     }
@@ -461,7 +530,9 @@ mod tests {
     use super::*;
     use crate::capability::{Authority, ModuleLoadControl};
     use crate::module::linux_ko::{LinuxExportClass, LinuxKernelSymbol, LinuxKernelSymbolResolver};
-    use crate::module::linux_loader::{LinuxKoInstallError, install_linux_module};
+    use crate::module::linux_loader::{
+        LinuxKoInstallError, LinuxKoSpecialSectionKind, install_linux_module,
+    };
 
     const ENTRY_PRESENT: u64 = 1;
     const ENTRY_WRITABLE: u64 = 1 << 1;
@@ -643,6 +714,8 @@ mod tests {
         calls: usize,
         reject: bool,
         incomplete: bool,
+        missing_state: bool,
+        state_in_text: bool,
     }
 
     unsafe impl X86_64LinuxPreSeal<TestMemory, TestTlb> for TestPreSeal {
@@ -654,7 +727,7 @@ mod tests {
             _reservation: LinuxModuleMapping,
             plan: &LinuxKoLoadPlan<'_>,
             special_sections: &[LinuxKoSpecialSection<'_>],
-        ) -> Result<LinuxKoSpecialSectionCoverage, Self::Error> {
+        ) -> Result<X86_64LinuxPreSealReceipt, Self::Error> {
             self.calls += 1;
             assert!(!plan.name().is_empty());
             assert!(plan.source_bytes().starts_with(b"\x7fELF"));
@@ -666,11 +739,27 @@ mod tests {
             if self.reject {
                 Err(TestPreSealError::Rejected)
             } else {
-                Ok(if self.incomplete {
+                let coverage = if self.incomplete {
                     LinuxKoSpecialSectionCoverage::empty()
                 } else {
                     LinuxKoSpecialSectionCoverage::from_sections(special_sections)
-                })
+                };
+                let state = special_sections
+                    .iter()
+                    .find(|section| section.kind == LinuxKoSpecialSectionKind::ModuleIdentity)
+                    .map(|section| {
+                        if self.state_in_text {
+                            plan.regions()
+                                .iter()
+                                .find(|region| region.executable)
+                                .unwrap()
+                                .image_offset
+                        } else {
+                            section.image_offset
+                        }
+                    })
+                    .filter(|_| !self.missing_state);
+                Ok(X86_64LinuxPreSealReceipt::new(coverage, state))
             }
         }
     }
@@ -751,6 +840,7 @@ mod tests {
         let live =
             unsafe { install_linux_module(&bytes, b"6.12", &Resolver, &mut backend) }.unwrap();
         assert_eq!(live.handle().name(), b"smoke");
+        assert!(live.handle().module_state_offset() < live.handle().size());
         assert_eq!(
             live.handle().lifecycle(),
             X86_64LinuxModuleLifecycle::Initialized
@@ -848,6 +938,26 @@ mod tests {
         assert_eq!(backend.live_module_count(), 0);
         assert!(backend.executor.init_calls.is_empty());
         assert_eq!(backend.memory_owner().memory().live_frames(), 3);
+    }
+
+    #[test]
+    fn missing_or_nonwritable_module_state_receipts_never_publish() {
+        let bytes = crate::module::linux_ko::tests::fixture();
+        for state_in_text in [false, true] {
+            let mut backend = backend();
+            backend.pre_seal.missing_state = !state_in_text;
+            backend.pre_seal.state_in_text = state_in_text;
+            let result = unsafe { install_linux_module(&bytes, b"6.12", &Resolver, &mut backend) };
+            assert!(matches!(
+                result,
+                Err(LinuxKoInstallError::Backend(
+                    X86_64LinuxBackendError::InvalidModuleState
+                ))
+            ));
+            assert_eq!(backend.live_module_count(), 0);
+            assert!(backend.executor.init_calls.is_empty());
+            assert_eq!(backend.memory_owner().memory().live_frames(), 3);
+        }
     }
 
     #[test]

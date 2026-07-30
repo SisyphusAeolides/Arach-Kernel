@@ -74,6 +74,7 @@ pub enum X86_64ModuleMapError<MemoryError> {
     InvalidState,
     MappingConflict,
     UnsupportedPermissions,
+    VerificationFailed,
     OutOfFrames,
     OutOfVirtualSpace,
     MetadataAllocationFailed,
@@ -236,6 +237,64 @@ where
         Ok(entry & ENTRY_PRESENT != 0
             && entry & (ENTRY_WRITABLE | ENTRY_USER | ENTRY_NO_EXECUTE) == 0
             && entry & PAGE_ADDRESS_MASK == expected_frame.as_u64())
+    }
+
+    /// Writes one bounded value to an already committed RW/NX module page.
+    ///
+    /// This path exists for kernel-owned lifecycle metadata such as
+    /// `struct module.state`. It never relaxes page permissions: the complete
+    /// write must fit in one page whose live PTE still names the mapping-owned
+    /// frame and is present, supervisor-only, writable, non-executable, and
+    /// non-huge. The new bytes are read back before success is reported.
+    pub fn write_committed_data(
+        &mut self,
+        mapping: LinuxModuleMapping,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), X86_64ModuleMapError<Memory::Error>> {
+        let slot_index = self.committed_slot(mapping)?;
+        let end = offset
+            .checked_add(bytes.len())
+            .filter(|end| *end <= self.slots[slot_index].image_size)
+            .ok_or(X86_64ModuleMapError::InvalidRange)?;
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let page = offset / PAGE_SIZE;
+        if (end - 1) / PAGE_SIZE != page {
+            return Err(X86_64ModuleMapError::InvalidRange);
+        }
+        let within = offset % PAGE_SIZE;
+        let frame = self.slots[slot_index]
+            .data_frames
+            .get(page)
+            .copied()
+            .flatten()
+            .ok_or(X86_64ModuleMapError::InvalidState)?;
+        let table = self.slots[slot_index].leaf_tables[page / PAGES_PER_EXTENT]
+            .ok_or(X86_64ModuleMapError::InvalidState)?;
+        let entry = self
+            .memory
+            .read_entry(table, page % PAGES_PER_EXTENT)
+            .map_err(X86_64ModuleMapError::Memory)?;
+        let required = ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_NO_EXECUTE;
+        if entry & PAGE_ADDRESS_MASK != frame.as_u64()
+            || entry & required != required
+            || entry & (ENTRY_USER | ENTRY_HUGE) != 0
+        {
+            return Err(X86_64ModuleMapError::UnsupportedPermissions);
+        }
+        self.memory
+            .write_bytes(frame, within, bytes)
+            .map_err(X86_64ModuleMapError::Memory)?;
+        if !self
+            .memory
+            .bytes_equal(frame, within, bytes)
+            .map_err(X86_64ModuleMapError::Memory)?
+        {
+            return Err(X86_64ModuleMapError::VerificationFailed);
+        }
+        Ok(())
     }
 
     /// Allocates zeroed data and leaf-table frames without publishing a single
@@ -1236,6 +1295,26 @@ mod tests {
             !mapper
                 .executable_address(mapping, LINUX_MODULE_WINDOW_BASE + PAGE_SIZE as u64)
                 .unwrap()
+        );
+        let state = 0x1020_3040_u32.to_le_bytes();
+        mapper
+            .write_committed_data(mapping, PAGE_SIZE + 64, &state)
+            .unwrap();
+        let writable_frame =
+            PhysicalAddress::new(mapper.memory.read_entry(leaf, 1).unwrap() & PAGE_ADDRESS_MASK);
+        assert!(
+            mapper
+                .memory
+                .bytes_equal(writable_frame, 64, &state)
+                .unwrap()
+        );
+        assert_eq!(
+            mapper.write_committed_data(mapping, 64, &state),
+            Err(X86_64ModuleMapError::UnsupportedPermissions)
+        );
+        assert_eq!(
+            mapper.write_committed_data(mapping, PAGE_SIZE * 2 - 2, &state),
+            Err(X86_64ModuleMapError::InvalidRange)
         );
         assert_eq!(
             mapper.commit(mapping),
