@@ -1,0 +1,27 @@
+[workspace]
+
+[package]
+name = "arach-c0-probe"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+publish = false
+build = "build.rs"
+
+[dependencies]
+slope = { git = "https://github.com/SisyphusAeolides/Slope.git", rev = "e1279f3a9c17638a70c55493b2851b011452a403" }
+
+[[bin]]
+name = "arach-c0-probe"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

@@ -20,6 +20,12 @@ bare-metal image has not yet been requalified under the Arach name. Arach does
 not yet satisfy the Linux userspace ABI or device interfaces required to start
 COSMIC Epoch.
 
+The C0 bundle builder now consumes immutable Push and Granite checkouts plus a
+bounded ring-3 syscall probe through explicit artifact paths. This removes the
+old monorepo target-directory dependency and proves that all four measured
+artifacts can be built together. QEMU serial execution remains the next C0
+gate; a successful build alone is not boot evidence.
+
 Sisyphus-OS remains migration input until every retained component, build
 script, asset, and relevant history has a verified destination. Do not delete
 or archive it based only on the current source import.
@@ -60,6 +66,10 @@ decision to collapse the component repositories early. See
 cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets
+
+ARACH_PUSH_ROOT=/path/to/Push \
+ARACH_GRANITE_ROOT=/path/to/Granite \
+    scripts/build-c0-bundle.sh
 ```
 
 The custom target is `x86_64-arach.json`. The `cargo kernel` alias now selects

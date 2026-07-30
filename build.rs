@@ -161,11 +161,15 @@ fn main() {
         );
         println!("cargo:rustc-link-arg-bin=arach=--gc-sections");
 
-        let push_image = workspace.join("target/x86_64-sisyphus-user/release/push");
+        println!("cargo:rerun-if-env-changed=ARACH_PUSH_IMAGE");
+        let push_image = configured_file(
+            "ARACH_PUSH_IMAGE",
+            &workspace.join("target/x86_64-sisyphus-user/release/push"),
+        );
         println!("cargo:rerun-if-changed={}", push_image.display());
         let bytes = fs::read(&push_image).unwrap_or_else(|error| {
             panic!(
-                "failed to read {}: {error}; run `cargo user-push` before building Arach",
+                "failed to read {}: {error}; set ARACH_PUSH_IMAGE to the measured Push ELF",
                 push_image.display()
             )
         });
@@ -184,11 +188,11 @@ fn main() {
         println!("cargo:rustc-env=SISYPHUS_PUSH_BYTES={}", bytes.len());
         println!("cargo:rustc-env=SISYPHUS_PUSH_ENTRY_FILE_OFFSET={entry_file_offset}");
 
-        let crest_package = selected_crest_package(&workspace);
-        let crest_bytes = crest_package.bytes;
+        let bootstrap_package = selected_bootstrap_package(&workspace);
+        let crest_bytes = bootstrap_package.bytes;
         assert!(
             !crest_bytes.is_empty() && crest_bytes.len() <= 1024 * 1024,
-            "Crest image must be between 1 byte and 1 MiB"
+            "bootstrap image must be between 1 byte and 1 MiB"
         );
         let crest_entry_file_offset = elf_entry_file_offset(&crest_bytes);
         let crest_digest = sha256(&crest_bytes);
@@ -202,15 +206,15 @@ fn main() {
         println!("cargo:rustc-env=SISYPHUS_CREST_ENTRY_FILE_OFFSET={crest_entry_file_offset}");
         println!(
             "cargo:rustc-env=SISYPHUS_CREST_PACKAGE_VERSION={}",
-            crest_package.version_index
+            bootstrap_package.version_index
         );
         println!(
             "cargo:rustc-env=SISYPHUS_CREST_SERVICE_CLASS={}",
-            crest_package.service_class
+            bootstrap_package.service_class
         );
         println!(
             "cargo:rustc-env=SISYPHUS_CREST_PROVENANCE_ROOT={}",
-            crest_package.provenance_root
+            bootstrap_package.provenance_root
         );
     }
 
@@ -374,14 +378,33 @@ cosmic_compatibility_sha256={}\ncosmic_stack_sha256={}\n",
     );
 }
 
-struct CrestPackage {
+struct BootProcessPackage {
     bytes: Vec<u8>,
     version_index: u16,
     service_class: u16,
     provenance_root: u64,
 }
 
-fn selected_crest_package(workspace: &Path) -> CrestPackage {
+fn selected_bootstrap_package(workspace: &Path) -> BootProcessPackage {
+    println!("cargo:rerun-if-env-changed=ARACH_BOOTSTRAP_IMAGE");
+    if let Some(candidate) = env::var_os("ARACH_BOOTSTRAP_IMAGE") {
+        let artifact = fs::canonicalize(PathBuf::from(candidate)).unwrap_or_else(|error| {
+            panic!("failed to resolve ARACH_BOOTSTRAP_IMAGE: {error}");
+        });
+        assert!(
+            artifact.is_file(),
+            "ARACH_BOOTSTRAP_IMAGE must name a regular file"
+        );
+        println!("cargo:rerun-if-changed={}", artifact.display());
+        let bytes = fs::read(&artifact)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", artifact.display()));
+        return BootProcessPackage {
+            provenance_root: provenance_root(&[sha256(&bytes)]),
+            bytes,
+            version_index: 1,
+            service_class: 2,
+        };
+    }
     println!("cargo:rerun-if-env-changed=SISYPHUS_CREST_PACKAGE");
     let Some(candidate) = env::var_os("SISYPHUS_CREST_PACKAGE") else {
         let image = workspace.join("target/x86_64-sisyphus-user/release/crest");
@@ -396,7 +419,7 @@ fn selected_crest_package(workspace: &Path) -> CrestPackage {
         let toolchain = workspace.join("rust-toolchain.toml");
         println!("cargo:rerun-if-changed={}", cargo_lock.display());
         println!("cargo:rerun-if-changed={}", toolchain.display());
-        return CrestPackage {
+        return BootProcessPackage {
             bytes,
             version_index: 3,
             service_class: 2,
@@ -471,7 +494,7 @@ fn selected_crest_package(workspace: &Path) -> CrestPackage {
     for path in [&manifest, &artifact, &resolution_lock, &source_lock] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
-    CrestPackage {
+    BootProcessPackage {
         bytes,
         version_index: record.package_version_index,
         service_class: record.service_class,
@@ -479,6 +502,14 @@ fn selected_crest_package(workspace: &Path) -> CrestPackage {
             measured_source(&resolution_lock),
             measured_source(&source_lock),
         ]),
+    }
+}
+
+fn configured_file(key: &str, fallback: &Path) -> PathBuf {
+    match env::var_os(key) {
+        Some(value) => fs::canonicalize(PathBuf::from(value))
+            .unwrap_or_else(|error| panic!("failed to resolve {key}: {error}")),
+        None => fallback.to_path_buf(),
     }
 }
 

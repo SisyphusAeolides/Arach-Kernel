@@ -33,3 +33,34 @@ jobs:
           path: target/formal/toolchains
           key: arach-formal-idris2-0.8.0-agda-2.8.0-v1
       - run: scripts/bootstrap-formal-toolchains.sh
+
+  c0-bundle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: SisyphusAeolides/Push
+          ref: 98b50e957ab06793301d3b1bd351719e92b88534
+          path: target/c0-sources/push
+      - uses: actions/checkout@v4
+        with:
+          repository: SisyphusAeolides/Granite
+          ref: c990385d767c49c508e3ca5271bf657d5a5b4836
+          path: target/c0-sources/granite
+      - run: sudo apt-get update && sudo apt-get install -y build-essential chezscheme gfortran libgmp-dev xz-utils curl
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          components: rust-src
+          targets: x86_64-unknown-uefi
+      - uses: actions/cache@v4
+        with:
+          path: target/formal/toolchains
+          key: arach-c0-formal-idris2-0.8.0-agda-2.8.0-v1
+      - run: scripts/bootstrap-formal-toolchains.sh
+      - run: scripts/build-c0-bundle.sh
+        env:
+          ARACH_PUSH_ROOT: ${{ github.workspace }}/target/c0-sources/push
+          ARACH_GRANITE_ROOT: ${{ github.workspace }}/target/c0-sources/granite
+      - run: git diff --check

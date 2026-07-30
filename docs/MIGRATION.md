@@ -12,10 +12,10 @@ the end of this document passes.
 | `core/*` | Separate core repositories, temporarily integrated in Arach | Imported snapshot |
 | `libraries/driver-abi/` | Driver ABI repository | Imported snapshot |
 | `libraries/slope/` | Slope ABI repository | Imported snapshot |
-| `boot/granite/` | Granite boot repository | Not migrated |
-| `userland/push/` | Push PID 1 repository | Not migrated |
-| `userland/corinth/` | Corinth package repository | Not migrated |
-| `userland/crest/` | Crest experimental desktop repository | Not migrated; not on the COSMIC critical path |
+| `boot/granite/` | `Granite` | Standalone repository established and pinned by Arach OS |
+| `userland/push/` | `Push` | Standalone repository established and pinned by Arach OS |
+| `userland/corinth/` | `Corinth` | Standalone repository established and pinned by Arach OS |
+| `userland/crest/` | Explicit discard from the production desktop | Retained only as migration input; not on the COSMIC critical path |
 | `userland/cerebral/` | Cerebral repository | Not migrated |
 | `userland/crest-wayland/` | Crest Wayland experiment repository | Not migrated |
 | `tools/reality-gate/` | Qualification tooling repository | Not migrated |
