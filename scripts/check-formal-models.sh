@@ -18,11 +18,11 @@ fail() {
 idris_sources=(
     DriverLifecycle.idr PackageTransaction.idr Crucible.idr
     AegisLifecycle.idr ArgusMarkup.idr GraniteBoot.idr
-    HermesAuthority.idr CrestShell.idr CosmicCompatibility.idr
+    HermesAuthority.idr CrestShell.idr CosmicCompatibility.idr LinuxContract.idr
 )
 agda_sources=(
     PrivilegeRings.agda ArgusLayout.agda GraniteLayout.agda
-    HermesWire.agda CrestOverlay.agda CosmicStack.agda
+    HermesWire.agda CrestOverlay.agda CosmicStack.agda LinuxContract.agda
 )
 
 for name in "${idris_sources[@]}"; do
@@ -93,7 +93,8 @@ hermes_wire_sha256=$(digest "$root/formal/agda/HermesWire.agda")
 crest_overlay_sha256=$(digest "$root/formal/agda/CrestOverlay.agda")
 cosmic_compatibility_sha256=$(digest "$root/formal/idris2/CosmicCompatibility.idr")
 cosmic_stack_sha256=$(digest "$root/formal/agda/CosmicStack.agda")
+linux_contract_idris_sha256=$(digest "$root/formal/idris2/LinuxContract.idr")
+linux_contract_agda_sha256=$(digest "$root/formal/agda/LinuxContract.agda")
 LOCK
 
 printf 'formal check passed: Idris2 0.8.0, Agda 2.8.0\n'
-

@@ -64,3 +64,16 @@ jobs:
           ARACH_PUSH_ROOT: ${{ github.workspace }}/target/c0-sources/push
           ARACH_GRANITE_ROOT: ${{ github.workspace }}/target/c0-sources/granite
       - run: git diff --check
+
+  nvidia-source-contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/open-gpu-kernel-modules
+          ref: 452cec62d827034798072827d3866d1881662b77
+          path: target/nvidia-open
+          fetch-depth: 1
+      - run: scripts/audit-nvidia-source.sh target/nvidia-open
+      - run: git diff --check

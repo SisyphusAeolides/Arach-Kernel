@@ -1,0 +1,60 @@
+# NVIDIA DKMS compatibility contract
+
+Arach targets the open NVIDIA Linux GPU kernel modules from release
+`610.43.03`, source revision
+`452cec62d827034798072827d3866d1881662b77`.
+
+This is a compatibility target, not a current compatibility claim. NVIDIA's
+build calls the Linux external-Kbuild interface and depends on generated
+configuration, `Module.symvers`, MODPOST, module linker scripts, Linux kernel
+headers, and Linux `.ko` metadata. Arach's native C driver ABI, bounded ET_REL
+loader, and Hermes GSP path do not substitute for those interfaces.
+
+## Gates
+
+Build qualification requires measured evidence for:
+
+1. external Kbuild (`make -C <kernel> M=<module>`),
+2. generated configuration and UTS release headers,
+3. exported symbols and symbol versions in `Module.symvers`,
+4. MODPOST and module linker scripts,
+5. the Linux headers consumed by NVIDIA conftests, and
+6. Linux module ELF metadata and relocations.
+
+Runtime qualification additionally requires tested Linux-KPI services for PCI,
+DMA/IOMMU, MSI/IRQ, synchronization, workqueues, timers, DRM/KMS, firmware/GSP,
+and load, unload, suspend, resume, and failure rollback.
+
+The reusable [Linux kernel compatibility contract](LINUX_KERNEL_CONTRACT.md)
+owns these gates. `src/nvidia_dkms.rs` pins the NVIDIA revision and qualifies it
+against the external-module and NVIDIA-runtime profiles. The current evidence
+is intentionally empty until the corresponding Arach implementation and
+integration test exist.
+
+## Source audit
+
+Clone the pinned official source under `target/nvidia-open`, then run:
+
+```sh
+scripts/audit-nvidia-source.sh target/nvidia-open
+```
+
+CI performs this audit against NVIDIA's official repository. It detects an
+upstream contract change; it does not claim that Arach can load the modules.
+
+## Build entry point
+
+Once Arach exports a compatible source and output tree, build with:
+
+```sh
+ARACH_KBUILD_SOURCE=/path/to/arach-kbuild/source \
+ARACH_KBUILD_OUTPUT=/path/to/arach-kbuild/output \
+NVIDIA_SOURCE_ROOT=/path/to/open-gpu-kernel-modules \
+    scripts/build-nvidia-dkms.sh
+```
+
+The command refuses to invoke NVIDIA's build when required Arach Kbuild
+artifacts are absent, and it requires non-empty `nvidia.ko`,
+`nvidia-modeset.ko`, `nvidia-drm.ko`, and `nvidia-uvm.ko` outputs. Passing that
+build gate is still insufficient for release: the produced modules must pass
+the Arach runtime lifecycle suite on supported NVIDIA hardware.

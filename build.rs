@@ -30,6 +30,8 @@ fn main() {
     let crest_overlay = workspace.join("formal/agda/CrestOverlay.agda");
     let cosmic_compatibility = workspace.join("formal/idris2/CosmicCompatibility.idr");
     let cosmic_stack = workspace.join("formal/agda/CosmicStack.agda");
+    let linux_contract_idris = workspace.join("formal/idris2/LinuxContract.idr");
+    let linux_contract_agda = workspace.join("formal/agda/LinuxContract.agda");
     let driver_digest = measured_source(&driver_lifecycle);
     let package_digest = measured_source(&package_transaction);
     let crucible_digest = measured_source(&crucible);
@@ -45,6 +47,8 @@ fn main() {
     let crest_overlay_digest = measured_source(&crest_overlay);
     let cosmic_compatibility_digest = measured_source(&cosmic_compatibility);
     let cosmic_stack_digest = measured_source(&cosmic_stack);
+    let linux_contract_idris_digest = measured_source(&linux_contract_idris);
+    let linux_contract_agda_digest = measured_source(&linux_contract_agda);
     println!("cargo:rerun-if-changed={}", driver_lifecycle.display());
     println!("cargo:rerun-if-changed={}", package_transaction.display());
     println!("cargo:rerun-if-changed={}", crucible.display());
@@ -60,6 +64,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", crest_overlay.display());
     println!("cargo:rerun-if-changed={}", cosmic_compatibility.display());
     println!("cargo:rerun-if-changed={}", cosmic_stack.display());
+    println!("cargo:rerun-if-changed={}", linux_contract_idris.display());
+    println!("cargo:rerun-if-changed={}", linux_contract_agda.display());
     println!(
         "cargo:rustc-env=SISYPHUS_DRIVER_PROOF_SHA256={}",
         encode_sha256(driver_digest)
@@ -120,6 +126,14 @@ fn main() {
         "cargo:rustc-env=ARACH_COSMIC_STACK_PROOF_SHA256={}",
         encode_sha256(cosmic_stack_digest)
     );
+    println!(
+        "cargo:rustc-env=ARACH_LINUX_CONTRACT_IDRIS_SHA256={}",
+        encode_sha256(linux_contract_idris_digest)
+    );
+    println!(
+        "cargo:rustc-env=ARACH_LINUX_CONTRACT_AGDA_SHA256={}",
+        encode_sha256(linux_contract_agda_digest)
+    );
 
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-changed=src/bootstrap.S");
@@ -150,6 +164,8 @@ fn main() {
             crest_overlay_digest,
             cosmic_compatibility_digest,
             cosmic_stack_digest,
+            linux_contract_idris_digest,
+            linux_contract_agda_digest,
         );
         let linker_script = PathBuf::from(
             env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
@@ -340,6 +356,8 @@ fn verify_formal_attestation(
     crest_overlay_digest: [u8; 32],
     cosmic_compatibility_digest: [u8; 32],
     cosmic_stack_digest: [u8; 32],
+    linux_contract_idris_digest: [u8; 32],
+    linux_contract_agda_digest: [u8; 32],
 ) {
     let path = workspace.join("target/formal/verified.lock");
     println!("cargo:rerun-if-changed={}", path.display());
@@ -355,7 +373,8 @@ driver_lifecycle_sha256={}\npackage_transaction_sha256={}\n\
 crucible_sha256={}\naegis_lifecycle_sha256={}\nargus_markup_sha256={}\ngranite_boot_sha256={}\n\
 hermes_authority_sha256={}\ncrest_shell_sha256={}\nprivilege_rings_sha256={}\nargus_layout_sha256={}\n\
 granite_layout_sha256={}\nhermes_wire_sha256={}\ncrest_overlay_sha256={}\n\
-cosmic_compatibility_sha256={}\ncosmic_stack_sha256={}\n",
+cosmic_compatibility_sha256={}\ncosmic_stack_sha256={}\n\
+linux_contract_idris_sha256={}\nlinux_contract_agda_sha256={}\n",
         encode_sha256(driver_digest),
         encode_sha256(package_digest),
         encode_sha256(crucible_digest),
@@ -371,6 +390,8 @@ cosmic_compatibility_sha256={}\ncosmic_stack_sha256={}\n",
         encode_sha256(crest_overlay_digest),
         encode_sha256(cosmic_compatibility_digest),
         encode_sha256(cosmic_stack_digest),
+        encode_sha256(linux_contract_idris_digest),
+        encode_sha256(linux_contract_agda_digest),
     );
     assert_eq!(
         actual, expected,

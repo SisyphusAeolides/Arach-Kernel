@@ -89,8 +89,24 @@ logout—not just a compositor process. The first acceptance target will be a
 pinned COSMIC Epoch release running under QEMU with virtio graphics, input,
 storage, audio, and networking before qualification expands to real hardware.
 
+The kernel and module boundaries are governed by the
+[Linux kernel compatibility contract](docs/LINUX_KERNEL_CONTRACT.md). External
+module builds, Linux `.ko` loading, in-kernel KPI, userspace UAPI, and hardware
+lifecycle are separate evidence profiles; passing one never silently certifies
+the others.
+
 The first separately versioned system integrations are
 [libinput-rs, elan-guardian, tuned-rs, and ccze-rs](docs/SYSTEM_COMPONENTS.md).
+
+## NVIDIA driver target
+
+Arach targets NVIDIA's open `610.43.03` kernel modules through a measured
+external-Kbuild and Linux-KPI compatibility layer. The pinned source audit and
+build entry point are documented in the
+[NVIDIA DKMS compatibility contract](docs/NVIDIA_DKMS.md). The current native
+module loader and Hermes GSP driver do not yet satisfy that contract, so Arach
+does not advertise NVIDIA DKMS readiness until the real module build and
+runtime lifecycle gates pass.
 
 ## License
 
