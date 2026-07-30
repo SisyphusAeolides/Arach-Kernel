@@ -25,6 +25,9 @@ const ALT_INSTR_BYTES: usize = 14;
 const ALT_FLAG_NOT: u16 = 1 << 0;
 const ALT_FLAG_DIRECT_CALL: u16 = 1 << 1;
 const ALT_SUPPORTED_FLAGS: u16 = ALT_FLAG_NOT | ALT_FLAG_DIRECT_CALL;
+const JUMP_ENTRY_BYTES: usize = 16;
+const JUMP_KEY_FLAGS: u64 = 0b11;
+const JUMP_KEY_TYPE_TRUE: u64 = 1;
 
 #[derive(Clone, Copy)]
 pub struct X86_64LinuxModuleIdentityProcessor {
@@ -278,6 +281,12 @@ pub unsafe trait X86_64AlternativeFeatures {
 
     fn feature_enabled(&self, feature: u16) -> Result<bool, Self::Error>;
 
+    /// Returns `(initial_type, enabled)` for a static key outside the module
+    /// image. Module-local keys are read from the staged image directly.
+    fn static_key_state(&self, _key: u64) -> Result<Option<(bool, bool)>, Self::Error> {
+        Ok(None)
+    }
+
     fn nop_function_address(&self) -> Option<u64> {
         None
     }
@@ -328,10 +337,12 @@ where
             .map_err(LinuxSpecialSectionError::Identity)?;
         let mut coverage = identity.coverage();
         let mut has_alternatives = false;
+        let mut has_jump_labels = false;
         for section in special_sections {
             match section.kind {
                 LinuxKoSpecialSectionKind::ModuleIdentity => {}
                 LinuxKoSpecialSectionKind::Alternatives => has_alternatives = true,
+                LinuxKoSpecialSectionKind::JumpLabels => has_jump_labels = true,
                 kind => return Err(LinuxSpecialSectionError::UnsupportedCategory(kind)),
             }
         }
@@ -346,6 +357,18 @@ where
                 &self.features,
             )?;
             coverage.acknowledge(LinuxKoSpecialSectionKind::Alternatives);
+        }
+        if has_jump_labels {
+            apply_jump_labels(
+                memory,
+                reservation,
+                plan.image_virtual_address(),
+                plan.image_size(),
+                plan.regions(),
+                special_sections,
+                &self.features,
+            )?;
+            coverage.acknowledge(LinuxKoSpecialSectionKind::JumpLabels);
         }
         Ok(X86_64LinuxPreSealReceipt::new(
             coverage,
@@ -369,6 +392,13 @@ pub enum LinuxSpecialSectionError<MemoryError, FeatureError> {
     AlternativeTargetNotExecutable,
     InvalidDirectCall,
     UnsupportedAlternativeInstruction,
+    MissingJumpLabelTable,
+    DuplicateJumpLabelTable,
+    InvalidJumpLabelTable,
+    JumpLabelKeyOutOfRange,
+    JumpLabelTargetNotExecutable,
+    JumpLabelKeyStateUnavailable,
+    InvalidJumpLabelInstruction,
     AllocationFailed,
     VerificationFailed,
 }
@@ -508,6 +538,218 @@ where
             .map_err(map_identity_memory_error)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct JumpLabelPatch {
+    image_offset: usize,
+    bytes: [u8; 5],
+    width: u8,
+}
+
+fn apply_jump_labels<Memory, Tlb, Features>(
+    memory: &mut X86_64LinuxModuleMemory<Memory, Tlb>,
+    mapping: LinuxModuleMapping,
+    image_base: u64,
+    image_size: usize,
+    regions: &[LinuxKoMemoryRegion],
+    sections: &[LinuxKoSpecialSection<'_>],
+    features: &Features,
+) -> Result<(), LinuxSpecialSectionError<Memory::Error, Features::Error>>
+where
+    Memory: ProcessFrameMemory,
+    Tlb: LinuxModuleTlb,
+    Features: X86_64AlternativeFeatures,
+{
+    let mut table = None;
+    for section in sections {
+        if section.kind == LinuxKoSpecialSectionKind::JumpLabels
+            && section.name == b"__jump_table"
+            && table.replace(*section).is_some()
+        {
+            return Err(LinuxSpecialSectionError::DuplicateJumpLabelTable);
+        }
+    }
+    let table = table.ok_or(LinuxSpecialSectionError::MissingJumpLabelTable)?;
+    if table.size == 0 || table.size % JUMP_ENTRY_BYTES != 0 {
+        return Err(LinuxSpecialSectionError::InvalidJumpLabelTable);
+    }
+
+    // Preflight every record before writing any text. A malformed later entry
+    // must not leave an earlier branch transition visible in the reservation.
+    let mut patches = Vec::new();
+    patches
+        .try_reserve_exact(table.size / JUMP_ENTRY_BYTES)
+        .map_err(|_| LinuxSpecialSectionError::AllocationFailed)?;
+    let mut record = [0; JUMP_ENTRY_BYTES];
+    for index in 0..table.size / JUMP_ENTRY_BYTES {
+        let record_offset = table
+            .image_offset
+            .checked_add(index * JUMP_ENTRY_BYTES)
+            .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+        read(memory, mapping, record_offset, &mut record).map_err(map_identity_memory_error)?;
+
+        let code_relative = i32::from_le_bytes(record[0..4].try_into().unwrap());
+        let target_relative = i32::from_le_bytes(record[4..8].try_into().unwrap());
+        let key_relative = i64::from_le_bytes(record[8..16].try_into().unwrap());
+        let code_offset =
+            relative_image_offset(image_base, image_size, record_offset, code_relative, 5)?;
+        let target_offset = relative_image_offset(
+            image_base,
+            image_size,
+            record_offset + 4,
+            target_relative,
+            1,
+        )?;
+        if !range_has_permissions(regions, code_offset, 2, true)
+            || !range_has_permissions(regions, target_offset, 1, true)
+        {
+            return Err(LinuxSpecialSectionError::JumpLabelTargetNotExecutable);
+        }
+
+        let key_flags = (key_relative as u64) & JUMP_KEY_FLAGS;
+        let key_address = relative_image_address(
+            image_base,
+            record_offset + 8,
+            key_relative & !(JUMP_KEY_FLAGS as i64),
+        )?;
+        if key_address & 7 != 0 {
+            return Err(LinuxSpecialSectionError::JumpLabelKeyOutOfRange);
+        }
+        let (initial_type, enabled) = if let Some(key_offset) = key_address
+            .checked_sub(image_base)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .filter(|offset| offset.checked_add(16).is_some_and(|end| end <= image_size))
+        {
+            let mut key_state = [0; 16];
+            read(memory, mapping, key_offset, &mut key_state).map_err(map_identity_memory_error)?;
+            (
+                u64::from_le_bytes(key_state[8..16].try_into().unwrap()) & JUMP_KEY_TYPE_TRUE != 0,
+                i32::from_le_bytes(key_state[0..4].try_into().unwrap()) > 0,
+            )
+        } else {
+            features
+                .static_key_state(key_address)
+                .map_err(LinuxSpecialSectionError::Feature)?
+                .ok_or(LinuxSpecialSectionError::JumpLabelKeyStateUnavailable)?
+        };
+        let branch = key_flags & 1 != 0;
+        let initial_jump = initial_type ^ branch;
+        let desired_jump = enabled ^ branch;
+
+        let mut current = [0; 5];
+        read(memory, mapping, code_offset, &mut current).map_err(map_identity_memory_error)?;
+        let width = jump_instruction_width(&current)
+            .ok_or(LinuxSpecialSectionError::InvalidJumpLabelInstruction)?;
+        if !range_has_permissions(regions, code_offset, width, true) {
+            return Err(LinuxSpecialSectionError::JumpLabelTargetNotExecutable);
+        }
+        let expected =
+            jump_label_bytes(image_base, code_offset, target_offset, width, initial_jump)?;
+        if current[..width] != expected[..width] {
+            return Err(LinuxSpecialSectionError::InvalidJumpLabelInstruction);
+        }
+        if desired_jump != initial_jump {
+            let bytes =
+                jump_label_bytes(image_base, code_offset, target_offset, width, desired_jump)?;
+            if let Some(previous) = patches
+                .iter()
+                .find(|patch: &&JumpLabelPatch| patch.image_offset == code_offset)
+            {
+                if usize::from(previous.width) != width || previous.bytes[..width] != bytes[..width]
+                {
+                    return Err(LinuxSpecialSectionError::InvalidJumpLabelInstruction);
+                }
+            } else {
+                patches.push(JumpLabelPatch {
+                    image_offset: code_offset,
+                    bytes,
+                    width: width as u8,
+                });
+            }
+        }
+    }
+
+    for patch in patches {
+        write_verified(
+            memory,
+            mapping,
+            patch.image_offset,
+            &patch.bytes[..usize::from(patch.width)],
+        )
+        .map_err(map_identity_memory_error)?;
+    }
+    Ok(())
+}
+
+fn relative_image_address<MemoryError, FeatureError>(
+    image_base: u64,
+    field_offset: usize,
+    relative: i64,
+) -> Result<u64, LinuxSpecialSectionError<MemoryError, FeatureError>> {
+    let field_address = image_base
+        .checked_add(field_offset as u64)
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    if relative >= 0 {
+        field_address
+            .checked_add(relative as u64)
+            .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)
+    } else {
+        field_address
+            .checked_sub(relative.unsigned_abs())
+            .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)
+    }
+}
+
+fn jump_instruction_width(bytes: &[u8; 5]) -> Option<usize> {
+    if bytes[..2] == [0x66, 0x90] || bytes[0] == 0xeb {
+        Some(2)
+    } else if bytes[..5] == [0x0f, 0x1f, 0x44, 0x00, 0x00] || bytes[0] == 0xe9 {
+        Some(5)
+    } else {
+        None
+    }
+}
+
+fn jump_label_bytes<MemoryError, FeatureError>(
+    image_base: u64,
+    code_offset: usize,
+    target_offset: usize,
+    width: usize,
+    jump: bool,
+) -> Result<[u8; 5], LinuxSpecialSectionError<MemoryError, FeatureError>> {
+    let mut bytes = [0x90; 5];
+    if !jump {
+        match width {
+            2 => bytes[..2].copy_from_slice(&[0x66, 0x90]),
+            5 => bytes[..5].copy_from_slice(&[0x0f, 0x1f, 0x44, 0x00, 0x00]),
+            _ => return Err(LinuxSpecialSectionError::InvalidJumpLabelInstruction),
+        }
+        return Ok(bytes);
+    }
+    let next = image_base
+        .checked_add(code_offset as u64)
+        .and_then(|address| address.checked_add(width as u64))
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let target = image_base
+        .checked_add(target_offset as u64)
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let displacement = i128::from(target) - i128::from(next);
+    match width {
+        2 => {
+            let displacement = i8::try_from(displacement)
+                .map_err(|_| LinuxSpecialSectionError::JumpLabelTargetNotExecutable)?;
+            bytes[..2].copy_from_slice(&[0xeb, displacement as u8]);
+        }
+        5 => {
+            let displacement = i32::try_from(displacement)
+                .map_err(|_| LinuxSpecialSectionError::JumpLabelTargetNotExecutable)?;
+            bytes[0] = 0xe9;
+            bytes[1..5].copy_from_slice(&displacement.to_le_bytes());
+        }
+        _ => return Err(LinuxSpecialSectionError::InvalidJumpLabelInstruction),
+    }
+    Ok(bytes)
 }
 
 fn map_identity_memory_error<MemoryError, FeatureError>(
@@ -1295,6 +1537,57 @@ mod tests {
                 .unwrap();
             assert_eq!(replacement, original);
         }
+    }
+
+    #[test]
+    fn patches_enabled_module_local_jump_label_and_validates_initial_nop() {
+        let mut mapper = mapper();
+        let mapping = mapper.reserve_zeroed(PAGE_SIZE * 6, PAGE_SIZE).unwrap();
+        let base = mapper.mapping_base(mapping).unwrap();
+        let code_offset = 64;
+        let target_offset = 256;
+        let table_offset = PAGE_SIZE * 2 + 128;
+        let key_offset = PAGE_SIZE * 2 + 512;
+        let key_relative = i64::try_from(key_offset as i128 - (table_offset + 8) as i128).unwrap();
+        let mut record = [0; JUMP_ENTRY_BYTES];
+        record[0..4].copy_from_slice(&relative(table_offset, code_offset).to_le_bytes());
+        record[4..8].copy_from_slice(&relative(table_offset + 4, target_offset).to_le_bytes());
+        record[8..16].copy_from_slice(&key_relative.to_le_bytes());
+
+        mapper
+            .write(mapping, code_offset, &[0x0f, 0x1f, 0x44, 0x00, 0x00])
+            .unwrap();
+        mapper.write(mapping, target_offset, &[0x90]).unwrap();
+        mapper.write(mapping, table_offset, &record).unwrap();
+        let mut key = [0; 16];
+        key[0..4].copy_from_slice(&1_i32.to_le_bytes());
+        key[8..16].copy_from_slice(&0_u64.to_le_bytes());
+        mapper.write(mapping, key_offset, &key).unwrap();
+
+        apply_jump_labels(
+            &mut mapper,
+            mapping,
+            base,
+            PAGE_SIZE * 6,
+            &regions(),
+            &[LinuxKoSpecialSection {
+                section_index: 20,
+                name: b"__jump_table",
+                image_offset: table_offset,
+                size: record.len(),
+                kind: LinuxKoSpecialSectionKind::JumpLabels,
+            }],
+            &TestFeatures(true),
+        )
+        .unwrap();
+
+        let mut observed = [0; 5];
+        mapper.read(mapping, code_offset, &mut observed).unwrap();
+        assert_eq!(observed[0], 0xe9);
+        assert_eq!(
+            i32::from_le_bytes(observed[1..5].try_into().unwrap()),
+            i32::try_from(target_offset as i64 - (code_offset + 5) as i64).unwrap()
+        );
     }
 
     #[test]

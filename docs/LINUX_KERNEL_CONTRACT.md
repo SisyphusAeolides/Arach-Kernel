@@ -96,6 +96,14 @@ POPCNT and movabs replacements are admitted. Unknown flags, instruction forms,
 or alternative targets outside executable module regions reject the module;
 they are never copied speculatively.
 
+The pre-seal processor also validates x86-64 `__jump_table` records. It reads
+module-local static-key state from staging, requires an explicit provider for
+external keys, checks the original two- or five-byte NOP/JMP form and the
+executable target, and applies all initial transitions only after the table has
+been preflighted. Dynamic static-key registration and later SMP text updates
+remain a separate runtime contract; a successfully admitted table is not
+claimed as full jump-label parity by itself.
+
 Host fault-injection tests cover stale handles, conflicting hierarchy
 ownership, allocation failure, partial page-table publication, failed seal
 rollback, partial init discard, TLB flush ordering, retryable reclamation,
@@ -104,9 +112,10 @@ dispatch retry.
 
 That is still not runtime qualification. Arach has no qualified synchronous
 all-CPU TLB implementation or concrete native lifecycle executor for this
-path. Jump labels, static calls, tracing, unwind data, parameters, exports,
-per-CPU data, and the other inventoried Linux categories still need production
-runtime processors, and no admitted module has executed in an Arach boot.
+path. Dynamic jump-label registration/updates, static calls, tracing, unwind
+data, parameters, exports, per-CPU data, and the other inventoried Linux
+categories still need production runtime processors, and no admitted module
+has executed in an Arach boot.
 `current_arach_evidence()` therefore grants no NVIDIA-runtime credit until a
 native integration suite supplies those observations.
 
