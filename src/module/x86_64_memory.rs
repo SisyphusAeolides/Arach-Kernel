@@ -252,38 +252,11 @@ where
         offset: usize,
         bytes: &[u8],
     ) -> Result<(), X86_64ModuleMapError<Memory::Error>> {
-        let slot_index = self.committed_slot(mapping)?;
-        let end = offset
-            .checked_add(bytes.len())
-            .filter(|end| *end <= self.slots[slot_index].image_size)
-            .ok_or(X86_64ModuleMapError::InvalidRange)?;
         if bytes.is_empty() {
+            self.committed_slot(mapping)?;
             return Ok(());
         }
-        let page = offset / PAGE_SIZE;
-        if (end - 1) / PAGE_SIZE != page {
-            return Err(X86_64ModuleMapError::InvalidRange);
-        }
-        let within = offset % PAGE_SIZE;
-        let frame = self.slots[slot_index]
-            .data_frames
-            .get(page)
-            .copied()
-            .flatten()
-            .ok_or(X86_64ModuleMapError::InvalidState)?;
-        let table = self.slots[slot_index].leaf_tables[page / PAGES_PER_EXTENT]
-            .ok_or(X86_64ModuleMapError::InvalidState)?;
-        let entry = self
-            .memory
-            .read_entry(table, page % PAGES_PER_EXTENT)
-            .map_err(X86_64ModuleMapError::Memory)?;
-        let required = ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_NO_EXECUTE;
-        if entry & PAGE_ADDRESS_MASK != frame.as_u64()
-            || entry & required != required
-            || entry & (ENTRY_USER | ENTRY_HUGE) != 0
-        {
-            return Err(X86_64ModuleMapError::UnsupportedPermissions);
-        }
+        let (frame, within) = self.committed_data_location(mapping, offset, bytes.len())?;
         self.memory
             .write_bytes(frame, within, bytes)
             .map_err(X86_64ModuleMapError::Memory)?;
@@ -295,6 +268,24 @@ where
             return Err(X86_64ModuleMapError::VerificationFailed);
         }
         Ok(())
+    }
+
+    /// Reads one bounded value from a committed RW/NX metadata page after the
+    /// same ownership and PTE checks used by `write_committed_data`.
+    pub fn read_committed_data(
+        &self,
+        mapping: LinuxModuleMapping,
+        offset: usize,
+        destination: &mut [u8],
+    ) -> Result<(), X86_64ModuleMapError<Memory::Error>> {
+        if destination.is_empty() {
+            self.committed_slot(mapping)?;
+            return Ok(());
+        }
+        let (frame, within) = self.committed_data_location(mapping, offset, destination.len())?;
+        self.memory
+            .read_bytes(frame, within, destination)
+            .map_err(X86_64ModuleMapError::Memory)
     }
 
     /// Allocates zeroed data and leaf-table frames without publishing a single
@@ -860,6 +851,46 @@ where
         Ok(index)
     }
 
+    fn committed_data_location(
+        &self,
+        mapping: LinuxModuleMapping,
+        offset: usize,
+        length: usize,
+    ) -> Result<(PhysicalAddress, usize), X86_64ModuleMapError<Memory::Error>> {
+        let slot_index = self.committed_slot(mapping)?;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= self.slots[slot_index].image_size)
+            .ok_or(X86_64ModuleMapError::InvalidRange)?;
+        if length == 0 {
+            return Err(X86_64ModuleMapError::InvalidRange);
+        }
+        let page = offset / PAGE_SIZE;
+        if (end - 1) / PAGE_SIZE != page {
+            return Err(X86_64ModuleMapError::InvalidRange);
+        }
+        let frame = self.slots[slot_index]
+            .data_frames
+            .get(page)
+            .copied()
+            .flatten()
+            .ok_or(X86_64ModuleMapError::InvalidState)?;
+        let table = self.slots[slot_index].leaf_tables[page / PAGES_PER_EXTENT]
+            .ok_or(X86_64ModuleMapError::InvalidState)?;
+        let entry = self
+            .memory
+            .read_entry(table, page % PAGES_PER_EXTENT)
+            .map_err(X86_64ModuleMapError::Memory)?;
+        let required = ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_NO_EXECUTE;
+        if entry & PAGE_ADDRESS_MASK != frame.as_u64()
+            || entry & required != required
+            || entry & (ENTRY_USER | ENTRY_HUGE) != 0
+        {
+            return Err(X86_64ModuleMapError::UnsupportedPermissions);
+        }
+        Ok((frame, offset % PAGE_SIZE))
+    }
+
     fn clear_leaf_prefix(&mut self, slot_index: usize, count: usize) -> bool {
         let mut cleared = true;
         for page in 0..count {
@@ -1308,6 +1339,11 @@ mod tests {
                 .bytes_equal(writable_frame, 64, &state)
                 .unwrap()
         );
+        let mut observed_state = [0; 4];
+        mapper
+            .read_committed_data(mapping, PAGE_SIZE + 64, &mut observed_state)
+            .unwrap();
+        assert_eq!(observed_state, state);
         assert_eq!(
             mapper.write_committed_data(mapping, 64, &state),
             Err(X86_64ModuleMapError::UnsupportedPermissions)

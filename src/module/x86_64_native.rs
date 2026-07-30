@@ -16,6 +16,8 @@ use crate::module::x86_64_memory::{
 use crate::process::x86_64::ProcessFrameMemory;
 
 pub const LINUX_MODULE_NAME_BYTES: usize = 56;
+const MODULE_STATE_LIVE: u32 = 0;
+const MODULE_STATE_GOING: u32 = 2;
 
 /// Auditable metadata produced while the module image is still inaccessible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +105,7 @@ pub enum X86_64LinuxModuleLifecycle {
     Committed,
     Initialized,
     InitializationFailed,
+    Unloading,
     Cleaned,
 }
 
@@ -459,12 +462,33 @@ where
         }
         let status = unsafe { self.executor.invoke_init(address) }
             .map_err(X86_64LinuxBackendError::Execution)?;
+        Ok(status)
+    }
+
+    fn complete_init(&mut self, module: &mut Self::Module, status: i32) -> Result<(), Self::Error> {
+        if !self.registry_matches(module)
+            || module.lifecycle != X86_64LinuxModuleLifecycle::Committed
+        {
+            return Err(X86_64LinuxBackendError::InvalidLifecycle);
+        }
+        let state = if status == 0 {
+            MODULE_STATE_LIVE
+        } else {
+            MODULE_STATE_GOING
+        };
+        self.memory
+            .write_committed_data(
+                module.mapping,
+                module.module_state_offset,
+                &state.to_le_bytes(),
+            )
+            .map_err(X86_64LinuxBackendError::Memory)?;
         module.lifecycle = if status == 0 {
             X86_64LinuxModuleLifecycle::Initialized
         } else {
             X86_64LinuxModuleLifecycle::InitializationFailed
         };
-        Ok(status)
+        Ok(())
     }
 
     fn discard_init(&mut self, module: &mut Self::Module, offset: usize, size: usize) {
@@ -480,13 +504,34 @@ where
         self.note_reclamation_result(result);
     }
 
+    fn begin_cleanup(&mut self, module: &mut Self::Module) -> Result<(), Self::Error> {
+        if !self.registry_matches(module) {
+            return Err(X86_64LinuxBackendError::InvalidLifecycle);
+        }
+        if module.lifecycle == X86_64LinuxModuleLifecycle::Unloading {
+            return Ok(());
+        }
+        if module.lifecycle != X86_64LinuxModuleLifecycle::Initialized {
+            return Err(X86_64LinuxBackendError::InvalidLifecycle);
+        }
+        self.memory
+            .write_committed_data(
+                module.mapping,
+                module.module_state_offset,
+                &MODULE_STATE_GOING.to_le_bytes(),
+            )
+            .map_err(X86_64LinuxBackendError::Memory)?;
+        module.lifecycle = X86_64LinuxModuleLifecycle::Unloading;
+        Ok(())
+    }
+
     unsafe fn invoke_cleanup(
         &mut self,
         module: &mut Self::Module,
         address: u64,
     ) -> Result<(), Self::Error> {
         if !self.registry_matches(module)
-            || module.lifecycle != X86_64LinuxModuleLifecycle::Initialized
+            || module.lifecycle != X86_64LinuxModuleLifecycle::Unloading
         {
             return Err(X86_64LinuxBackendError::InvalidLifecycle);
         }
@@ -833,6 +878,15 @@ mod tests {
         X86_64LinuxNativeBackend::new(memory, TestPreSeal::default(), TestExecutor::default())
     }
 
+    fn module_state(backend: &Backend, module: &X86_64LinuxModule) -> u32 {
+        let mut bytes = [0; 4];
+        backend
+            .memory
+            .read_committed_data(module.mapping, module.module_state_offset, &mut bytes)
+            .unwrap();
+        u32::from_le_bytes(bytes)
+    }
+
     #[test]
     fn full_native_transaction_preserves_name_lifecycle_and_reclamation() {
         let bytes = crate::module::linux_ko::tests::fixture();
@@ -845,6 +899,7 @@ mod tests {
             live.handle().lifecycle(),
             X86_64LinuxModuleLifecycle::Initialized
         );
+        assert_eq!(module_state(&backend, live.handle()), MODULE_STATE_LIVE);
         assert!(live.handle().init_discard_complete());
         assert_eq!(backend.pre_seal.calls, 1);
         assert_eq!(backend.executor.init_calls.len(), 1);
@@ -889,6 +944,11 @@ mod tests {
             }
             _ => panic!("cleanup failure did not preserve native ownership"),
         };
+        assert_eq!(
+            live.handle().lifecycle(),
+            X86_64LinuxModuleLifecycle::Unloading
+        );
+        assert_eq!(module_state(&backend, live.handle()), MODULE_STATE_GOING);
         assert_eq!(backend.live_module_count(), 1);
         assert!(unsafe { live.unload(&mut backend) }.is_ok());
         assert_eq!(backend.live_module_count(), 0);

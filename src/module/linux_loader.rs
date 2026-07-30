@@ -607,8 +607,19 @@ pub trait LinuxKoBackend {
         address: u64,
     ) -> Result<i32, Self::Error>;
 
+    /// Publishes the state implied by a completed initialization callback.
+    /// A zero status makes the module live; a nonzero status marks it going.
+    /// On failure the committed module remains owned and this operation may be
+    /// retried with the same status.
+    fn complete_init(&mut self, module: &mut Self::Module, status: i32) -> Result<(), Self::Error>;
+
     /// Revokes and schedules reclamation of the init-only mapping.
     fn discard_init(&mut self, module: &mut Self::Module, offset: usize, size: usize);
+
+    /// Stops new users and publishes the going state before cleanup begins.
+    /// This operation must be idempotent so an unentered cleanup callback can
+    /// be retried without reopening the module to users.
+    fn begin_cleanup(&mut self, module: &mut Self::Module) -> Result<(), Self::Error>;
 
     /// Calls the sealed cleanup address. `Err` guarantees the callback was not
     /// entered, allowing the caller to retain and retry the live module.
@@ -655,6 +666,9 @@ impl<Module> LiveLinuxModule<Module> {
     where
         Backend: LinuxKoBackend<Module = Module>,
     {
+        if let Err(error) = backend.begin_cleanup(&mut self.handle) {
+            return Err((self, error));
+        }
         if let Some(address) = self.cleanup_address {
             if let Err(error) = unsafe { backend.invoke_cleanup(&mut self.handle, address) } {
                 return Err((self, error));
@@ -665,12 +679,87 @@ impl<Module> LiveLinuxModule<Module> {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum LinuxKoInstallError<BackendError> {
+/// A callback has returned but its Linux-visible state has not yet been
+/// published. Ownership is retained so publication can be retried safely.
+pub struct PendingLinuxModule<Module> {
+    handle: Module,
+    cleanup_address: Option<u64>,
+    init_status: i32,
+}
+
+impl<Module> core::fmt::Debug for PendingLinuxModule<Module> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PendingLinuxModule")
+            .field("cleanup_address", &self.cleanup_address)
+            .field("init_status", &self.init_status)
+            .finish_non_exhaustive()
+    }
+}
+
+pub enum LinuxKoInitCompletion<Module> {
+    Live(LiveLinuxModule<Module>),
+    Failed(i32),
+}
+
+impl<Module> PendingLinuxModule<Module> {
+    pub const fn init_status(&self) -> i32 {
+        self.init_status
+    }
+
+    /// Retries the state publication that follows a returned init callback.
+    /// A failed init is released only after its going state is published.
+    pub fn complete<Backend>(
+        mut self,
+        backend: &mut Backend,
+    ) -> Result<LinuxKoInitCompletion<Module>, (Self, Backend::Error)>
+    where
+        Backend: LinuxKoBackend<Module = Module>,
+    {
+        if let Err(error) = backend.complete_init(&mut self.handle, self.init_status) {
+            return Err((self, error));
+        }
+        if self.init_status == 0 {
+            Ok(LinuxKoInitCompletion::Live(LiveLinuxModule {
+                handle: self.handle,
+                cleanup_address: self.cleanup_address,
+            }))
+        } else {
+            let status = self.init_status;
+            backend.release(self.handle);
+            Ok(LinuxKoInitCompletion::Failed(status))
+        }
+    }
+}
+
+pub enum LinuxKoInstallError<BackendError, Module> {
     Load(LinuxKoLoadError),
     Backend(BackendError),
     VerificationFailed,
     InitFailed(i32),
+    StatePublication {
+        pending: PendingLinuxModule<Module>,
+        error: BackendError,
+    },
+}
+
+impl<BackendError, Module> core::fmt::Debug for LinuxKoInstallError<BackendError, Module>
+where
+    BackendError: core::fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Load(error) => formatter.debug_tuple("Load").field(error).finish(),
+            Self::Backend(error) => formatter.debug_tuple("Backend").field(error).finish(),
+            Self::VerificationFailed => formatter.write_str("VerificationFailed"),
+            Self::InitFailed(status) => formatter.debug_tuple("InitFailed").field(status).finish(),
+            Self::StatePublication { pending, error } => formatter
+                .debug_struct("StatePublication")
+                .field("pending", pending)
+                .field("error", error)
+                .finish(),
+        }
+    }
 }
 
 /// Reserves, binds, relocates, seals and initializes one Linux module.
@@ -685,7 +774,7 @@ pub unsafe fn install_linux_module<'a, Resolver, Backend>(
     expected_vermagic: &[u8],
     resolver: &Resolver,
     backend: &mut Backend,
-) -> Result<LiveLinuxModule<Backend::Module>, LinuxKoInstallError<Backend::Error>>
+) -> Result<LiveLinuxModule<Backend::Module>, LinuxKoInstallError<Backend::Error, Backend::Module>>
 where
     Resolver: LinuxKernelSymbolResolver + ?Sized,
     Backend: LinuxKoBackend,
@@ -742,17 +831,21 @@ where
             return Err(LinuxKoInstallError::Backend(error));
         }
     };
-    if status != 0 {
-        backend.release(module);
-        return Err(LinuxKoInstallError::InitFailed(status));
-    }
-    if plan.init_size != 0 {
-        backend.discard_init(&mut module, plan.core_size, plan.init_size);
-    }
-    Ok(LiveLinuxModule {
+    let pending = PendingLinuxModule {
         handle: module,
         cleanup_address: plan.cleanup_address,
-    })
+        init_status: status,
+    };
+    match pending.complete(backend) {
+        Ok(LinuxKoInitCompletion::Live(mut live)) => {
+            if plan.init_size != 0 {
+                backend.discard_init(&mut live.handle, plan.core_size, plan.init_size);
+            }
+            Ok(live)
+        }
+        Ok(LinuxKoInitCompletion::Failed(status)) => Err(LinuxKoInstallError::InitFailed(status)),
+        Err((pending, error)) => Err(LinuxKoInstallError::StatePublication { pending, error }),
+    }
 }
 
 fn write_verified<Backend: LinuxKoBackend>(
@@ -760,7 +853,7 @@ fn write_verified<Backend: LinuxKoBackend>(
     reservation: Backend::Reservation,
     offset: usize,
     bytes: &[u8],
-) -> Result<(), LinuxKoInstallError<Backend::Error>> {
+) -> Result<(), LinuxKoInstallError<Backend::Error, Backend::Module>> {
     backend
         .write(reservation, offset, bytes)
         .map_err(LinuxKoInstallError::Backend)?;
@@ -1430,6 +1523,7 @@ mod tests {
     enum BackendError {
         InvalidOperation,
         PrepareUnavailable,
+        StateUnavailable,
         CleanupUnavailable,
     }
 
@@ -1453,6 +1547,7 @@ mod tests {
         cleanup_calls: usize,
         init_status: i32,
         cleanup_failures: usize,
+        state_failures: usize,
     }
 
     impl DryBackend {
@@ -1472,6 +1567,7 @@ mod tests {
                 cleanup_calls: 0,
                 init_status: 0,
                 cleanup_failures: 0,
+                state_failures: 0,
             }
         }
     }
@@ -1604,9 +1700,27 @@ mod tests {
             Ok(self.init_status)
         }
 
+        fn complete_init(
+            &mut self,
+            module: &mut Self::Module,
+            status: i32,
+        ) -> Result<(), Self::Error> {
+            if self.state_failures != 0 {
+                self.state_failures -= 1;
+                return Err(BackendError::StateUnavailable);
+            }
+            module.image[0] = if status == 0 { 0 } else { 2 };
+            Ok(())
+        }
+
         fn discard_init(&mut self, module: &mut Self::Module, offset: usize, size: usize) {
             module.image[offset..offset + size].fill(0);
             self.discarded = Some((offset, size));
+        }
+
+        fn begin_cleanup(&mut self, module: &mut Self::Module) -> Result<(), Self::Error> {
+            module.image[0] = 2;
+            Ok(())
         }
 
         unsafe fn invoke_cleanup(
@@ -1765,6 +1879,29 @@ mod tests {
         assert_eq!(backend.released, 1);
         assert_eq!(backend.aborted, 0);
         assert!(backend.discarded.is_none());
+    }
+
+    #[test]
+    fn failed_state_publication_returns_retryable_committed_ownership() {
+        let bytes = super::linux_ko::tests::fixture();
+        let mut backend = DryBackend::new();
+        backend.state_failures = 1;
+        let pending =
+            match unsafe { install_linux_module(&bytes, b"6.12", &Resolver, &mut backend) } {
+                Err(LinuxKoInstallError::StatePublication {
+                    pending,
+                    error: BackendError::StateUnavailable,
+                }) => pending,
+                _ => panic!("state-publication failure did not preserve ownership"),
+            };
+        assert_eq!(pending.init_status(), 0);
+        assert_eq!(backend.released, 0);
+        let live = match pending.complete(&mut backend).unwrap() {
+            LinuxKoInitCompletion::Live(live) => live,
+            LinuxKoInitCompletion::Failed(_) => panic!("successful init became failed"),
+        };
+        assert!(unsafe { live.unload(&mut backend) }.is_ok());
+        assert_eq!(backend.released, 1);
     }
 
     #[test]
