@@ -5,7 +5,9 @@
 //! processing and lifecycle invocation to explicit unsafe contracts; there is
 //! no permissive no-op processor or host-call fallback.
 
-use crate::module::linux_loader::{LinuxKoBackend, LinuxKoLoadPlan, LinuxKoMemoryRegion};
+use crate::module::linux_loader::{
+    LinuxKoBackend, LinuxKoLoadPlan, LinuxKoMemoryRegion, LinuxKoSpecialSection,
+};
 use crate::module::x86_64_memory::{
     LinuxModuleMapping, LinuxModuleTlb, MAXIMUM_LIVE_LINUX_MODULES, X86_64LinuxModuleMemory,
     X86_64ModuleMapError,
@@ -34,6 +36,7 @@ where
         memory: &mut X86_64LinuxModuleMemory<Memory, Tlb>,
         reservation: LinuxModuleMapping,
         plan: &LinuxKoLoadPlan<'_>,
+        special_sections: &[LinuxKoSpecialSection<'_>],
     ) -> Result<(), Self::Error>;
 }
 
@@ -58,6 +61,7 @@ pub enum X86_64LinuxBackendError<MemoryError, PreSealError, ExecutorError> {
     Execution(ExecutorError),
     InvalidModuleName,
     DuplicateModuleName,
+    InvalidSpecialSectionInventory,
     InvalidLifecycle,
     InvalidLifecycleAddress,
 }
@@ -294,8 +298,11 @@ where
         {
             return Err(X86_64LinuxBackendError::InvalidLifecycle);
         }
+        let special_sections = plan
+            .special_sections()
+            .map_err(|_| X86_64LinuxBackendError::InvalidSpecialSectionInventory)?;
         self.pre_seal
-            .prepare(&mut self.memory, reservation, plan)
+            .prepare(&mut self.memory, reservation, plan, &special_sections)
             .map_err(X86_64LinuxBackendError::PreSeal)?;
         self.prepared_generations[slot] = reservation.generation();
         Ok(())
@@ -623,10 +630,16 @@ mod tests {
             _memory: &mut X86_64LinuxModuleMemory<TestMemory, TestTlb>,
             _reservation: LinuxModuleMapping,
             plan: &LinuxKoLoadPlan<'_>,
+            special_sections: &[LinuxKoSpecialSection<'_>],
         ) -> Result<(), Self::Error> {
             self.calls += 1;
             assert!(!plan.name().is_empty());
             assert!(plan.source_bytes().starts_with(b"\x7fELF"));
+            assert!(
+                special_sections
+                    .iter()
+                    .any(|section| section.name == b".gnu.linkonce.this_module")
+            );
             if self.reject {
                 Err(TestPreSealError::Rejected)
             } else {

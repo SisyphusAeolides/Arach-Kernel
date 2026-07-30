@@ -108,6 +108,40 @@ pub struct LinuxKoSectionPlacement {
     file_size: usize,
 }
 
+/// Runtime work implied by an allocated Linux module section.
+///
+/// These categories are deliberately semantic rather than a collection of
+/// booleans. A native backend must either process/register every reported
+/// category or reject the transaction before executable mappings are
+/// published.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinuxKoSpecialSectionKind {
+    ModuleIdentity,
+    Alternatives,
+    JumpLabels,
+    StaticCalls,
+    DynamicTracing,
+    CpuLockPatching,
+    CallSitePatching,
+    OrcUnwind,
+    BugTable,
+    Parameters,
+    Tracepoints,
+    SymbolExports,
+    PerCpu,
+    AllocationTags,
+    PrintkIndex,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinuxKoSpecialSection<'a> {
+    pub section_index: usize,
+    pub name: &'a [u8],
+    pub image_offset: usize,
+    pub size: usize,
+    pub kind: LinuxKoSpecialSectionKind,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PreparedPatch {
     image_offset: usize,
@@ -328,6 +362,53 @@ impl LinuxKoLoadPlan<'_> {
         &self.placements
     }
 
+    /// Returns the immutable ELF name for one allocated placement.
+    pub fn section_name<'a>(
+        &'a self,
+        placement: &LinuxKoSectionPlacement,
+    ) -> Result<&'a [u8], LinuxKoLoadError> {
+        if !self
+            .placements
+            .iter()
+            .any(|candidate| candidate == placement)
+        {
+            return Err(LinuxKoLoadError::InvalidSectionLayout);
+        }
+        let module = ElfModule::parse(self.bytes).map_err(LinuxKoLoadError::Elf)?;
+        let section = module
+            .section(placement.section_index)
+            .ok_or(LinuxKoLoadError::InvalidSectionLayout)?;
+        module.section_name(section).map_err(LinuxKoLoadError::Elf)
+    }
+
+    /// Inventories every measured Linux/x86-64 section that requires
+    /// pre-publication transformation or runtime registration.
+    pub fn special_sections(&self) -> Result<Vec<LinuxKoSpecialSection<'_>>, LinuxKoLoadError> {
+        let module = ElfModule::parse(self.bytes).map_err(LinuxKoLoadError::Elf)?;
+        let mut special = Vec::new();
+        special
+            .try_reserve_exact(self.placements.len())
+            .map_err(|_| LinuxKoLoadError::PlanAllocationFailed)?;
+        for placement in &self.placements {
+            let section = module
+                .section(placement.section_index)
+                .ok_or(LinuxKoLoadError::InvalidSectionLayout)?;
+            let name = module
+                .section_name(section)
+                .map_err(LinuxKoLoadError::Elf)?;
+            if let Some(kind) = classify_special_section(name) {
+                special.push(LinuxKoSpecialSection {
+                    section_index: placement.section_index,
+                    name,
+                    image_offset: placement.image_offset,
+                    size: placement.memory_size,
+                    kind,
+                });
+            }
+        }
+        Ok(special)
+    }
+
     pub fn regions(&self) -> &[LinuxKoMemoryRegion] {
         &self.regions
     }
@@ -360,6 +441,39 @@ impl LinuxKoLoadPlan<'_> {
         }
         Ok(())
     }
+}
+
+fn classify_special_section(name: &[u8]) -> Option<LinuxKoSpecialSectionKind> {
+    use LinuxKoSpecialSectionKind as Kind;
+
+    Some(match name {
+        b".gnu.linkonce.this_module" => Kind::ModuleIdentity,
+        b".altinstructions" | b".altinstr_replacement" | b".altinstr_aux" => Kind::Alternatives,
+        b"__jump_table" => Kind::JumpLabels,
+        b".static_call_sites" | b".static_call.text" | b".static_call_tramp_key" => {
+            Kind::StaticCalls
+        }
+        b"__mcount_loc" | b"__patchable_function_entries" | b"_ftrace_events" => {
+            Kind::DynamicTracing
+        }
+        b".smp_locks" => Kind::CpuLockPatching,
+        b".retpoline_sites" | b".return_sites" | b".call_sites" | b".ibt_endbr_seal" => {
+            Kind::CallSitePatching
+        }
+        b".orc_unwind" | b".orc_unwind_ip" | b".orc_header" => Kind::OrcUnwind,
+        b"__bug_table" => Kind::BugTable,
+        b"__param" => Kind::Parameters,
+        b"__tracepoints"
+        | b"__tracepoints_ptrs"
+        | b"__tracepoints_strings"
+        | b"__bpf_raw_tp_map" => Kind::Tracepoints,
+        b"__ksymtab" | b"__ksymtab_gpl" | b"__kcrctab" | b"__kcrctab_gpl"
+        | b"__ksymtab_strings" => Kind::SymbolExports,
+        b".data..percpu" => Kind::PerCpu,
+        b".codetag.alloc_tags" => Kind::AllocationTags,
+        b".printk_index" => Kind::PrintkIndex,
+        _ => return None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1540,6 +1654,59 @@ mod tests {
             &image[target.image_offset..target.image_offset + 8],
             &EXTERNAL_ADDRESS.to_le_bytes()
         );
+    }
+
+    #[test]
+    fn inventories_runtime_special_sections_without_marking_admission_metadata() {
+        let bytes = super::linux_ko::tests::fixture();
+        let plan = LinuxKoLoadBlueprint::parse(&bytes)
+            .unwrap()
+            .bind(IMAGE_BASE, b"6.12", &Resolver)
+            .unwrap();
+        let special = plan.special_sections().unwrap();
+
+        assert_eq!(special.len(), 1);
+        assert_eq!(special[0].name, b".gnu.linkonce.this_module");
+        assert_eq!(special[0].kind, LinuxKoSpecialSectionKind::ModuleIdentity);
+        assert!(special[0].size > 0);
+        assert_eq!(
+            plan.section_name(
+                plan.sections()
+                    .iter()
+                    .find(|section| section.section_index == 2)
+                    .unwrap()
+            )
+            .unwrap(),
+            b".modinfo"
+        );
+    }
+
+    #[test]
+    fn classifies_measured_rhel_and_nvidia_runtime_sections() {
+        use LinuxKoSpecialSectionKind as Kind;
+
+        let cases: &[(&[u8], Kind)] = &[
+            (b".altinstructions", Kind::Alternatives),
+            (b"__jump_table", Kind::JumpLabels),
+            (b".static_call_sites", Kind::StaticCalls),
+            (b"__patchable_function_entries", Kind::DynamicTracing),
+            (b".smp_locks", Kind::CpuLockPatching),
+            (b".return_sites", Kind::CallSitePatching),
+            (b".orc_unwind_ip", Kind::OrcUnwind),
+            (b"__bug_table", Kind::BugTable),
+            (b"__param", Kind::Parameters),
+            (b"__tracepoints_ptrs", Kind::Tracepoints),
+            (b"__ksymtab_gpl", Kind::SymbolExports),
+            (b".data..percpu", Kind::PerCpu),
+            (b".codetag.alloc_tags", Kind::AllocationTags),
+            (b".printk_index", Kind::PrintkIndex),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(classify_special_section(name), Some(*expected));
+        }
+        assert_eq!(classify_special_section(b".text"), None);
+        assert_eq!(classify_special_section(b".modinfo"), None);
+        assert_eq!(classify_special_section(b"__versions"), None);
     }
 
     #[test]

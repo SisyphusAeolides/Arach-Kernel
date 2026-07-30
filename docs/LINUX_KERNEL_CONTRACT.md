@@ -72,10 +72,17 @@ address validation, duplicate-name rejection, and cleanup retry semantics.
 The generic installer now requires `prepare_for_seal` after every byte and
 relocation has been verified but before any page becomes present. Native
 backends must supply an unsafe pre-seal processor that handles every required
-Linux and architecture special section or rejects the module. Lifecycle
-dispatch is a separate unsafe executor contract whose error path guarantees
-module control was never entered. There are intentionally no permissive no-op
-or host-call implementations of either contract.
+Linux and architecture special section or rejects the module. The load plan
+now derives a typed inventory from the allocated sections measured in the RHEL
+smoke and NVIDIA open-module artifacts. It distinguishes module identity,
+alternatives, jump labels, static calls, dynamic tracing, SMP-lock and call-site
+patching, ORC unwind data, bug tables, parameters, tracepoints, exports,
+per-CPU data, allocation tags and printk indexes. That inventory is an explicit
+argument to the unsafe processor, so these sections cannot remain hidden behind
+a generic byte image. Lifecycle dispatch is a separate unsafe executor contract
+whose error path guarantees module control was never entered. There are
+intentionally no permissive no-op or host-call implementations of either
+contract.
 
 Host fault-injection tests cover stale handles, conflicting hierarchy
 ownership, allocation failure, partial page-table publication, failed seal
