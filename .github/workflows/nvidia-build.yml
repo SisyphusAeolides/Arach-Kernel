@@ -1,0 +1,76 @@
+name: NVIDIA Linux contract build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/nvidia-build.yml
+      - Cargo.lock
+      - Cargo.toml
+      - build.rs
+      - compat/linux-module-smoke/**
+      - scripts/audit-nvidia-source.sh
+      - scripts/build-nvidia-dkms.sh
+      - scripts/materialize-linux-contract-sdk.sh
+      - scripts/test-linux-kbuild-sdk.sh
+      - src/linux_contract.rs
+      - src/module/**
+      - src/nvidia_dkms.rs
+  pull_request:
+    paths:
+      - .github/workflows/nvidia-build.yml
+      - Cargo.lock
+      - Cargo.toml
+      - build.rs
+      - compat/linux-module-smoke/**
+      - scripts/audit-nvidia-source.sh
+      - scripts/build-nvidia-dkms.sh
+      - scripts/materialize-linux-contract-sdk.sh
+      - scripts/test-linux-kbuild-sdk.sh
+      - src/linux_contract.rs
+      - src/module/**
+      - src/nvidia_dkms.rs
+
+permissions:
+  contents: read
+
+jobs:
+  nvidia-kbuild:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/open-gpu-kernel-modules
+          ref: 452cec62d827034798072827d3866d1881662b77
+          path: target/nvidia-open
+          fetch-depth: 1
+      - name: Install Kbuild dependencies
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y
+          binutils build-essential gfortran kmod libelf-dev
+          linux-headers-generic pkg-config xz-utils
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+      - name: Materialize measured Linux contract SDK
+        run: |
+          sdk=$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' -print | sort -V | tail -n 1)
+          test -n "$sdk"
+          scripts/materialize-linux-contract-sdk.sh "$sdk"
+      - name: Build external Kbuild smoke module
+        env:
+          ARACH_KBUILD_SOURCE: ${{ github.workspace }}/target/arach-kbuild/source
+          ARACH_KBUILD_OUTPUT: ${{ github.workspace }}/target/arach-kbuild/output
+        run: scripts/test-linux-kbuild-sdk.sh
+      - name: Build and inspect NVIDIA modules
+        env:
+          NVIDIA_BUILD_JOBS: 4
+        run: scripts/build-nvidia-dkms.sh
+      - name: Show qualification measurements
+        run: |
+          cat target/arach-kbuild/manifest.json
+          cat target/linux-contract/kbuild-measurement.json
+          cat target/nvidia-dkms/build-measurement.json

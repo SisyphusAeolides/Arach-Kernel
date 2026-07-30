@@ -9,7 +9,7 @@ const SECTION_TYPE_NULL: u32 = 0;
 const SECTION_TYPE_STRING_TABLE: u32 = 3;
 const SECTION_TYPE_NOBITS: u32 = 8;
 const UNDEFINED_SECTION: u16 = 0;
-const MAXIMUM_SECTIONS: usize = 96;
+const MAXIMUM_SECTIONS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ElfError {

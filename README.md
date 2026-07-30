@@ -67,6 +67,9 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets
 
+scripts/materialize-linux-contract-sdk.sh /usr/src/kernels/$(uname -r)
+scripts/test-linux-kbuild-sdk.sh
+
 ARACH_PUSH_ROOT=/path/to/Push \
 ARACH_GRANITE_ROOT=/path/to/Granite \
     scripts/build-c0-bundle.sh

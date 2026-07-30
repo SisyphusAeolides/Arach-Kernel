@@ -58,3 +58,10 @@ artifacts are absent, and it requires non-empty `nvidia.ko`,
 `nvidia-modeset.ko`, `nvidia-drm.ko`, and `nvidia-uvm.ko` outputs. Passing that
 build gate is still insufficient for release: the produced modules must pass
 the Arach runtime lifecycle suite on supported NVIDIA hardware.
+
+The default build uses four workers and may be overridden with
+`NVIDIA_BUILD_JOBS`. Every required module is checked for `.modinfo` and exact
+contract-SDK vermagic, then its SHA-256 digest is recorded in
+`target/nvidia-dkms/build-measurement.json`. The report explicitly keeps
+runtime qualification false until the Arach loader and GPU lifecycle suites
+pass.
