@@ -14,7 +14,7 @@ fn main() {
     let manifest_directory = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
     );
-    let workspace = manifest_directory.join("../..");
+    let workspace = manifest_directory.clone();
     let driver_lifecycle = workspace.join("formal/idris2/DriverLifecycle.idr");
     let package_transaction = workspace.join("formal/idris2/PackageTransaction.idr");
     let crucible = workspace.join("formal/idris2/Crucible.idr");

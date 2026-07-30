@@ -12,12 +12,12 @@ reference-driver = []
 kernel-bin = []
 
 [dependencies]
-aether = { path = "../../core/aether" }
-abyss = { path = "../../core/abyss" }
-blacklab = { path = "../../core/blacklab" }
-kairos = { path = "../../core/kairos" }
-sisyphus-driver-abi = { path = "../../libraries/driver-abi" }
-slope = { path = "../../libraries/slope" }
+aether = { path = "core/aether" }
+abyss = { path = "core/abyss" }
+blacklab = { path = "core/blacklab" }
+kairos = { path = "core/kairos" }
+sisyphus-driver-abi = { path = "libraries/driver-abi" }
+slope = { path = "libraries/slope" }
 libm = "0.2.16"
 
 [lib]
@@ -32,3 +32,27 @@ bench = false
 
 [lints]
 workspace = true
+
+[workspace]
+resolver = "3"
+members = [
+    "core/*",
+    "libraries/*",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
