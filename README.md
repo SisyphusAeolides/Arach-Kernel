@@ -7,36 +7,58 @@
 [![Arach validation](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/ci.yml)
 [![NVIDIA Linux contract](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/nvidia-build.yml/badge.svg?branch=main)](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/nvidia-build.yml)
 
-Arach is the experimental, Rust-first monolithic kernel for Arach OS. Its
-userspace compatibility target is an unmodified, reproducibly pinned release
-of COSMIC Epoch on x86-64 systems.
+Arach Kernel is the Rust-first monolithic kernel at the foundation of
+[Arach OS](https://github.com/SisyphusAeolides/Arach-OS). It is being built for
+x86-64 systems with a Linux-compatible userspace contract and an unmodified,
+reproducibly pinned COSMIC Epoch desktop as its first complete graphical
+environment.
 
 Monolithic describes the kernel architecture: core scheduling, memory,
 interrupt, device, filesystem, and networking services may execute in the
 kernel address space. It does **not** move PID 1, the COSMIC compositor, D-Bus,
 PipeWire, or ordinary applications into ring 0.
 
+## Design goals
+
+- Boot a complete Arach OS system through the independently versioned Granite
+  bootloader and Push PID 1.
+- Run the full COSMIC Epoch experience, including the greeter, compositor,
+  portals, applications, audio, networking, suspend, and session lifecycle.
+- Provide a measured Linux compatibility contract for userspace and external
+  kernel modules without silently claiming support that has not passed a gate.
+- Support real hardware through native drivers and qualified Linux-compatible
+  modules, including NVIDIA's open kernel modules.
+- Use Rust for the kernel runtime, with deliberately bounded roles for C,
+  Fortran, Idris 2, and Agda.
+
 ## Current status
 
-Arach is an active kernel implementation, not yet a bootable COSMIC operating
-system release. Status claims are tied to executable gates:
+Arach Kernel is under active development. The workspace and its compatibility
+contracts are extensively host-tested, but Arach OS does not yet boot to a
+COSMIC session. The next major milestone is a measured Granite-to-Arach boot
+under QEMU.
 
-| Area | Evidence available now | Qualification |
+| Subsystem | Working today | Next acceptance gate |
 |---|---|---|
-| Kernel workspace | Rust workspace formatting, all-target compilation and tests; C and Fortran ABI checks | Host CI qualified |
-| Formal contracts | Idris 2 total specifications and Agda safe proof models compile in CI | Build-evidence qualified |
-| C0 system bundle | Pinned Granite, Arach Kernel and Push artifacts plus a bounded ring-3 syscall probe build into one measured bundle | Build qualified; QEMU execution pending |
-| Linux external modules | Real Kbuild modules from RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 pass bounded ELF inspection, exact ABI admission, six-region W^X load planning and allocated-section relocation binding | Build and static load-admission qualified; native execution pending |
-| NVIDIA open modules | Pinned NVIDIA `610.43.03` sources produce all four required modules; each passes ABI admission, lifecycle placement and complete allocated-section relocation binding | Build and static load-admission qualified; Arach init/device/remove pending |
-| Native Arach boot | Boot structures, memory, interrupt, process, driver and ABI subsystems are implemented and host-tested | Granite-to-Arach QEMU boot gate pending |
-| COSMIC Epoch | The complete greeter, session, compositor, portal, application and hardware contract is specified | Runtime qualification pending |
+| Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and ABI code builds and passes host tests | Boot the native kernel through Granite and execute the ring-3 syscall probe |
+| System bootstrap | Granite, Arach Kernel, and Push can be assembled into a pinned, measured C0 bundle | Execute that bundle under QEMU and preserve its measurements across the boot boundary |
+| Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, W^X layout planning, and allocated-section relocation | Publish module memory through Arach's native W^X backend, run initialization, exercise the device, and remove it cleanly |
+| NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete init, device operation, suspend/resume, and removal on Arach |
+| Formal specifications | Idris 2 total specifications and Agda safe proof models compile in CI | Connect each proof artifact to a measured generated table, manifest, or runtime boundary |
+| COSMIC Epoch | The complete desktop and session compatibility contract is documented | Boot the pinned COSMIC greeter and complete a login, desktop session, suspend/resume, logout, and shutdown cycle |
 
-The immediate critical path is: boot the measured C0 bundle under QEMU, bring
-up the Linux-compatible userspace surface, connect the W^X module transaction
-to Arach's native memory/execution backend and exercise qualified modules, then
-run an unmodified pinned COSMIC session.
-Passing a source build or host unit test never counts as boot, runtime, or
-hardware evidence.
+The critical path is:
+
+1. Boot the measured C0 bundle under QEMU.
+2. Bring up the Linux-compatible userspace surface required by Push and COSMIC.
+3. Connect transactional Linux-module loading to native memory and execution.
+4. Exercise qualified modules through initialization, hardware use, and clean
+   removal.
+5. Run and qualify the complete pinned COSMIC Epoch session.
+
+Every status statement is evidence-based. A successful source build or host
+unit test is useful progress, but it is not counted as boot, runtime, desktop,
+or hardware qualification.
 
 ## Language boundary
 
@@ -66,10 +88,10 @@ formal/agda/            safe proof models
 ```
 
 The `core/` and `libraries/` trees are integration snapshots. Granite, Push,
-Slope, Corinth and the other independently versioned Arach OS components
-remain separate repositories until their interfaces and release gates are
-stable. Component provenance and extraction are tracked in
-[the migration plan](docs/MIGRATION.md), not treated as the kernel's identity.
+Slope, Corinth, and the other Arach OS components remain independently
+versioned repositories until their interfaces and release gates are stable.
+The Arach OS repository pins qualified component releases and is the eventual
+integration point; this repository remains focused on the kernel.
 
 ## Host validation
 
