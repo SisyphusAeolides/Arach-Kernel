@@ -30,6 +30,7 @@ const JUMP_KEY_FLAGS: u64 = 0b11;
 const JUMP_KEY_TYPE_TRUE: u64 = 1;
 const STATIC_CALL_SITE_BYTES: usize = 8;
 const STATIC_CALL_SITE_FLAGS: u64 = 0b11;
+const SMP_LOCK_ENTRY_BYTES: usize = 4;
 
 #[derive(Clone, Copy)]
 pub struct X86_64LinuxModuleIdentityProcessor {
@@ -280,7 +281,9 @@ impl X86_64LinuxModuleIdentityProcessor {
 /// unloaded or CPU admission must prevent an incompatible CPU from running it.
 /// `static_key_state` and `static_call_function` must return only addresses and
 /// state that are valid for the committed kernel ABI and remain stable for the
-/// entire module lifetime; returning an arbitrary pointer is unsound.
+/// entire module lifetime; returning an arbitrary pointer is unsound. The SMP
+/// result must describe every CPU that can execute the module and must not
+/// change while this pre-seal transaction is in progress.
 pub unsafe trait X86_64AlternativeFeatures {
     type Error;
 
@@ -296,6 +299,13 @@ pub unsafe trait X86_64AlternativeFeatures {
     /// Module-local keys are read from the staged image directly.
     fn static_call_function(&self, _key: u64) -> Result<Option<u64>, Self::Error> {
         Ok(None)
+    }
+
+    /// Whether the module will execute on an SMP-capable kernel. A false
+    /// result permits the `.smp_locks` table to replace lock prefixes with
+    /// one-byte NOPs; the default is conservative and keeps the prefix.
+    fn smp_enabled(&self) -> Result<bool, Self::Error> {
+        Ok(true)
     }
 
     fn nop_function_address(&self) -> Option<u64> {
@@ -350,12 +360,14 @@ where
         let mut has_alternatives = false;
         let mut has_jump_labels = false;
         let mut has_static_calls = false;
+        let mut has_smp_locks = false;
         for section in special_sections {
             match section.kind {
                 LinuxKoSpecialSectionKind::ModuleIdentity => {}
                 LinuxKoSpecialSectionKind::Alternatives => has_alternatives = true,
                 LinuxKoSpecialSectionKind::JumpLabels => has_jump_labels = true,
                 LinuxKoSpecialSectionKind::StaticCalls => has_static_calls = true,
+                LinuxKoSpecialSectionKind::CpuLockPatching => has_smp_locks = true,
                 kind => return Err(LinuxSpecialSectionError::UnsupportedCategory(kind)),
             }
         }
@@ -395,6 +407,18 @@ where
             )?;
             coverage.acknowledge(LinuxKoSpecialSectionKind::StaticCalls);
         }
+        if has_smp_locks {
+            apply_smp_locks(
+                memory,
+                reservation,
+                plan.image_virtual_address(),
+                plan.image_size(),
+                plan.regions(),
+                special_sections,
+                &self.features,
+            )?;
+            coverage.acknowledge(LinuxKoSpecialSectionKind::CpuLockPatching);
+        }
         Ok(X86_64LinuxPreSealReceipt::new(
             coverage,
             identity.module_state_offset(),
@@ -432,6 +456,11 @@ pub enum LinuxSpecialSectionError<MemoryError, FeatureError> {
     StaticCallFunctionUnavailable,
     UnsupportedStaticCallSite,
     UnsupportedStaticCallSection,
+    MissingSmpLockTable,
+    DuplicateSmpLockTable,
+    InvalidSmpLockTable,
+    SmpLockTargetNotExecutable,
+    InvalidSmpLockInstruction,
     AllocationFailed,
     VerificationFailed,
 }
@@ -902,6 +931,84 @@ fn static_call_bytes<MemoryError, FeatureError>(
     bytes[0] = 0xe8;
     bytes[1..5].copy_from_slice(&displacement.to_le_bytes());
     Ok(bytes)
+}
+
+/// Validate and, on a UP kernel, remove the lock prefix entries emitted in
+/// `.smp_locks`. Linux stores one signed rel32 offset per lock prefix; the
+/// offset is relative to the table field itself, not to the image base. The
+/// table is metadata only, so every target is preflighted before the first
+/// byte is changed.
+fn apply_smp_locks<Memory, Tlb, Features>(
+    memory: &mut X86_64LinuxModuleMemory<Memory, Tlb>,
+    mapping: LinuxModuleMapping,
+    image_base: u64,
+    image_size: usize,
+    regions: &[LinuxKoMemoryRegion],
+    sections: &[LinuxKoSpecialSection<'_>],
+    features: &Features,
+) -> Result<(), LinuxSpecialSectionError<Memory::Error, Features::Error>>
+where
+    Memory: ProcessFrameMemory,
+    Tlb: LinuxModuleTlb,
+    Features: X86_64AlternativeFeatures,
+{
+    let mut table = None;
+    for section in sections {
+        if section.kind != LinuxKoSpecialSectionKind::CpuLockPatching {
+            continue;
+        }
+        if section.name != b".smp_locks" {
+            return Err(LinuxSpecialSectionError::InvalidSmpLockTable);
+        }
+        if table.replace(*section).is_some() {
+            return Err(LinuxSpecialSectionError::DuplicateSmpLockTable);
+        }
+    }
+    let table = table.ok_or(LinuxSpecialSectionError::MissingSmpLockTable)?;
+    if table.size == 0 || table.size % SMP_LOCK_ENTRY_BYTES != 0 {
+        return Err(LinuxSpecialSectionError::InvalidSmpLockTable);
+    }
+
+    let remove_prefix = !features
+        .smp_enabled()
+        .map_err(LinuxSpecialSectionError::Feature)?;
+    let mut patches = Vec::new();
+    patches
+        .try_reserve_exact(table.size / SMP_LOCK_ENTRY_BYTES)
+        .map_err(|_| LinuxSpecialSectionError::AllocationFailed)?;
+    let mut record = [0; SMP_LOCK_ENTRY_BYTES];
+    for index in 0..table.size / SMP_LOCK_ENTRY_BYTES {
+        let record_offset = table
+            .image_offset
+            .checked_add(index * SMP_LOCK_ENTRY_BYTES)
+            .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+        read(memory, mapping, record_offset, &mut record).map_err(map_identity_memory_error)?;
+        let target_offset = relative_image_offset(
+            image_base,
+            image_size,
+            record_offset,
+            i32::from_le_bytes(record),
+            1,
+        )?;
+        if !range_has_permissions(regions, target_offset, 1, true) {
+            return Err(LinuxSpecialSectionError::SmpLockTargetNotExecutable);
+        }
+
+        let mut current = [0; 1];
+        read(memory, mapping, target_offset, &mut current).map_err(map_identity_memory_error)?;
+        if current[0] != 0xf0 && current[0] != 0x90 {
+            return Err(LinuxSpecialSectionError::InvalidSmpLockInstruction);
+        }
+        if remove_prefix && current[0] == 0xf0 && !patches.contains(&target_offset) {
+            patches.push(target_offset);
+        }
+    }
+
+    for target_offset in patches {
+        write_verified(memory, mapping, target_offset, &[0x90])
+            .map_err(map_identity_memory_error)?;
+    }
+    Ok(())
 }
 
 fn relative_image_address<MemoryError, FeatureError>(
@@ -1540,6 +1647,22 @@ mod tests {
         }
     }
 
+    struct TestSmpFeatures {
+        smp: bool,
+    }
+
+    unsafe impl X86_64AlternativeFeatures for TestSmpFeatures {
+        type Error = core::convert::Infallible;
+
+        fn feature_enabled(&self, _feature: u16) -> Result<bool, Self::Error> {
+            Ok(false)
+        }
+
+        fn smp_enabled(&self) -> Result<bool, Self::Error> {
+            Ok(self.smp)
+        }
+    }
+
     fn relative(from: usize, to: usize) -> i32 {
         i32::try_from(to as i64 - from as i64).unwrap()
     }
@@ -1863,6 +1986,41 @@ mod tests {
             i32::from_le_bytes(observed[1..5].try_into().unwrap()),
             i32::try_from(function_offset as i64 - (code_offset + 5) as i64).unwrap()
         );
+    }
+
+    #[test]
+    fn removes_smp_lock_prefixes_only_for_a_up_kernel() {
+        for smp in [false, true] {
+            let mut mapper = mapper();
+            let mapping = mapper.reserve_zeroed(PAGE_SIZE * 6, PAGE_SIZE).unwrap();
+            let base = mapper.mapping_base(mapping).unwrap();
+            let target_offset = 128;
+            let table_offset = PAGE_SIZE * 4 + 128;
+            let record = relative(table_offset, target_offset).to_le_bytes();
+            mapper.write(mapping, target_offset, &[0xf0]).unwrap();
+            mapper.write(mapping, table_offset, &record).unwrap();
+
+            apply_smp_locks(
+                &mut mapper,
+                mapping,
+                base,
+                PAGE_SIZE * 6,
+                &regions(),
+                &[LinuxKoSpecialSection {
+                    section_index: 23,
+                    name: b".smp_locks",
+                    image_offset: table_offset,
+                    size: record.len(),
+                    kind: LinuxKoSpecialSectionKind::CpuLockPatching,
+                }],
+                &TestSmpFeatures { smp },
+            )
+            .unwrap();
+
+            let mut observed = [0; 1];
+            mapper.read(mapping, target_offset, &mut observed).unwrap();
+            assert_eq!(observed[0], if smp { 0xf0 } else { 0x90 });
+        }
     }
 
     #[test]

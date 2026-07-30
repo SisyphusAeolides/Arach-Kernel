@@ -111,6 +111,13 @@ staged image (or requires an explicit external-key provider), and transitions
 only recognized NOP/return-zero/call forms to a checked direct call. Tail-call
 transforms and dynamic static-call registration remain runtime work.
 
+It also validates x86-64 `.smp_locks` rel32 lock-prefix tables. Every entry
+must resolve to an executable module byte and must contain the emitted lock
+prefix or its already-patched one-byte NOP. A kernel feature provider supplies
+the immutable SMP/UP decision for the transaction; UP admission removes the
+prefix only after the complete table has been preflighted. CPU hotplug-aware
+repatching remains part of the runtime architecture contract.
+
 Host fault-injection tests cover stale handles, conflicting hierarchy
 ownership, allocation failure, partial page-table publication, failed seal
 rollback, partial init discard, TLB flush ordering, retryable reclamation,
