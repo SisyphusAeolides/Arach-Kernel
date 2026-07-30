@@ -18,6 +18,8 @@ const SYMBOL_ENTRY_BYTES: usize = 24;
 const RELOCATION_ENTRY_BYTES: usize = 24;
 const MODVERSION_ENTRY_BYTES: usize = 64;
 const MODVERSION_NAME_BYTES: usize = MODVERSION_ENTRY_BYTES - 8;
+const CHAINED_MODVERSION_HEADER_BYTES: usize = 8;
+const CHAINED_MODVERSION_TERMINATOR_BYTES: usize = 9;
 const MAXIMUM_VERSIONED_SYMBOLS: usize = 32_768;
 
 const SECTION_UNDEFINED: u16 = 0;
@@ -254,9 +256,10 @@ pub fn preflight(bytes: &[u8]) -> Result<LinuxKoManifest, LinuxKoError> {
 }
 
 /// Extracts the exact Linux ABI requirements carried by a structurally valid
-/// module. The supported contract is the fixed 64-byte `modversion_info`
-/// layout used by the qualified Linux 6.12 SDK; extended modversions fail
-/// closed until they have a separately measured parser.
+/// module. This accepts the fixed 64-byte `modversion_info` layout emitted by
+/// the qualified Linux 6.12 SDK and the chained, padded layout emitted by the
+/// qualified Ubuntu Linux 6.8 SDK. Both decoders validate their complete
+/// record stream and reject unknown encodings.
 pub fn requirements(bytes: &[u8]) -> Result<LinuxKoRequirements<'_>, LinuxKoError> {
     let manifest = preflight(bytes)?;
     let module = ElfModule::parse(bytes).map_err(LinuxKoError::Elf)?;
@@ -288,6 +291,35 @@ pub fn requirements(bytes: &[u8]) -> Result<LinuxKoRequirements<'_>, LinuxKoErro
     let versions = module
         .section_data(versions.ok_or(LinuxKoError::MissingSymbolVersions)?)
         .map_err(LinuxKoError::Elf)?;
+    let symbol_versions = parse_symbol_versions(versions)?;
+
+    require_versions_for_undefined_globals(
+        &module,
+        symbol_table.ok_or(LinuxKoError::MissingSymbolTable)?,
+        &symbol_versions,
+    )?;
+
+    Ok(LinuxKoRequirements {
+        manifest,
+        name,
+        license,
+        vermagic,
+        imports,
+        symbols: symbol_versions,
+    })
+}
+
+fn parse_symbol_versions(versions: &[u8]) -> Result<Vec<LinuxSymbolVersion<'_>>, LinuxKoError> {
+    match parse_fixed_symbol_versions(versions) {
+        Ok(symbols) => Ok(symbols),
+        Err(LinuxKoError::InvalidSymbolVersions) => parse_chained_symbol_versions(versions),
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_fixed_symbol_versions(
+    versions: &[u8],
+) -> Result<Vec<LinuxSymbolVersion<'_>>, LinuxKoError> {
     if versions.is_empty() || versions.len() % MODVERSION_ENTRY_BYTES != 0 {
         return Err(LinuxKoError::InvalidSymbolVersions);
     }
@@ -305,29 +337,66 @@ pub fn requirements(bytes: &[u8]) -> Result<LinuxKoRequirements<'_>, LinuxKoErro
         let name = fixed_nul_string(&entry[8..8 + MODVERSION_NAME_BYTES])
             .filter(|name| !name.is_empty())
             .ok_or(LinuxKoError::InvalidSymbolVersions)?;
-        if symbol_versions
-            .iter()
-            .any(|version: &LinuxSymbolVersion<'_>| version.name == name)
-        {
-            return Err(LinuxKoError::DuplicateSymbolVersion);
-        }
-        symbol_versions.push(LinuxSymbolVersion { name, crc });
+        push_symbol_version(&mut symbol_versions, name, crc)?;
     }
+    Ok(symbol_versions)
+}
 
-    require_versions_for_undefined_globals(
-        &module,
-        symbol_table.ok_or(LinuxKoError::MissingSymbolTable)?,
-        &symbol_versions,
-    )?;
+fn parse_chained_symbol_versions(
+    versions: &[u8],
+) -> Result<Vec<LinuxSymbolVersion<'_>>, LinuxKoError> {
+    if versions.is_empty() {
+        return Err(LinuxKoError::InvalidSymbolVersions);
+    }
+    let mut symbol_versions = Vec::new();
+    let mut offset = 0_usize;
+    loop {
+        let remaining = versions
+            .get(offset..)
+            .ok_or(LinuxKoError::InvalidSymbolVersions)?;
+        let next = read_u32(remaining, 0).ok_or(LinuxKoError::InvalidSymbolVersions)? as usize;
+        if next == 0 {
+            if remaining.len() != CHAINED_MODVERSION_TERMINATOR_BYTES
+                || remaining.iter().any(|byte| *byte != 0)
+            {
+                return Err(LinuxKoError::InvalidSymbolVersions);
+            }
+            break;
+        }
+        if next < CHAINED_MODVERSION_HEADER_BYTES + 4 || next % 4 != 0 || next > remaining.len() {
+            return Err(LinuxKoError::InvalidSymbolVersions);
+        }
+        if symbol_versions.len() >= MAXIMUM_VERSIONED_SYMBOLS {
+            return Err(LinuxKoError::TooManySymbolVersions);
+        }
+        let crc = read_u32(remaining, 4).ok_or(LinuxKoError::InvalidSymbolVersions)?;
+        let name = fixed_nul_string(&remaining[CHAINED_MODVERSION_HEADER_BYTES..next])
+            .filter(|name| !name.is_empty())
+            .ok_or(LinuxKoError::InvalidSymbolVersions)?;
+        symbol_versions
+            .try_reserve(1)
+            .map_err(|_| LinuxKoError::PlanAllocationFailed)?;
+        push_symbol_version(&mut symbol_versions, name, crc)?;
+        offset = offset
+            .checked_add(next)
+            .ok_or(LinuxKoError::InvalidSymbolVersions)?;
+    }
+    if symbol_versions.is_empty() {
+        return Err(LinuxKoError::InvalidSymbolVersions);
+    }
+    Ok(symbol_versions)
+}
 
-    Ok(LinuxKoRequirements {
-        manifest,
-        name,
-        license,
-        vermagic,
-        imports,
-        symbols: symbol_versions,
-    })
+fn push_symbol_version<'a>(
+    versions: &mut Vec<LinuxSymbolVersion<'a>>,
+    name: &'a [u8],
+    crc: u32,
+) -> Result<(), LinuxKoError> {
+    if versions.iter().any(|version| version.name == name) {
+        return Err(LinuxKoError::DuplicateSymbolVersion);
+    }
+    versions.push(LinuxSymbolVersion { name, crc });
+    Ok(())
 }
 
 fn require_versions_for_undefined_globals(
@@ -734,6 +803,33 @@ mod tests {
         bytes
     }
 
+    fn replace_versions(bytes: &mut [u8], versions: &[u8]) {
+        assert!(versions.len() <= 2 * MODVERSION_ENTRY_BYTES);
+        let table = bytes.len() - SECTION_COUNT * SECTION_BYTES;
+        let section = table + 4 * SECTION_BYTES;
+        let offset = read_u64(bytes, section + 24).unwrap() as usize;
+        bytes[offset..offset + 2 * MODVERSION_ENTRY_BYTES].fill(0);
+        bytes[offset..offset + versions.len()].copy_from_slice(versions);
+        write_u64(bytes, section + 32, versions.len() as u64);
+    }
+
+    fn chained_versions() -> alloc::vec::Vec<u8> {
+        let mut versions = alloc::vec::Vec::new();
+        for (name, crc) in [
+            (b"module_layout".as_slice(), LAYOUT_CRC),
+            (b"external".as_slice(), EXTERNAL_CRC),
+        ] {
+            let padded_name = (name.len() + 1 + 3) & !3;
+            let next = CHAINED_MODVERSION_HEADER_BYTES + padded_name;
+            versions.extend_from_slice(&(next as u32).to_le_bytes());
+            versions.extend_from_slice(&crc.to_le_bytes());
+            versions.extend_from_slice(name);
+            versions.resize(versions.len() + padded_name - name.len(), 0);
+        }
+        versions.resize(versions.len() + CHAINED_MODVERSION_TERMINATOR_BYTES, 0);
+        versions
+    }
+
     #[test]
     fn accepts_versioned_linux_module_metadata_and_lifecycle() {
         let manifest = preflight(&fixture()).unwrap();
@@ -790,6 +886,48 @@ mod tests {
             .unwrap();
         assert_eq!(admission.resolved_symbols, 2);
         assert!(!admission.gpl_compatible);
+    }
+
+    #[test]
+    fn accepts_measured_ubuntu_chained_symbol_versions() {
+        let mut bytes = fixture();
+        replace_versions(&mut bytes, &chained_versions());
+        let requirements = requirements(&bytes).unwrap();
+        assert_eq!(requirements.symbols().len(), 2);
+        assert_eq!(requirements.symbols()[0].name, b"module_layout");
+        assert_eq!(requirements.symbols()[0].crc, LAYOUT_CRC);
+        assert_eq!(requirements.symbols()[1].name, b"external");
+        assert_eq!(requirements.symbols()[1].crc, EXTERNAL_CRC);
+    }
+
+    #[test]
+    fn chained_symbol_versions_require_exact_links_padding_and_terminator() {
+        let mut malformed_link = chained_versions();
+        malformed_link[..4].copy_from_slice(&10_u32.to_le_bytes());
+        let mut bytes = fixture();
+        replace_versions(&mut bytes, &malformed_link);
+        assert_eq!(
+            requirements(&bytes).err(),
+            Some(LinuxKoError::InvalidSymbolVersions)
+        );
+
+        let mut malformed_padding = chained_versions();
+        malformed_padding[8 + b"module_layout".len() + 1] = 1;
+        let mut bytes = fixture();
+        replace_versions(&mut bytes, &malformed_padding);
+        assert_eq!(
+            requirements(&bytes).err(),
+            Some(LinuxKoError::InvalidSymbolVersions)
+        );
+
+        let mut malformed_terminator = chained_versions();
+        malformed_terminator.pop();
+        let mut bytes = fixture();
+        replace_versions(&mut bytes, &malformed_terminator);
+        assert_eq!(
+            requirements(&bytes).err(),
+            Some(LinuxKoError::InvalidSymbolVersions)
+        );
     }
 
     #[test]

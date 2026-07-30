@@ -90,9 +90,11 @@ to keep the build fixture and loader vocabulary synchronized.
 
 The smoke gate preserves the complete Kbuild-generated vermagic byte string
 and feeds the module through `arach-ko-admit`. Admission parses fixed-layout
-Linux 6.12 `__versions` records, requires every undefined global to be
-versioned, resolves every CRC against the SDK `Module.symvers`, and enforces
-GPL-only and symbol-namespace policy. This is still build admission: catalog
-addresses are deliberately non-executable placeholders. Runtime credit
-requires an Arach export catalog backed by live KPI addresses plus successful
-relocation, W^X sealing, initialization, and removal.
+Linux 6.12 `__versions` records and the chained, padded records measured from
+Ubuntu Linux 6.8, requires every undefined global to be versioned, resolves
+every CRC against the SDK `Module.symvers`, and enforces GPL-only and
+symbol-namespace policy. Both record streams are bounded and completely
+validated; unknown encodings fail closed. This is still build admission:
+catalog addresses are deliberately non-executable placeholders. Runtime
+credit requires an Arach export catalog backed by live KPI addresses plus
+successful relocation, W^X sealing, initialization, and removal.
