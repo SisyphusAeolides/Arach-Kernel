@@ -1,0 +1,1877 @@
+use core::{mem::size_of, ptr};
+
+use abyss::frame::FrameAllocatorError;
+use abyss::paging::{PAGE_SIZE, PhysicalAddress};
+
+#[cfg(target_os = "none")]
+use crate::arch::x86_64::{X86_64, active_page_table_root, load_page_table_root};
+#[cfg(target_os = "none")]
+use crate::capability::InterruptGuard;
+use crate::capability::{Capability, PhysicalMemoryControl, ProcessInstallControl};
+use crate::memory::frame_pool::PhysicalFramePool;
+use crate::process::install::{
+    MappingPermissions, ProcessImageHandle, ProcessImageInfo, UserAddressSpaceBackend,
+};
+
+const PAGE_ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+const ENTRY_PRESENT: u64 = 1 << 0;
+const ENTRY_WRITABLE: u64 = 1 << 1;
+const ENTRY_USER: u64 = 1 << 2;
+const ENTRY_HUGE: u64 = 1 << 7;
+const ENTRY_NO_EXECUTE: u64 = 1 << 63;
+const USER_PML4_ENTRIES: usize = 256;
+const TABLE_ENTRIES: usize = 512;
+
+// Crest retains a bounded 640×400 desktop base plus a live cursor surface.
+// These finite per-process bounds cover the fixed image, page tables, and
+// measured stack; they are boot policy, never user-controlled.
+pub const MAXIMUM_PROCESS_PAGES: usize = 1024;
+pub const MAXIMUM_OWNED_FRAMES: usize = 1088;
+pub const MAXIMUM_RETAINED_PROCESSES: usize = 2;
+pub const INITIAL_USER_STACK_BASE: u64 = 0x0040_0000;
+pub const INITIAL_USER_STACK_PAGES: usize = if cfg!(test) { 112 } else { 192 };
+// Leave one mapped page below the ABI block so the entry trampoline and the
+// first Rust prologue can push return state without faulting at the boundary.
+pub const INITIAL_USER_STACK_POINTER: u64 =
+    INITIAL_USER_STACK_BASE + (INITIAL_USER_STACK_PAGES as u64 * PAGE_SIZE as u64);
+
+/// Physical-memory operations required by the process page-table builder.
+///
+/// Implementations must provide exclusive ownership of allocated frames and
+/// must make page-table writes visible before a root can be activated.
+pub trait ProcessFrameMemory {
+    type Error;
+
+    fn allocate_zeroed(&mut self) -> Result<PhysicalAddress, Self::Error>;
+    fn release(&mut self, frame: PhysicalAddress) -> Result<(), Self::Error>;
+    fn read_entry(&self, table: PhysicalAddress, index: usize) -> Result<u64, Self::Error>;
+    fn write_entry(
+        &mut self,
+        table: PhysicalAddress,
+        index: usize,
+        value: u64,
+    ) -> Result<(), Self::Error>;
+    fn write_bytes(
+        &mut self,
+        frame: PhysicalAddress,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), Self::Error>;
+    fn bytes_equal(
+        &self,
+        frame: PhysicalAddress,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<bool, Self::Error>;
+    fn bytes_zero(
+        &self,
+        frame: PhysicalAddress,
+        offset: usize,
+        length: usize,
+    ) -> Result<bool, Self::Error>;
+}
+
+/// Accesses allocator-owned RAM through Arach's established direct map.
+pub struct DirectMapFrameMemory<'allocator, 'storage> {
+    frames: &'allocator PhysicalFramePool<'storage>,
+    direct_map_base: usize,
+    mapped_physical_limit: u64,
+}
+
+impl<'allocator, 'storage> DirectMapFrameMemory<'allocator, 'storage> {
+    /// Creates a physical-memory adapter over a live direct map.
+    ///
+    /// # Safety
+    ///
+    /// Every frame returned by `frames` below `mapped_physical_limit` must
+    /// be mapped writable at `direct_map_base + physical_address`. The mapping
+    /// must remain stable and exclusively represent ordinary RAM for this
+    /// adapter's lifetime.
+    pub const unsafe fn new(
+        frames: &'allocator PhysicalFramePool<'storage>,
+        direct_map_base: usize,
+        mapped_physical_limit: u64,
+        _authority: &Capability<'_, PhysicalMemoryControl>,
+    ) -> Self {
+        Self {
+            frames,
+            direct_map_base,
+            mapped_physical_limit,
+        }
+    }
+
+    fn pointer(
+        &self,
+        frame: PhysicalAddress,
+        offset: usize,
+        length: usize,
+    ) -> Result<*mut u8, DirectMapMemoryError> {
+        if !frame.is_page_aligned()
+            || offset.checked_add(length).is_none_or(|end| end > PAGE_SIZE)
+            || frame
+                .as_u64()
+                .checked_add(PAGE_SIZE as u64)
+                .is_none_or(|end| end > self.mapped_physical_limit)
+        {
+            return Err(DirectMapMemoryError::InvalidAccess);
+        }
+        let physical =
+            usize::try_from(frame.as_u64()).map_err(|_| DirectMapMemoryError::AddressOverflow)?;
+        let address = self
+            .direct_map_base
+            .checked_add(physical)
+            .and_then(|base| base.checked_add(offset))
+            .ok_or(DirectMapMemoryError::AddressOverflow)?;
+        Ok(address as *mut u8)
+    }
+}
+
+impl ProcessFrameMemory for DirectMapFrameMemory<'_, '_> {
+    type Error = DirectMapMemoryError;
+
+    fn allocate_zeroed(&mut self) -> Result<PhysicalAddress, Self::Error> {
+        let frame = self
+            .frames
+            .allocate()
+            .ok_or(DirectMapMemoryError::OutOfFrames)?;
+        let pointer = match self.pointer(frame, 0, PAGE_SIZE) {
+            Ok(pointer) => pointer,
+            Err(error) => {
+                self.frames
+                    .release(frame)
+                    .map_err(DirectMapMemoryError::Allocator)?;
+                return Err(error);
+            }
+        };
+        // SAFETY: The adapter owns the allocated frame and `pointer` covers
+        // exactly its stable writable direct-map alias.
+        unsafe { ptr::write_bytes(pointer, 0, PAGE_SIZE) };
+        Ok(frame)
+    }
+
+    fn release(&mut self, frame: PhysicalAddress) -> Result<(), Self::Error> {
+        self.frames
+            .release(frame)
+            .map_err(DirectMapMemoryError::Allocator)
+    }
+
+    fn read_entry(&self, table: PhysicalAddress, index: usize) -> Result<u64, Self::Error> {
+        if index >= TABLE_ENTRIES {
+            return Err(DirectMapMemoryError::InvalidAccess);
+        }
+        let pointer = self.pointer(table, index * size_of::<u64>(), size_of::<u64>())?;
+        // SAFETY: `pointer` identifies one aligned entry in a mapped frame.
+        Ok(unsafe { pointer.cast::<u64>().read_volatile() })
+    }
+
+    fn write_entry(
+        &mut self,
+        table: PhysicalAddress,
+        index: usize,
+        value: u64,
+    ) -> Result<(), Self::Error> {
+        if index >= TABLE_ENTRIES {
+            return Err(DirectMapMemoryError::InvalidAccess);
+        }
+        let pointer = self.pointer(table, index * size_of::<u64>(), size_of::<u64>())?;
+        // SAFETY: The builder exclusively owns destination tables and writes
+        // one naturally aligned hardware entry.
+        unsafe { pointer.cast::<u64>().write_volatile(value) };
+        Ok(())
+    }
+
+    fn write_bytes(
+        &mut self,
+        frame: PhysicalAddress,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), Self::Error> {
+        let pointer = self.pointer(frame, offset, bytes.len())?;
+        // SAFETY: Bounds were checked against the exclusively owned frame and
+        // source and destination cannot overlap.
+        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), pointer, bytes.len()) };
+        Ok(())
+    }
+
+    fn bytes_equal(
+        &self,
+        frame: PhysicalAddress,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<bool, Self::Error> {
+        let pointer = self.pointer(frame, offset, bytes.len())?;
+        // SAFETY: The checked direct-map range remains readable for the
+        // adapter lifetime.
+        let actual = unsafe { core::slice::from_raw_parts(pointer.cast_const(), bytes.len()) };
+        Ok(actual == bytes)
+    }
+
+    fn bytes_zero(
+        &self,
+        frame: PhysicalAddress,
+        offset: usize,
+        length: usize,
+    ) -> Result<bool, Self::Error> {
+        let pointer = self.pointer(frame, offset, length)?;
+        // SAFETY: The checked direct-map range remains readable for the
+        // adapter lifetime.
+        let actual = unsafe { core::slice::from_raw_parts(pointer.cast_const(), length) };
+        Ok(actual.iter().all(|byte| *byte == 0))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectMapMemoryError {
+    OutOfFrames,
+    InvalidAccess,
+    AddressOverflow,
+    Allocator(FrameAllocatorError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameBackedSpace {
+    slot: u16,
+    generation: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameBackedMapping {
+    space_slot: u16,
+    slot: u8,
+    generation: u32,
+}
+
+#[derive(Clone, Copy)]
+struct MappingRecord {
+    occupied: bool,
+    sealed: bool,
+    generation: u32,
+    virtual_address: u64,
+    memory_size: usize,
+    first_page: u16,
+    page_count: u16,
+    permissions: MappingPermissions,
+}
+
+impl MappingRecord {
+    const EMPTY: Self = Self {
+        occupied: false,
+        sealed: false,
+        generation: 0,
+        virtual_address: 0,
+        memory_size: 0,
+        first_page: 0,
+        page_count: 0,
+        permissions: MappingPermissions {
+            readable: false,
+            writable: false,
+            executable: false,
+        },
+    };
+}
+
+#[derive(Clone, Copy)]
+struct PageRecord {
+    frame: PhysicalAddress,
+    virtual_address: u64,
+}
+
+impl PageRecord {
+    const EMPTY: Self = Self {
+        frame: PhysicalAddress::new(0),
+        virtual_address: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SpacePhase {
+    Free,
+    Staging,
+    Committed,
+}
+
+#[derive(Clone, Copy)]
+struct FrameBackedSlot {
+    phase: SpacePhase,
+    root: Option<PhysicalAddress>,
+    generation: u32,
+    image_start: u64,
+    image_end: u64,
+    mappings: [MappingRecord; super::install::MAXIMUM_PROCESS_SEGMENTS],
+    mapping_count: usize,
+    pages: [PageRecord; MAXIMUM_PROCESS_PAGES],
+    page_count: usize,
+    owned_frames: [PhysicalAddress; MAXIMUM_OWNED_FRAMES],
+    owned_frame_count: usize,
+    initial_stack_pages: usize,
+    process_info: ProcessImageInfo,
+}
+
+impl FrameBackedSlot {
+    const EMPTY: Self = Self {
+        phase: SpacePhase::Free,
+        root: None,
+        generation: 0,
+        image_start: 0,
+        image_end: 0,
+        mappings: [MappingRecord::EMPTY; super::install::MAXIMUM_PROCESS_SEGMENTS],
+        mapping_count: 0,
+        pages: [PageRecord::EMPTY; MAXIMUM_PROCESS_PAGES],
+        page_count: 0,
+        owned_frames: [PhysicalAddress::new(0); MAXIMUM_OWNED_FRAMES],
+        owned_frame_count: 0,
+        initial_stack_pages: 0,
+        process_info: ProcessImageInfo {
+            entry_point: 0,
+            segment_count: 0,
+            address_space_root: None,
+            owned_frames: 0,
+            initial_stack_pointer: None,
+        },
+    };
+}
+
+/// Builds a fixed-capacity pool of x86_64 hardware-format user address spaces.
+///
+/// The root inherits only PML4 entries 256..511 from the active kernel root.
+/// A committed root can be switched into CR3 for a bounded validation while
+/// the kernel remains entirely in its inherited higher-half mappings. Retained
+/// ownership and privilege entry remain responsibilities of the scheduler.
+pub struct FrameBackedAddressSpace<Memory: ProcessFrameMemory> {
+    memory: Memory,
+    kernel_root: PhysicalAddress,
+    active_slot: Option<u16>,
+    slots: [FrameBackedSlot; MAXIMUM_RETAINED_PROCESSES],
+}
+
+impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
+    pub const fn new(
+        memory: Memory,
+        kernel_root: PhysicalAddress,
+        _authority: &Capability<'_, ProcessInstallControl>,
+    ) -> Self {
+        Self {
+            memory,
+            kernel_root,
+            active_slot: None,
+            slots: [FrameBackedSlot::EMPTY; MAXIMUM_RETAINED_PROCESSES],
+        }
+    }
+
+    pub const fn memory(&self) -> &Memory {
+        &self.memory
+    }
+
+    /// Returns the immutable kernel hierarchy inherited by every user root.
+    pub const fn kernel_root(&self) -> u64 {
+        self.kernel_root.as_u64()
+    }
+
+    pub fn memory_mut(&mut self) -> &mut Memory {
+        &mut self.memory
+    }
+
+    pub const fn owned_frame_count(&self) -> usize {
+        let mut total = 0;
+        let mut index = 0;
+        while index < self.slots.len() {
+            total += self.slots[index].owned_frame_count;
+            index += 1;
+        }
+        total
+    }
+
+    /// Adds a fixed 128 KiB zeroed, writable, non-executable stack to a
+    /// committed process while retaining ownership in this backend.
+    pub fn install_initial_stack(
+        &mut self,
+        process: &ProcessImageHandle,
+        _authority: &Capability<'_, ProcessInstallControl>,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        self.install_initial_stack_pages(process, INITIAL_USER_STACK_PAGES, _authority)
+    }
+
+    /// Adds a zeroed, writable, non-executable stack with an image-specific
+    /// page budget. The budget is fixed at boot and retained with the process;
+    /// it is never influenced by a Ring 3 caller.
+    pub fn install_initial_stack_pages(
+        &mut self,
+        process: &ProcessImageHandle,
+        pages: usize,
+        _authority: &Capability<'_, ProcessInstallControl>,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        let slot_index = self.process_slot(process)?;
+        let stack_span = pages
+            .checked_sub(1)
+            .and_then(|count| (count as u64).checked_mul(PAGE_SIZE as u64))
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let mapping_base = INITIAL_USER_STACK_BASE
+            .checked_sub(stack_span)
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let initial_pointer = INITIAL_USER_STACK_BASE
+            .checked_add(
+                (pages as u64)
+                    .checked_mul(PAGE_SIZE as u64)
+                    .ok_or(FrameBackedError::InvalidRange)?,
+            )
+            .ok_or(FrameBackedError::InvalidRange)?;
+        if self.active_slot.is_some()
+            || self.slots[slot_index]
+                .process_info
+                .initial_stack_pointer
+                .is_some()
+            || mapping_base < 0x1000
+            || self.slots[slot_index]
+                .page_count
+                .checked_add(pages)
+                .is_none_or(|total| total > self.slots[slot_index].pages.len())
+        {
+            return Err(FrameBackedError::InvalidState);
+        }
+
+        let owned_before = self.slots[slot_index].owned_frame_count;
+        let pages_before = self.slots[slot_index].page_count;
+        for page in 0..pages {
+            let virtual_address = mapping_base + (page as u64 * PAGE_SIZE as u64);
+            let (table, index) = match self.ensure_leaf_slot(slot_index, virtual_address) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    self.rollback_stack_install(slot_index, owned_before, pages_before)?;
+                    return Err(error);
+                }
+            };
+            let frame = match self.allocate_owned(slot_index) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.rollback_stack_install(slot_index, owned_before, pages_before)?;
+                    return Err(error);
+                }
+            };
+            let entry =
+                frame.as_u64() | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER | ENTRY_NO_EXECUTE;
+            if let Err(error) = self.memory.write_entry(table, index, entry) {
+                self.rollback_stack_install(slot_index, owned_before, pages_before)?;
+                return Err(FrameBackedError::Memory(error));
+            }
+            let page_index = self.slots[slot_index].page_count;
+            self.slots[slot_index].pages[page_index] = PageRecord {
+                frame,
+                virtual_address,
+            };
+            self.slots[slot_index].page_count += 1;
+        }
+        self.slots[slot_index].process_info.initial_stack_pointer = Some(initial_pointer);
+        self.slots[slot_index].process_info.owned_frames = self.slots[slot_index].owned_frame_count;
+        self.slots[slot_index].initial_stack_pages = pages;
+        Ok(initial_pointer)
+    }
+
+    /// Maps a kernel-owned thermal page into the user's address space.
+    pub fn install_thermal_page(
+        &mut self,
+        process: &ProcessImageHandle,
+        _authority: &Capability<'_, ProcessInstallControl>,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        let slot_index = self.process_slot(process)?;
+        if self.active_slot.is_some() {
+            return Err(FrameBackedError::InvalidState);
+        }
+        let virtual_address = 0x0080_0000;
+        let (table, index) = self.ensure_leaf_slot(slot_index, virtual_address)?;
+        let frame = self.allocate_owned(slot_index)?;
+        // Zero the frame
+        if let Some(ptr) = crate::mmio::direct_map_address(frame.as_u64()) {
+            unsafe { core::ptr::write_bytes(ptr as *mut u8, 0, 4096) };
+        }
+        let entry = frame.as_u64() | ENTRY_PRESENT | ENTRY_USER | ENTRY_NO_EXECUTE; // Read-only for user
+        self.memory
+            .write_entry(table, index, entry)
+            .map_err(FrameBackedError::Memory)?;
+        let page_index = self.slots[slot_index].page_count;
+        self.slots[slot_index].pages[page_index] = PageRecord {
+            frame,
+            virtual_address,
+        };
+        self.slots[slot_index].page_count += 1;
+        self.slots[slot_index].process_info.owned_frames = self.slots[slot_index].owned_frame_count;
+        Ok(virtual_address)
+    }
+
+    pub const CEREBRAL_INGRESS_ADDRESS: u64 = 0x600_0000_0000;
+    pub const CEREBRAL_OBSERVATION_ADDRESS: u64 = 0x600_0000_1000;
+    pub const CEREBRAL_CERTIFICATE_ADDRESS: u64 = 0x600_0000_2000;
+
+    /// Maps the retained split Resonance pages into the user's address space.
+    pub fn install_nexus_plane(
+        &mut self,
+        process: &ProcessImageHandle,
+        _authority: &Capability<'_, ProcessInstallControl>,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let slot_index = self.process_slot(process)?;
+        if self.active_slot.is_some()
+            || self.slots[slot_index]
+                .page_count
+                .checked_add(3)
+                .is_none_or(|count| count > self.slots[slot_index].pages.len())
+        {
+            return Err(FrameBackedError::InvalidState);
+        }
+
+        let mappings = [
+            (
+                Self::CEREBRAL_INGRESS_ADDRESS,
+                crate::nexus_plane::ingress() as *const _ as usize,
+                true,
+            ),
+            (
+                Self::CEREBRAL_OBSERVATION_ADDRESS,
+                crate::nexus_plane::observation() as *const _ as usize,
+                false,
+            ),
+            (
+                Self::CEREBRAL_CERTIFICATE_ADDRESS,
+                crate::nexus_plane::certificate() as *const _ as usize,
+                false,
+            ),
+        ];
+
+        for (virtual_address, kernel_pointer, writable) in mappings {
+            if kernel_pointer & (PAGE_SIZE - 1) != 0 {
+                return Err(FrameBackedError::InvalidPhysicalFrame);
+            }
+
+            let physical = crate::mmio::kernel_virtual_to_physical(kernel_pointer, PAGE_SIZE)
+                .ok_or(FrameBackedError::InvalidPhysicalFrame)?;
+            if physical & (PAGE_SIZE as u64 - 1) != 0 || physical & !PAGE_ADDRESS_MASK != 0 {
+                return Err(FrameBackedError::InvalidPhysicalFrame);
+            }
+
+            let (table, index) = self.ensure_leaf_slot(slot_index, virtual_address)?;
+            let mut entry = physical | ENTRY_PRESENT | ENTRY_USER | ENTRY_NO_EXECUTE;
+            if writable {
+                entry |= ENTRY_WRITABLE;
+            }
+            self.memory
+                .write_entry(table, index, entry)
+                .map_err(FrameBackedError::Memory)?;
+
+            let page_index = self.slots[slot_index].page_count;
+            self.slots[slot_index].pages[page_index] = PageRecord {
+                frame: PhysicalAddress::new(physical),
+                virtual_address,
+            };
+            self.slots[slot_index].page_count += 1;
+        }
+
+        self.slots[slot_index].process_info.owned_frames = self.slots[slot_index].owned_frame_count;
+        Ok(())
+    }
+
+    /// Materializes the documented `[argc][argv][envp]` entry block in the
+    /// retained user stack and returns the stack pointer to pass to Ring 3.
+    pub fn prepare_initial_stack(
+        &mut self,
+        process: &ProcessImageHandle,
+        argv: &[&[u8]],
+        envp: &[&[u8]],
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        let slot_index = self.process_slot(process)?;
+        if self.active_slot.is_some()
+            || self.slots[slot_index]
+                .process_info
+                .initial_stack_pointer
+                .is_none()
+        {
+            return Err(FrameBackedError::InvalidState);
+        }
+        let word_count = 1usize
+            .checked_add(argv.len())
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| count.checked_add(envp.len()))
+            .and_then(|count| count.checked_add(1))
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let pointer_bytes = word_count
+            .checked_mul(core::mem::size_of::<u64>())
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let string_bytes = argv
+            .iter()
+            .chain(envp.iter())
+            .try_fold(0usize, |total, value| {
+                total.checked_add(value.len().checked_add(1)?)
+            })
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let stack_bytes = self.slots[slot_index]
+            .initial_stack_pages
+            .checked_mul(PAGE_SIZE)
+            .ok_or(FrameBackedError::InvalidState)?;
+        if pointer_bytes
+            .checked_add(string_bytes)
+            .is_none_or(|size| size > stack_bytes)
+        {
+            return Err(FrameBackedError::InvalidRange);
+        }
+
+        let stack_base = INITIAL_USER_STACK_BASE;
+        let mut word_address = stack_base;
+        self.write_stack_word(slot_index, word_address, argv.len() as u64)?;
+        word_address += 8;
+        let string_start = stack_base + pointer_bytes as u64;
+        let mut string_address = string_start;
+        for value in argv {
+            self.write_stack_word(slot_index, word_address, string_address)?;
+            word_address += 8;
+            string_address += value.len() as u64 + 1;
+        }
+        self.write_stack_word(slot_index, word_address, 0)?;
+        word_address += 8;
+        for value in envp {
+            self.write_stack_word(slot_index, word_address, string_address)?;
+            word_address += 8;
+            string_address += value.len() as u64 + 1;
+        }
+        self.write_stack_word(slot_index, word_address, 0)?;
+
+        string_address = string_start;
+        for value in argv.iter().chain(envp.iter()) {
+            self.write_stack_bytes(slot_index, string_address, value)?;
+            string_address += value.len() as u64;
+            self.write_stack_bytes(slot_index, string_address, &[0])?;
+            string_address += 1;
+        }
+        self.slots[slot_index].process_info.initial_stack_pointer = Some(stack_base);
+        Ok(stack_base)
+    }
+
+    /// Retries reclamation after a frame-memory backend reported a release
+    /// failure. Failed frames remain recorded until this succeeds.
+    pub fn retry_cleanup(
+        &mut self,
+        _authority: &Capability<'_, PhysicalMemoryControl>,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        if self.active_slot.is_some() {
+            return Err(FrameBackedError::InvalidState);
+        }
+        for slot_index in 0..self.slots.len() {
+            if self.slots[slot_index].phase == SpacePhase::Free
+                && self.slots[slot_index].owned_frame_count != 0
+            {
+                self.release_owned(slot_index)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn allocate_owned(
+        &mut self,
+        slot_index: usize,
+    ) -> Result<PhysicalAddress, FrameBackedError<Memory::Error>> {
+        if self.slots[slot_index].owned_frame_count == self.slots[slot_index].owned_frames.len() {
+            return Err(FrameBackedError::CapacityExceeded);
+        }
+        let frame = self
+            .memory
+            .allocate_zeroed()
+            .map_err(FrameBackedError::Memory)?;
+        if !frame.is_page_aligned() || frame.as_u64() & !PAGE_ADDRESS_MASK != 0 {
+            self.memory
+                .release(frame)
+                .map_err(FrameBackedError::Memory)?;
+            return Err(FrameBackedError::InvalidPhysicalFrame);
+        }
+        let frame_index = self.slots[slot_index].owned_frame_count;
+        self.slots[slot_index].owned_frames[frame_index] = frame;
+        self.slots[slot_index].owned_frame_count += 1;
+        Ok(frame)
+    }
+
+    fn release_owned(&mut self, slot_index: usize) -> Result<(), FrameBackedError<Memory::Error>> {
+        let mut first_error = None;
+        let mut retained = [PhysicalAddress::new(0); MAXIMUM_OWNED_FRAMES];
+        let mut retained_count = 0;
+        for index in (0..self.slots[slot_index].owned_frame_count).rev() {
+            let frame = self.slots[slot_index].owned_frames[index];
+            if let Err(error) = self.memory.release(frame) {
+                retained[retained_count] = frame;
+                retained_count += 1;
+                if first_error.is_none() {
+                    first_error = Some(FrameBackedError::Memory(error));
+                }
+            }
+        }
+        self.slots[slot_index].owned_frames = retained;
+        self.slots[slot_index].owned_frame_count = retained_count;
+        self.slots[slot_index].root = None;
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn release_last_owned(
+        &mut self,
+        slot_index: usize,
+        frame: PhysicalAddress,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let Some(index) = self.slots[slot_index].owned_frame_count.checked_sub(1) else {
+            return Err(FrameBackedError::CorruptHierarchy);
+        };
+        if self.slots[slot_index].owned_frames[index] != frame {
+            return Err(FrameBackedError::CorruptHierarchy);
+        }
+        self.memory
+            .release(frame)
+            .map_err(FrameBackedError::Memory)?;
+        self.slots[slot_index].owned_frames[index] = PhysicalAddress::new(0);
+        self.slots[slot_index].owned_frame_count = index;
+        Ok(())
+    }
+
+    fn rollback_stack_install(
+        &mut self,
+        slot_index: usize,
+        owned_before: usize,
+        pages_before: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        while self.slots[slot_index].owned_frame_count > owned_before {
+            let frame =
+                self.slots[slot_index].owned_frames[self.slots[slot_index].owned_frame_count - 1];
+            self.release_last_owned(slot_index, frame)?;
+        }
+        let page_count = self.slots[slot_index].page_count;
+        self.slots[slot_index].pages[pages_before..page_count].fill(PageRecord::EMPTY);
+        self.slots[slot_index].page_count = pages_before;
+        Ok(())
+    }
+
+    fn write_stack_word(
+        &mut self,
+        slot_index: usize,
+        address: u64,
+        value: u64,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        self.write_stack_bytes(slot_index, address, &value.to_le_bytes())
+    }
+
+    fn write_stack_bytes(
+        &mut self,
+        slot_index: usize,
+        address: u64,
+        bytes: &[u8],
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let mut copied = 0usize;
+        while copied < bytes.len() {
+            let current = address
+                .checked_add(copied as u64)
+                .ok_or(FrameBackedError::InvalidRange)?;
+            let page_index = self.slots[slot_index]
+                .pages
+                .iter()
+                .take(self.slots[slot_index].page_count)
+                .position(|page| {
+                    current >= page.virtual_address
+                        && current < page.virtual_address + PAGE_SIZE as u64
+                })
+                .ok_or(FrameBackedError::InvalidRange)?;
+            let page = self.slots[slot_index].pages[page_index];
+            let offset = (current - page.virtual_address) as usize;
+            let length = (PAGE_SIZE - offset).min(bytes.len() - copied);
+            self.memory
+                .write_bytes(page.frame, offset, &bytes[copied..copied + length])
+                .map_err(FrameBackedError::Memory)?;
+            copied += length;
+        }
+        Ok(())
+    }
+
+    fn reset_records(&mut self, slot_index: usize) {
+        self.slots[slot_index].mappings.fill(MappingRecord::EMPTY);
+        self.slots[slot_index].mapping_count = 0;
+        self.slots[slot_index].pages.fill(PageRecord::EMPTY);
+        self.slots[slot_index].page_count = 0;
+        self.slots[slot_index].initial_stack_pages = 0;
+        self.slots[slot_index].process_info = ProcessImageInfo {
+            entry_point: 0,
+            segment_count: 0,
+            address_space_root: None,
+            owned_frames: 0,
+            initial_stack_pointer: None,
+        };
+    }
+
+    fn initialize_root(
+        &mut self,
+        slot_index: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let root = self.allocate_owned(slot_index)?;
+        self.slots[slot_index].root = Some(root);
+        for index in USER_PML4_ENTRIES..TABLE_ENTRIES {
+            let entry = self
+                .memory
+                .read_entry(self.kernel_root, index)
+                .map_err(FrameBackedError::Memory)?;
+            self.memory
+                .write_entry(root, index, entry)
+                .map_err(FrameBackedError::Memory)?;
+        }
+        Ok(())
+    }
+
+    fn mapping(
+        &self,
+        mapping: FrameBackedMapping,
+    ) -> Result<MappingRecord, FrameBackedError<Memory::Error>> {
+        if self.active_slot != Some(mapping.space_slot) {
+            return Err(FrameBackedError::InvalidHandle);
+        }
+        self.slots[usize::from(mapping.space_slot)]
+            .mappings
+            .get(usize::from(mapping.slot))
+            .copied()
+            .filter(|record| record.occupied && record.generation == mapping.generation)
+            .ok_or(FrameBackedError::InvalidHandle)
+    }
+
+    fn ensure_leaf_slot(
+        &mut self,
+        slot_index: usize,
+        virtual_address: u64,
+    ) -> Result<(PhysicalAddress, usize), FrameBackedError<Memory::Error>> {
+        let indices = page_indices(virtual_address)?;
+        if indices[0] >= USER_PML4_ENTRIES {
+            return Err(FrameBackedError::InvalidUserRange);
+        }
+        let mut table = self.slots[slot_index]
+            .root
+            .ok_or(FrameBackedError::InvalidState)?;
+        for index in &indices[..3] {
+            let entry = self
+                .memory
+                .read_entry(table, *index)
+                .map_err(FrameBackedError::Memory)?;
+            if entry & ENTRY_PRESENT != 0 {
+                if entry & ENTRY_HUGE != 0 {
+                    return Err(FrameBackedError::MappingConflict);
+                }
+                table = PhysicalAddress::new(entry & PAGE_ADDRESS_MASK);
+            } else {
+                let next = self.allocate_owned(slot_index)?;
+                self.memory
+                    .write_entry(
+                        table,
+                        *index,
+                        next.as_u64() | ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER,
+                    )
+                    .map_err(FrameBackedError::Memory)?;
+                table = next;
+            }
+        }
+        let leaf_index = indices[3];
+        let leaf = self
+            .memory
+            .read_entry(table, leaf_index)
+            .map_err(FrameBackedError::Memory)?;
+        if leaf != 0 {
+            return Err(FrameBackedError::MappingConflict);
+        }
+        Ok((table, leaf_index))
+    }
+
+    fn leaf_slot(
+        &self,
+        slot_index: usize,
+        virtual_address: u64,
+    ) -> Result<(PhysicalAddress, usize), FrameBackedError<Memory::Error>> {
+        let indices = page_indices(virtual_address)?;
+        let mut table = self.slots[slot_index]
+            .root
+            .ok_or(FrameBackedError::InvalidState)?;
+        for index in &indices[..3] {
+            let entry = self
+                .memory
+                .read_entry(table, *index)
+                .map_err(FrameBackedError::Memory)?;
+            if entry & ENTRY_PRESENT == 0 || entry & ENTRY_HUGE != 0 {
+                return Err(FrameBackedError::CorruptHierarchy);
+            }
+            table = PhysicalAddress::new(entry & PAGE_ADDRESS_MASK);
+        }
+        Ok((table, indices[3]))
+    }
+
+    fn frame_for_mapping_page(
+        &self,
+        slot_index: usize,
+        mapping: MappingRecord,
+        page: usize,
+    ) -> Result<PhysicalAddress, FrameBackedError<Memory::Error>> {
+        if page >= usize::from(mapping.page_count) {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        self.slots[slot_index]
+            .pages
+            .get(usize::from(mapping.first_page) + page)
+            .map(|record| record.frame)
+            .ok_or(FrameBackedError::CorruptHierarchy)
+    }
+
+    fn cleanup_transaction(
+        &mut self,
+        slot_index: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        self.active_slot = None;
+        self.slots[slot_index].phase = SpacePhase::Free;
+        self.reset_records(slot_index);
+        self.release_owned(slot_index)
+    }
+
+    fn process_slot(
+        &self,
+        process: &ProcessImageHandle,
+    ) -> Result<usize, FrameBackedError<Memory::Error>> {
+        let slot_index = usize::from(process.slot());
+        self.slots
+            .get(slot_index)
+            .filter(|slot| {
+                slot.phase == SpacePhase::Committed && slot.generation == process.generation()
+            })
+            .map(|_| slot_index)
+            .ok_or(FrameBackedError::InvalidHandle)
+    }
+}
+
+impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressSpace<Memory> {
+    type Error = FrameBackedError<Memory::Error>;
+    type Space = FrameBackedSpace;
+    type Mapping = FrameBackedMapping;
+    type Process = ProcessImageHandle;
+
+    fn begin(&mut self, image_start: u64, image_end: u64) -> Result<Self::Space, Self::Error> {
+        if self.active_slot.is_some()
+            || image_start >= image_end
+            || image_end > 0x0000_8000_0000_0000
+            || !self.kernel_root.is_page_aligned()
+        {
+            return Err(FrameBackedError::InvalidState);
+        }
+        let slot_index = self
+            .slots
+            .iter()
+            .position(|slot| slot.phase == SpacePhase::Free && slot.owned_frame_count == 0)
+            .ok_or(FrameBackedError::CapacityExceeded)?;
+        self.slots[slot_index].generation = next_generation(self.slots[slot_index].generation);
+        self.slots[slot_index].phase = SpacePhase::Staging;
+        self.slots[slot_index].image_start = image_start;
+        self.slots[slot_index].image_end = image_end;
+        self.active_slot = Some(slot_index as u16);
+        self.reset_records(slot_index);
+        if let Err(error) = self.initialize_root(slot_index) {
+            return match self.cleanup_transaction(slot_index) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(cleanup),
+            };
+        }
+        Ok(FrameBackedSpace {
+            slot: slot_index as u16,
+            generation: self.slots[slot_index].generation,
+        })
+    }
+
+    fn map_zeroed(
+        &mut self,
+        space: Self::Space,
+        virtual_address: u64,
+        memory_size: usize,
+    ) -> Result<Self::Mapping, Self::Error> {
+        let end = virtual_address
+            .checked_add(memory_size as u64)
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let slot_index = usize::from(space.slot);
+        let Some(slot) = self.slots.get(slot_index) else {
+            return Err(FrameBackedError::InvalidHandle);
+        };
+        if self.active_slot != Some(space.slot)
+            || slot.phase != SpacePhase::Staging
+            || space.generation != slot.generation
+            || memory_size == 0
+            || virtual_address & (PAGE_SIZE as u64 - 1) != 0
+            || virtual_address < slot.image_start
+            || end > slot.image_end
+        {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        let pages_needed = memory_size.div_ceil(PAGE_SIZE);
+        if pages_needed == 0
+            || pages_needed > u16::MAX as usize
+            || self.slots[slot_index].page_count + pages_needed > self.slots[slot_index].pages.len()
+        {
+            return Err(FrameBackedError::CapacityExceeded);
+        }
+        let mapping_index = self.slots[slot_index].mapping_count;
+        if mapping_index >= self.slots[slot_index].mappings.len() {
+            return Err(FrameBackedError::CapacityExceeded);
+        }
+        let first_page = self.slots[slot_index].page_count;
+        for page in 0..pages_needed {
+            let page_virtual = virtual_address
+                .checked_add((page * PAGE_SIZE) as u64)
+                .ok_or(FrameBackedError::InvalidRange)?;
+            let frame = self.allocate_owned(slot_index)?;
+            let _ = self.ensure_leaf_slot(slot_index, page_virtual)?;
+            let page_index = self.slots[slot_index].page_count;
+            self.slots[slot_index].pages[page_index] = PageRecord {
+                frame,
+                virtual_address: page_virtual,
+            };
+            self.slots[slot_index].page_count += 1;
+        }
+        self.slots[slot_index].mappings[mapping_index] = MappingRecord {
+            occupied: true,
+            sealed: false,
+            generation: self.slots[slot_index].generation,
+            virtual_address,
+            memory_size,
+            first_page: u16::try_from(first_page)
+                .map_err(|_| FrameBackedError::CapacityExceeded)?,
+            page_count: u16::try_from(pages_needed)
+                .map_err(|_| FrameBackedError::CapacityExceeded)?,
+            permissions: MappingPermissions {
+                readable: false,
+                writable: false,
+                executable: false,
+            },
+        };
+        self.slots[slot_index].mapping_count += 1;
+        Ok(FrameBackedMapping {
+            space_slot: space.slot,
+            slot: mapping_index as u8,
+            generation: self.slots[slot_index].generation,
+        })
+    }
+
+    fn copy_into(
+        &mut self,
+        mapping: Self::Mapping,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), Self::Error> {
+        let record = self.mapping(mapping)?;
+        if record.sealed
+            || offset
+                .checked_add(bytes.len())
+                .is_none_or(|end| end > record.memory_size)
+        {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        let mut copied = 0;
+        while copied < bytes.len() {
+            let absolute = offset + copied;
+            let page = absolute / PAGE_SIZE;
+            let within_page = absolute % PAGE_SIZE;
+            let length = (PAGE_SIZE - within_page).min(bytes.len() - copied);
+            let frame =
+                self.frame_for_mapping_page(usize::from(mapping.space_slot), record, page)?;
+            self.memory
+                .write_bytes(frame, within_page, &bytes[copied..copied + length])
+                .map_err(FrameBackedError::Memory)?;
+            copied += length;
+        }
+        Ok(())
+    }
+
+    fn verify_contents(
+        &mut self,
+        mapping: Self::Mapping,
+        initialized: &[u8],
+        memory_size: usize,
+    ) -> Result<bool, Self::Error> {
+        let record = self.mapping(mapping)?;
+        if record.sealed || memory_size != record.memory_size || initialized.len() > memory_size {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        let mut offset = 0;
+        while offset < initialized.len() {
+            let page = offset / PAGE_SIZE;
+            let within_page = offset % PAGE_SIZE;
+            let length = (PAGE_SIZE - within_page).min(initialized.len() - offset);
+            let frame =
+                self.frame_for_mapping_page(usize::from(mapping.space_slot), record, page)?;
+            if !self
+                .memory
+                .bytes_equal(frame, within_page, &initialized[offset..offset + length])
+                .map_err(FrameBackedError::Memory)?
+            {
+                return Ok(false);
+            }
+            offset += length;
+        }
+        while offset < memory_size {
+            let page = offset / PAGE_SIZE;
+            let within_page = offset % PAGE_SIZE;
+            let length = (PAGE_SIZE - within_page).min(memory_size - offset);
+            let frame =
+                self.frame_for_mapping_page(usize::from(mapping.space_slot), record, page)?;
+            if !self
+                .memory
+                .bytes_zero(frame, within_page, length)
+                .map_err(FrameBackedError::Memory)?
+            {
+                return Ok(false);
+            }
+            offset += length;
+        }
+        Ok(true)
+    }
+
+    fn seal(
+        &mut self,
+        mapping: Self::Mapping,
+        permissions: MappingPermissions,
+    ) -> Result<(), Self::Error> {
+        let record = self.mapping(mapping)?;
+        let slot_index = usize::from(mapping.space_slot);
+        if record.sealed
+            || !permissions.readable
+            || (permissions.writable && permissions.executable)
+        {
+            return Err(FrameBackedError::UnsupportedPermissions);
+        }
+        for page in 0..usize::from(record.page_count) {
+            let page_record = self.slots[slot_index].pages[usize::from(record.first_page) + page];
+            let (table, index) = self.leaf_slot(slot_index, page_record.virtual_address)?;
+            let mut entry = page_record.frame.as_u64() | ENTRY_PRESENT | ENTRY_USER;
+            if permissions.writable {
+                entry |= ENTRY_WRITABLE;
+            }
+            if !permissions.executable {
+                entry |= ENTRY_NO_EXECUTE;
+            }
+            self.memory
+                .write_entry(table, index, entry)
+                .map_err(FrameBackedError::Memory)?;
+        }
+        self.slots[slot_index].mappings[usize::from(mapping.slot)].permissions = permissions;
+        self.slots[slot_index].mappings[usize::from(mapping.slot)].sealed = true;
+        Ok(())
+    }
+
+    fn commit(
+        &mut self,
+        space: Self::Space,
+        entry_point: u64,
+    ) -> Result<Self::Process, Self::Error> {
+        let slot_index = usize::from(space.slot);
+        let Some(slot) = self.slots.get(slot_index) else {
+            return Err(FrameBackedError::InvalidHandle);
+        };
+        if self.active_slot != Some(space.slot)
+            || slot.phase != SpacePhase::Staging
+            || space.generation != slot.generation
+            || slot.mapping_count == 0
+            || slot.mappings[..slot.mapping_count]
+                .iter()
+                .any(|mapping| !mapping.sealed)
+            || !slot.mappings[..slot.mapping_count].iter().any(|mapping| {
+                mapping.permissions.executable
+                    && entry_point >= mapping.virtual_address
+                    && entry_point < mapping.virtual_address + mapping.memory_size as u64
+            })
+        {
+            return Err(FrameBackedError::InvalidState);
+        }
+        let root = slot.root.ok_or(FrameBackedError::InvalidState)?;
+        self.active_slot = None;
+        self.slots[slot_index].phase = SpacePhase::Committed;
+        self.slots[slot_index].process_info = ProcessImageInfo {
+            entry_point,
+            segment_count: self.slots[slot_index].mapping_count,
+            address_space_root: Some(root.as_u64()),
+            owned_frames: self.slots[slot_index].owned_frame_count,
+            initial_stack_pointer: None,
+        };
+        Ok(ProcessImageHandle::new(
+            space.slot,
+            self.slots[slot_index].generation,
+        ))
+    }
+
+    fn abort(&mut self, space: Self::Space) -> Result<(), Self::Error> {
+        let slot_index = usize::from(space.slot);
+        if self.active_slot != Some(space.slot)
+            || self.slots.get(slot_index).is_none_or(|slot| {
+                slot.phase != SpacePhase::Staging || slot.generation != space.generation
+            })
+        {
+            return Err(FrameBackedError::InvalidHandle);
+        }
+        self.cleanup_transaction(slot_index)
+    }
+
+    fn process_info(&self, process: &Self::Process) -> Option<ProcessImageInfo> {
+        self.process_slot(process)
+            .ok()
+            .map(|slot_index| self.slots[slot_index].process_info)
+    }
+
+    fn process_generation(&self, process: &Self::Process) -> Option<u32> {
+        self.process_info(process).map(|_| process.generation())
+    }
+
+    unsafe fn validate_activation(
+        &mut self,
+        process: &Self::Process,
+        _authority: &Capability<'_, ProcessInstallControl>,
+    ) -> Result<(), Self::Error> {
+        let root = self
+            .process_info(process)
+            .and_then(|info| info.address_space_root)
+            .ok_or(FrameBackedError::InvalidHandle)?;
+
+        #[cfg(target_os = "none")]
+        {
+            let _interrupt_guard = InterruptGuard::<X86_64>::enter();
+            // SAFETY: The serialized bootstrap phase owns this inactive root.
+            // Its upper PML4 half was copied from the active kernel hierarchy,
+            // so this code, stack, and direct map remain reachable.
+            let original_root = unsafe { active_page_table_root() };
+            unsafe { load_page_table_root(root) };
+            if unsafe { active_page_table_root() } != root {
+                unsafe { load_page_table_root(original_root) };
+                return Err(FrameBackedError::ActivationFailed);
+            }
+            // Reaching this point while the process root is active proves the
+            // inherited higher-half execution mappings are operational.
+            unsafe { load_page_table_root(original_root) };
+            if unsafe { active_page_table_root() } != original_root {
+                return Err(FrameBackedError::RestoreFailed);
+            }
+        }
+
+        #[cfg(not(target_os = "none"))]
+        let _ = root;
+
+        Ok(())
+    }
+
+    fn release_process(&mut self, process: &Self::Process) -> Result<(), Self::Error> {
+        let slot_index = self.process_slot(process)?;
+        let root = self.slots[slot_index]
+            .process_info
+            .address_space_root
+            .ok_or(FrameBackedError::InvalidHandle)?;
+        #[cfg(target_os = "none")]
+        if unsafe { active_page_table_root() } == root {
+            return Err(FrameBackedError::ActiveProcess);
+        }
+        #[cfg(not(target_os = "none"))]
+        let _ = root;
+        self.slots[slot_index].phase = SpacePhase::Free;
+        self.reset_records(slot_index);
+        self.release_owned(slot_index)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameBackedError<MemoryError> {
+    Memory(MemoryError),
+    InvalidState,
+    InvalidHandle,
+    InvalidRange,
+    InvalidUserRange,
+    InvalidPhysicalFrame,
+    CapacityExceeded,
+    MappingConflict,
+    CorruptHierarchy,
+    UnsupportedPermissions,
+    ActivationFailed,
+    RestoreFailed,
+    ActiveProcess,
+}
+
+fn page_indices<MemoryError>(address: u64) -> Result<[usize; 4], FrameBackedError<MemoryError>> {
+    if address >= 0x0000_8000_0000_0000 {
+        return Err(FrameBackedError::InvalidUserRange);
+    }
+    Ok([
+        ((address >> 39) & 0x1ff) as usize,
+        ((address >> 30) & 0x1ff) as usize,
+        ((address >> 21) & 0x1ff) as usize,
+        ((address >> 12) & 0x1ff) as usize,
+    ])
+}
+
+const fn next_generation(generation: u32) -> u32 {
+    let next = generation.wrapping_add(1);
+    if next == 0 { 1 } else { next }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use alloc::boxed::Box;
+    use blacklab::oureboros::{
+        FractalCatalog, FractalClass, FractalRecipe, FractalSeed, MINIMAL_X86_64_ELF_BYTES,
+        TargetArchitecture, measure_recipe,
+    };
+    use std::thread;
+
+    use crate::capability::{Authority, ProcessInstallControl, UserlandImageControl};
+    use crate::process::image::prepare_user_image;
+    use crate::process::install::{InstallError, install_user_image};
+
+    use super::*;
+
+    struct TestMemory<const FRAMES: usize> {
+        frames: [[u8; PAGE_SIZE]; FRAMES],
+        allocated: [bool; FRAMES],
+        fail_release_once: bool,
+    }
+
+    impl<const FRAMES: usize> TestMemory<FRAMES> {
+        const fn new() -> Self {
+            Self {
+                frames: [[0; PAGE_SIZE]; FRAMES],
+                allocated: [false; FRAMES],
+                fail_release_once: false,
+            }
+        }
+
+        fn in_use(&self) -> usize {
+            self.allocated
+                .iter()
+                .filter(|allocated| **allocated)
+                .count()
+        }
+
+        fn range(
+            &self,
+            frame: PhysicalAddress,
+            offset: usize,
+            length: usize,
+        ) -> Result<(usize, core::ops::Range<usize>), TestMemoryError> {
+            let index = usize::try_from(frame.as_u64() / PAGE_SIZE as u64)
+                .map_err(|_| TestMemoryError::Invalid)?;
+            let end = offset.checked_add(length).ok_or(TestMemoryError::Invalid)?;
+            if index >= FRAMES || end > PAGE_SIZE {
+                return Err(TestMemoryError::Invalid);
+            }
+            Ok((index, offset..end))
+        }
+    }
+
+    impl<const FRAMES: usize> ProcessFrameMemory for TestMemory<FRAMES> {
+        type Error = TestMemoryError;
+
+        fn allocate_zeroed(&mut self) -> Result<PhysicalAddress, Self::Error> {
+            let index = self
+                .allocated
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find_map(|(index, allocated)| (!*allocated).then_some(index))
+                .ok_or(TestMemoryError::Exhausted)?;
+            self.allocated[index] = true;
+            self.frames[index].fill(0);
+            Ok(PhysicalAddress::new((index * PAGE_SIZE) as u64))
+        }
+
+        fn release(&mut self, frame: PhysicalAddress) -> Result<(), Self::Error> {
+            let (index, _) = self.range(frame, 0, PAGE_SIZE)?;
+            if !self.allocated[index] {
+                return Err(TestMemoryError::Invalid);
+            }
+            if self.fail_release_once {
+                self.fail_release_once = false;
+                return Err(TestMemoryError::ReleaseFailed);
+            }
+            self.allocated[index] = false;
+            self.frames[index].fill(0);
+            Ok(())
+        }
+
+        fn read_entry(&self, table: PhysicalAddress, index: usize) -> Result<u64, Self::Error> {
+            let (frame, range) = self.range(table, index * 8, 8)?;
+            Ok(u64::from_le_bytes(
+                self.frames[frame][range]
+                    .try_into()
+                    .map_err(|_| TestMemoryError::Invalid)?,
+            ))
+        }
+
+        fn write_entry(
+            &mut self,
+            table: PhysicalAddress,
+            index: usize,
+            value: u64,
+        ) -> Result<(), Self::Error> {
+            let (frame, range) = self.range(table, index * 8, 8)?;
+            self.frames[frame][range].copy_from_slice(&value.to_le_bytes());
+            Ok(())
+        }
+
+        fn write_bytes(
+            &mut self,
+            frame: PhysicalAddress,
+            offset: usize,
+            bytes: &[u8],
+        ) -> Result<(), Self::Error> {
+            let (frame, range) = self.range(frame, offset, bytes.len())?;
+            self.frames[frame][range].copy_from_slice(bytes);
+            Ok(())
+        }
+
+        fn bytes_equal(
+            &self,
+            frame: PhysicalAddress,
+            offset: usize,
+            bytes: &[u8],
+        ) -> Result<bool, Self::Error> {
+            let (frame, range) = self.range(frame, offset, bytes.len())?;
+            Ok(self.frames[frame][range] == *bytes)
+        }
+
+        fn bytes_zero(
+            &self,
+            frame: PhysicalAddress,
+            offset: usize,
+            length: usize,
+        ) -> Result<bool, Self::Error> {
+            let (frame, range) = self.range(frame, offset, length)?;
+            Ok(self.frames[frame][range].iter().all(|byte| *byte == 0))
+        }
+    }
+
+    impl<const FRAMES: usize> ProcessFrameMemory for Box<TestMemory<FRAMES>> {
+        type Error = TestMemoryError;
+
+        fn allocate_zeroed(&mut self) -> Result<PhysicalAddress, Self::Error> {
+            (**self).allocate_zeroed()
+        }
+        fn release(&mut self, frame: PhysicalAddress) -> Result<(), Self::Error> {
+            (**self).release(frame)
+        }
+        fn read_entry(&self, table: PhysicalAddress, index: usize) -> Result<u64, Self::Error> {
+            (**self).read_entry(table, index)
+        }
+        fn write_entry(
+            &mut self,
+            table: PhysicalAddress,
+            index: usize,
+            value: u64,
+        ) -> Result<(), Self::Error> {
+            (**self).write_entry(table, index, value)
+        }
+        fn write_bytes(
+            &mut self,
+            frame: PhysicalAddress,
+            offset: usize,
+            bytes: &[u8],
+        ) -> Result<(), Self::Error> {
+            (**self).write_bytes(frame, offset, bytes)
+        }
+        fn bytes_equal(
+            &self,
+            frame: PhysicalAddress,
+            offset: usize,
+            bytes: &[u8],
+        ) -> Result<bool, Self::Error> {
+            (**self).bytes_equal(frame, offset, bytes)
+        }
+        fn bytes_zero(
+            &self,
+            frame: PhysicalAddress,
+            offset: usize,
+            length: usize,
+        ) -> Result<bool, Self::Error> {
+            (**self).bytes_zero(frame, offset, length)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TestMemoryError {
+        Exhausted,
+        Invalid,
+        ReleaseFailed,
+    }
+
+    fn catalog() -> FractalCatalog {
+        let recipe = FractalRecipe {
+            algorithm_version: 2,
+            base_entropy: 1,
+            structural_mutator: 2,
+        };
+        let mut catalog = FractalCatalog::new();
+        catalog
+            .plant_seed(FractalSeed {
+                inode_id: 1,
+                class: FractalClass::Executable,
+                architecture: TargetArchitecture::X86_64,
+                recipe,
+                unfolded_size_bytes: MINIMAL_X86_64_ELF_BYTES as u32,
+                entry_offset: 128,
+                expected_sha256: measure_recipe(recipe, MINIMAL_X86_64_ELF_BYTES).unwrap(),
+            })
+            .unwrap();
+        catalog
+    }
+
+    #[test]
+    fn builds_hardware_entries_and_reclaims_every_owned_frame() {
+        let mut memory = Box::new(TestMemory::<176>::new());
+        let inherited = 0x1234_5000 | ENTRY_PRESENT | ENTRY_WRITABLE;
+        memory
+            .write_entry(PhysicalAddress::new(0), 256, inherited)
+            .unwrap();
+        let authority = unsafe { Authority::assume_root() };
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let catalog = catalog();
+        let mut bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let image_control = authority.grant::<UserlandImageControl>();
+        let artifact = catalog.materialize(1, &mut bytes).unwrap();
+        let image = prepare_user_image(artifact, &image_control).unwrap();
+        let installed = install_user_image(image, &mut backend, &install_control).unwrap();
+        let info = backend.process_info(&installed.process).unwrap();
+        // SAFETY: Host tests exercise structural activation validation only;
+        // privileged CR3 switching is compiled solely for the bare-metal target.
+        unsafe {
+            backend
+                .validate_activation(&installed.process, &install_control)
+                .unwrap();
+        }
+        let root = PhysicalAddress::new(info.address_space_root.unwrap());
+        assert_eq!(info.owned_frames, 5);
+        assert_eq!(backend.memory().read_entry(root, 256), Ok(inherited));
+        assert_eq!(
+            backend.install_initial_stack(&installed.process, &install_control),
+            Ok(INITIAL_USER_STACK_POINTER)
+        );
+        let stacked = backend.process_info(&installed.process).unwrap();
+        // The 4 MiB stack base crosses two fresh page-table levels in this
+        // synthetic hierarchy in addition to the stack data frames.
+        assert_eq!(stacked.owned_frames, 5 + INITIAL_USER_STACK_PAGES + 2);
+        assert_eq!(
+            stacked.initial_stack_pointer,
+            Some(INITIAL_USER_STACK_POINTER)
+        );
+        let stack_pointer = backend
+            .prepare_initial_stack(&installed.process, &[b"push"], &[b"SISYPHUS_PROCESS=push"])
+            .unwrap();
+        assert_eq!(stack_pointer, INITIAL_USER_STACK_BASE);
+
+        let p3 = backend.memory().read_entry(root, 0).unwrap() & PAGE_ADDRESS_MASK;
+        let p2 = backend
+            .memory()
+            .read_entry(PhysicalAddress::new(p3), 0)
+            .unwrap()
+            & PAGE_ADDRESS_MASK;
+        let p1 = backend
+            .memory()
+            .read_entry(PhysicalAddress::new(p2), 0)
+            .unwrap()
+            & PAGE_ADDRESS_MASK;
+        let leaf = backend
+            .memory()
+            .read_entry(PhysicalAddress::new(p1), 1)
+            .unwrap();
+        assert_eq!(
+            leaf & (ENTRY_PRESENT | ENTRY_USER),
+            ENTRY_PRESENT | ENTRY_USER
+        );
+        assert_eq!(leaf & (ENTRY_WRITABLE | ENTRY_NO_EXECUTE), 0);
+        let data = PhysicalAddress::new(leaf & PAGE_ADDRESS_MASK);
+        assert_eq!(
+            backend
+                .memory()
+                .bytes_equal(data, 34, b"PID1 syscall write\n"),
+            Ok(true)
+        );
+        assert_eq!(
+            backend.memory().bytes_zero(data, 53, PAGE_SIZE - 53),
+            Ok(true)
+        );
+        assert_eq!(
+            backend.install_initial_stack(&installed.process, &install_control),
+            Err(FrameBackedError::InvalidState)
+        );
+
+        backend.release_process(&installed.process).unwrap();
+        assert_eq!(backend.process_info(&installed.process), None);
+        // SAFETY: This verifies that released handles cannot authorize a later
+        // activation; no privileged operation is compiled into this host test.
+        assert_eq!(
+            unsafe { backend.validate_activation(&installed.process, &install_control) },
+            Err(FrameBackedError::InvalidHandle)
+        );
+        assert_eq!(backend.memory().in_use(), 0);
+    }
+
+    #[test]
+    fn retains_a_measured_image_with_an_explicit_larger_stack_budget() {
+        let memory = Box::new(TestMemory::<176>::new());
+        let authority = unsafe { Authority::assume_root() };
+        let image_control = authority.grant::<UserlandImageControl>();
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let catalog = catalog();
+        let mut bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let artifact = catalog.materialize(1, &mut bytes).unwrap();
+        let image = prepare_user_image(artifact, &image_control).unwrap();
+        let installed = install_user_image(image, &mut backend, &install_control).unwrap();
+
+        const CREST_STACK_PAGES: usize = 160;
+        let expected_initial_pointer =
+            INITIAL_USER_STACK_BASE + (CREST_STACK_PAGES * PAGE_SIZE) as u64;
+        assert_eq!(
+            backend.install_initial_stack_pages(
+                &installed.process,
+                CREST_STACK_PAGES,
+                &install_control,
+            ),
+            Ok(expected_initial_pointer),
+        );
+        let installed_info = backend.process_info(&installed.process).unwrap();
+        assert_eq!(
+            installed_info.initial_stack_pointer,
+            Some(expected_initial_pointer)
+        );
+        assert_eq!(installed_info.owned_frames, 5 + CREST_STACK_PAGES + 2);
+        assert_eq!(
+            backend.prepare_initial_stack(&installed.process, &[b"crest"], &[]),
+            Ok(INITIAL_USER_STACK_BASE),
+        );
+        assert_eq!(
+            backend.install_initial_stack_pages(&installed.process, 1, &install_control),
+            Err(FrameBackedError::InvalidState),
+        );
+    }
+
+    #[test]
+    fn retains_two_processes_and_recycles_only_the_released_slot() {
+        let memory = Box::new(TestMemory::<176>::new());
+        let authority = unsafe { Authority::assume_root() };
+        let image_control = authority.grant::<UserlandImageControl>();
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let catalog = catalog();
+        let mut first_bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let first_artifact = catalog.materialize(1, &mut first_bytes).unwrap();
+        let first_image = prepare_user_image(first_artifact, &image_control).unwrap();
+        let first = install_user_image(first_image, &mut backend, &install_control).unwrap();
+        let first_info = backend.process_info(&first.process).unwrap();
+
+        let mut second_bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let second_artifact = catalog.materialize(1, &mut second_bytes).unwrap();
+        let second_image = prepare_user_image(second_artifact, &image_control).unwrap();
+        let second = install_user_image(second_image, &mut backend, &install_control).unwrap();
+        backend
+            .install_initial_stack(&second.process, &install_control)
+            .unwrap();
+        let second_info = backend.process_info(&second.process).unwrap();
+
+        assert_ne!(first.process.slot(), second.process.slot());
+        assert_ne!(
+            first_info.address_space_root,
+            second_info.address_space_root
+        );
+        assert_eq!(
+            backend.owned_frame_count(),
+            first_info.owned_frames + second_info.owned_frames
+        );
+        assert_eq!(backend.memory().in_use(), backend.owned_frame_count());
+
+        let mut rejected_bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let rejected_artifact = catalog.materialize(1, &mut rejected_bytes).unwrap();
+        let rejected_image = prepare_user_image(rejected_artifact, &image_control).unwrap();
+        assert_eq!(
+            install_user_image(rejected_image, &mut backend, &install_control),
+            Err(InstallError::Backend(FrameBackedError::CapacityExceeded))
+        );
+
+        backend.release_process(&first.process).unwrap();
+        assert_eq!(backend.process_info(&first.process), None);
+        assert_eq!(backend.process_info(&second.process), Some(second_info));
+        assert_eq!(backend.owned_frame_count(), second_info.owned_frames);
+        assert_eq!(backend.memory().in_use(), second_info.owned_frames);
+
+        let mut replacement_bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let replacement_artifact = catalog.materialize(1, &mut replacement_bytes).unwrap();
+        let replacement_image = prepare_user_image(replacement_artifact, &image_control).unwrap();
+        let replacement =
+            install_user_image(replacement_image, &mut backend, &install_control).unwrap();
+        assert_eq!(replacement.process.slot(), first.process.slot());
+        assert_ne!(replacement.process.generation(), first.process.generation());
+        assert_eq!(backend.process_info(&first.process), None);
+
+        backend.release_process(&replacement.process).unwrap();
+        backend.release_process(&second.process).unwrap();
+        assert_eq!(backend.owned_frame_count(), 0);
+        assert_eq!(backend.memory().in_use(), 0);
+    }
+
+    #[test]
+    fn failed_committed_release_quarantines_only_failed_frames() {
+        let memory = TestMemory::<16>::new();
+        let authority = unsafe { Authority::assume_root() };
+        let image_control = authority.grant::<UserlandImageControl>();
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let physical_memory = authority.grant::<PhysicalMemoryControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let catalog = catalog();
+        let mut bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let artifact = catalog.materialize(1, &mut bytes).unwrap();
+        let image = prepare_user_image(artifact, &image_control).unwrap();
+        let installed = install_user_image(image, &mut backend, &install_control).unwrap();
+        assert_eq!(backend.owned_frame_count(), 5);
+
+        backend.memory_mut().fail_release_once = true;
+        assert_eq!(
+            backend.release_process(&installed.process),
+            Err(FrameBackedError::Memory(TestMemoryError::ReleaseFailed))
+        );
+        assert_eq!(backend.process_info(&installed.process), None);
+        assert_eq!(backend.owned_frame_count(), 1);
+        assert_eq!(backend.memory().in_use(), 1);
+
+        backend.retry_cleanup(&physical_memory).unwrap();
+        assert_eq!(backend.owned_frame_count(), 0);
+        assert_eq!(backend.memory().in_use(), 0);
+    }
+
+    #[test]
+    fn allocation_failure_aborts_and_reclaims_partial_hierarchy() {
+        let memory = TestMemory::<5>::new();
+        let catalog = catalog();
+        let mut bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let authority = unsafe { Authority::assume_root() };
+        let image_control = authority.grant::<UserlandImageControl>();
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let artifact = catalog.materialize(1, &mut bytes).unwrap();
+        let image = prepare_user_image(artifact, &image_control).unwrap();
+        assert_eq!(
+            install_user_image(image, &mut backend, &install_control),
+            Err(InstallError::Backend(FrameBackedError::Memory(
+                TestMemoryError::Exhausted
+            )))
+        );
+        assert_eq!(backend.memory().in_use(), 0);
+    }
+
+    #[test]
+    fn staging_is_nonpresent_before_rw_nx_sealing() {
+        let memory = TestMemory::<16>::new();
+        let authority = unsafe { Authority::assume_root() };
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let space = backend.begin(0x1000, 0x2000).unwrap();
+        let mapping = backend.map_zeroed(space, 0x1000, PAGE_SIZE).unwrap();
+        let root = backend.slots[usize::from(space.slot)].root.unwrap();
+        let p3 = backend.memory().read_entry(root, 0).unwrap() & PAGE_ADDRESS_MASK;
+        let p2 = backend
+            .memory()
+            .read_entry(PhysicalAddress::new(p3), 0)
+            .unwrap()
+            & PAGE_ADDRESS_MASK;
+        let p1 = backend
+            .memory()
+            .read_entry(PhysicalAddress::new(p2), 0)
+            .unwrap()
+            & PAGE_ADDRESS_MASK;
+        assert_eq!(
+            backend.memory().read_entry(PhysicalAddress::new(p1), 1),
+            Ok(0)
+        );
+
+        backend
+            .seal(
+                mapping,
+                MappingPermissions {
+                    readable: true,
+                    writable: true,
+                    executable: false,
+                },
+            )
+            .unwrap();
+        let leaf = backend
+            .memory()
+            .read_entry(PhysicalAddress::new(p1), 1)
+            .unwrap();
+        assert_eq!(
+            leaf & (ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER | ENTRY_NO_EXECUTE),
+            ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER | ENTRY_NO_EXECUTE
+        );
+        backend.abort(space).unwrap();
+        assert_eq!(backend.memory().in_use(), 0);
+    }
+
+    #[test]
+    fn maps_a_large_bounded_frame_without_a_u8_page_count_wrap() {
+        thread::Builder::new()
+            .name("large-frame-regression".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(maps_a_large_bounded_frame_without_a_u8_page_count_wrap_inner)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn maps_a_large_bounded_frame_without_a_u8_page_count_wrap_inner() {
+        let memory = Box::new(TestMemory::<400>::new());
+        let authority = unsafe { Authority::assume_root() };
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let mut backend = Box::new(FrameBackedAddressSpace::new(
+            memory,
+            PhysicalAddress::new(0),
+            &install_control,
+        ));
+        let space = backend.begin(0x1000, 0x1f0_000).unwrap();
+        let mapping = backend
+            .map_zeroed(space, 0x1000, 300 * PAGE_SIZE)
+            .expect("bounded multi-page image mapping");
+        assert_eq!(
+            backend.mapping(mapping).unwrap().page_count,
+            300,
+            "mapping metadata must represent more than 255 pages"
+        );
+        backend
+            .seal(
+                mapping,
+                MappingPermissions {
+                    readable: true,
+                    writable: true,
+                    executable: false,
+                },
+            )
+            .unwrap();
+        backend.abort(space).unwrap();
+        assert_eq!(backend.memory().in_use(), 0);
+    }
+
+    #[test]
+    fn failed_frame_release_remains_owned_for_retry() {
+        let memory = TestMemory::<16>::new();
+        let authority = unsafe { Authority::assume_root() };
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let physical_memory = authority.grant::<PhysicalMemoryControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let space = backend.begin(0x1000, 0x2000).unwrap();
+        backend.map_zeroed(space, 0x1000, PAGE_SIZE).unwrap();
+        backend.memory_mut().fail_release_once = true;
+        assert_eq!(
+            backend.abort(space),
+            Err(FrameBackedError::Memory(TestMemoryError::ReleaseFailed))
+        );
+        assert_eq!(backend.owned_frame_count(), 1);
+        backend.retry_cleanup(&physical_memory).unwrap();
+        assert_eq!(backend.owned_frame_count(), 0);
+        assert_eq!(backend.memory().in_use(), 0);
+    }
+}
