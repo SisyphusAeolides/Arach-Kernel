@@ -142,6 +142,30 @@ pub struct LinuxKoSpecialSection<'a> {
     pub kind: LinuxKoSpecialSectionKind,
 }
 
+/// Explicit processor receipt for the special-section categories handled in
+/// one transaction. Native publication requires an exact match with the
+/// inventory derived from that module.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LinuxKoSpecialSectionCoverage(u16);
+
+impl LinuxKoSpecialSectionCoverage {
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub fn acknowledge(&mut self, kind: LinuxKoSpecialSectionKind) {
+        self.0 |= 1_u16 << kind as u8;
+    }
+
+    pub fn from_sections(sections: &[LinuxKoSpecialSection<'_>]) -> Self {
+        let mut coverage = Self::empty();
+        for section in sections {
+            coverage.acknowledge(section.kind);
+        }
+        coverage
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PreparedPatch {
     image_offset: usize,

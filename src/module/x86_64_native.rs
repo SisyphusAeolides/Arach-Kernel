@@ -7,6 +7,7 @@
 
 use crate::module::linux_loader::{
     LinuxKoBackend, LinuxKoLoadPlan, LinuxKoMemoryRegion, LinuxKoSpecialSection,
+    LinuxKoSpecialSectionCoverage,
 };
 use crate::module::x86_64_memory::{
     LinuxModuleMapping, LinuxModuleTlb, MAXIMUM_LIVE_LINUX_MODULES, X86_64LinuxModuleMemory,
@@ -23,7 +24,9 @@ pub const LINUX_MODULE_NAME_BYTES: usize = 56;
 /// Implementors must process every required architecture and Linux special
 /// section represented by `plan`, or return an error. They may mutate only the
 /// supplied staging reservation and must not seal, commit, execute, or retain
-/// its mapping handle.
+/// its mapping handle. The returned coverage receipt must acknowledge exactly
+/// the categories actually present in `special_sections`; the backend rejects
+/// missing or extraneous acknowledgements before sealing.
 pub unsafe trait X86_64LinuxPreSeal<Memory, Tlb>
 where
     Memory: ProcessFrameMemory,
@@ -37,7 +40,7 @@ where
         reservation: LinuxModuleMapping,
         plan: &LinuxKoLoadPlan<'_>,
         special_sections: &[LinuxKoSpecialSection<'_>],
-    ) -> Result<(), Self::Error>;
+    ) -> Result<LinuxKoSpecialSectionCoverage, Self::Error>;
 }
 
 /// Serialized control transfer into a committed Linux module.
@@ -62,6 +65,7 @@ pub enum X86_64LinuxBackendError<MemoryError, PreSealError, ExecutorError> {
     InvalidModuleName,
     DuplicateModuleName,
     InvalidSpecialSectionInventory,
+    IncompleteSpecialSectionCoverage,
     InvalidLifecycle,
     InvalidLifecycleAddress,
 }
@@ -301,9 +305,13 @@ where
         let special_sections = plan
             .special_sections()
             .map_err(|_| X86_64LinuxBackendError::InvalidSpecialSectionInventory)?;
-        self.pre_seal
+        let coverage = self
+            .pre_seal
             .prepare(&mut self.memory, reservation, plan, &special_sections)
             .map_err(X86_64LinuxBackendError::PreSeal)?;
+        if coverage != LinuxKoSpecialSectionCoverage::from_sections(&special_sections) {
+            return Err(X86_64LinuxBackendError::IncompleteSpecialSectionCoverage);
+        }
         self.prepared_generations[slot] = reservation.generation();
         Ok(())
     }
@@ -571,6 +579,20 @@ mod tests {
             Ok(())
         }
 
+        fn read_bytes(
+            &self,
+            frame: PhysicalAddress,
+            offset: usize,
+            destination: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            let end = offset
+                .checked_add(destination.len())
+                .filter(|end| *end <= PAGE_SIZE)
+                .ok_or(TestMemoryError::InvalidFrame)?;
+            destination.copy_from_slice(&self.frame(frame)?.bytes[offset..end]);
+            Ok(())
+        }
+
         fn bytes_equal(
             &self,
             frame: PhysicalAddress,
@@ -620,6 +642,7 @@ mod tests {
     struct TestPreSeal {
         calls: usize,
         reject: bool,
+        incomplete: bool,
     }
 
     unsafe impl X86_64LinuxPreSeal<TestMemory, TestTlb> for TestPreSeal {
@@ -631,7 +654,7 @@ mod tests {
             _reservation: LinuxModuleMapping,
             plan: &LinuxKoLoadPlan<'_>,
             special_sections: &[LinuxKoSpecialSection<'_>],
-        ) -> Result<(), Self::Error> {
+        ) -> Result<LinuxKoSpecialSectionCoverage, Self::Error> {
             self.calls += 1;
             assert!(!plan.name().is_empty());
             assert!(plan.source_bytes().starts_with(b"\x7fELF"));
@@ -643,7 +666,11 @@ mod tests {
             if self.reject {
                 Err(TestPreSealError::Rejected)
             } else {
-                Ok(())
+                Ok(if self.incomplete {
+                    LinuxKoSpecialSectionCoverage::empty()
+                } else {
+                    LinuxKoSpecialSectionCoverage::from_sections(special_sections)
+                })
             }
         }
     }
@@ -800,6 +827,24 @@ mod tests {
                 X86_64LinuxBackendError::PreSeal(TestPreSealError::Rejected)
             ))
         ));
+        assert_eq!(backend.live_module_count(), 0);
+        assert!(backend.executor.init_calls.is_empty());
+        assert_eq!(backend.memory_owner().memory().live_frames(), 3);
+    }
+
+    #[test]
+    fn incomplete_special_section_coverage_never_reaches_seal_or_execution() {
+        let bytes = crate::module::linux_ko::tests::fixture();
+        let mut backend = backend();
+        backend.pre_seal.incomplete = true;
+        let result = unsafe { install_linux_module(&bytes, b"6.12", &Resolver, &mut backend) };
+        assert!(matches!(
+            result,
+            Err(LinuxKoInstallError::Backend(
+                X86_64LinuxBackendError::IncompleteSpecialSectionCoverage
+            ))
+        ));
+        assert_eq!(backend.pre_seal.calls, 1);
         assert_eq!(backend.live_module_count(), 0);
         assert!(backend.executor.init_calls.is_empty());
         assert_eq!(backend.memory_owner().memory().live_frames(), 3);

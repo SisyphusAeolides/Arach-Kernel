@@ -79,10 +79,13 @@ alternatives, jump labels, static calls, dynamic tracing, SMP-lock and call-site
 patching, ORC unwind data, bug tables, parameters, tracepoints, exports,
 per-CPU data, allocation tags and printk indexes. That inventory is an explicit
 argument to the unsafe processor, so these sections cannot remain hidden behind
-a generic byte image. Lifecycle dispatch is a separate unsafe executor contract
-whose error path guarantees module control was never entered. There are
-intentionally no permissive no-op or host-call implementations of either
-contract.
+a generic byte image. The processor reads relocated values through a bounded
+frame-backed staging API while the module virtual range remains non-present,
+then returns an exact category-coverage receipt. Missing or extraneous coverage
+aborts the reservation before W^X publication. Lifecycle dispatch is a separate
+unsafe executor contract whose error path guarantees module control was never
+entered. There are intentionally no permissive no-op or host-call
+implementations of either contract.
 
 Host fault-injection tests cover stale handles, conflicting hierarchy
 ownership, allocation failure, partial page-table publication, failed seal

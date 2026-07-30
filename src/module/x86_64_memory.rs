@@ -407,6 +407,42 @@ where
         Ok(())
     }
 
+    /// Copies relocated bytes out of an inaccessible staging reservation.
+    /// Pre-seal processors use this path instead of dereferencing the module's
+    /// deliberately non-present virtual range.
+    pub fn read(
+        &self,
+        mapping: LinuxModuleMapping,
+        offset: usize,
+        destination: &mut [u8],
+    ) -> Result<(), X86_64ModuleMapError<Memory::Error>> {
+        let slot_index = self.staging_slot(mapping)?;
+        if offset
+            .checked_add(destination.len())
+            .is_none_or(|end| end > self.slots[slot_index].image_size)
+        {
+            return Err(X86_64ModuleMapError::InvalidRange);
+        }
+        let mut copied = 0;
+        while copied < destination.len() {
+            let absolute = offset + copied;
+            let page = absolute / PAGE_SIZE;
+            let within = absolute % PAGE_SIZE;
+            let length = (PAGE_SIZE - within).min(destination.len() - copied);
+            let frame = self.slots[slot_index]
+                .data_frames
+                .get(page)
+                .copied()
+                .flatten()
+                .ok_or(X86_64ModuleMapError::InvalidState)?;
+            self.memory
+                .read_bytes(frame, within, &mut destination[copied..copied + length])
+                .map_err(X86_64ModuleMapError::Memory)?;
+            copied += length;
+        }
+        Ok(())
+    }
+
     pub fn verify(
         &self,
         mapping: LinuxModuleMapping,
@@ -1054,6 +1090,21 @@ mod tests {
             Ok(())
         }
 
+        fn read_bytes(
+            &self,
+            frame: PhysicalAddress,
+            offset: usize,
+            destination: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            let source = self.frame(frame)?;
+            let end = offset
+                .checked_add(destination.len())
+                .filter(|end| *end <= PAGE_SIZE)
+                .ok_or(FakeError::InvalidFrame)?;
+            destination.copy_from_slice(&source.bytes[offset..end]);
+            Ok(())
+        }
+
         fn bytes_equal(
             &self,
             frame: PhysicalAddress,
@@ -1147,7 +1198,14 @@ mod tests {
         let payload = vec![0x5a; PAGE_SIZE + 17];
         mapper.write(mapping, PAGE_SIZE - 9, &payload).unwrap();
         assert!(mapper.verify(mapping, PAGE_SIZE - 9, &payload).unwrap());
+        let mut relocated = vec![0; payload.len()];
+        mapper.read(mapping, PAGE_SIZE - 9, &mut relocated).unwrap();
+        assert_eq!(relocated, payload);
         mapper.seal(mapping, &regions()).unwrap();
+        assert_eq!(
+            mapper.read(mapping, 0, &mut [0; 1]),
+            Err(X86_64ModuleMapError::InvalidState)
+        );
 
         let text = mapper.memory.read_entry(leaf, 0).unwrap();
         let writable = mapper.memory.read_entry(leaf, 1).unwrap();

@@ -57,6 +57,12 @@ pub trait ProcessFrameMemory {
         offset: usize,
         bytes: &[u8],
     ) -> Result<(), Self::Error>;
+    fn read_bytes(
+        &self,
+        frame: PhysicalAddress,
+        offset: usize,
+        destination: &mut [u8],
+    ) -> Result<(), Self::Error>;
     fn bytes_equal(
         &self,
         frame: PhysicalAddress,
@@ -190,6 +196,25 @@ impl ProcessFrameMemory for DirectMapFrameMemory<'_, '_> {
         // SAFETY: Bounds were checked against the exclusively owned frame and
         // source and destination cannot overlap.
         unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), pointer, bytes.len()) };
+        Ok(())
+    }
+
+    fn read_bytes(
+        &self,
+        frame: PhysicalAddress,
+        offset: usize,
+        destination: &mut [u8],
+    ) -> Result<(), Self::Error> {
+        let pointer = self.pointer(frame, offset, destination.len())?;
+        // SAFETY: The checked direct-map range remains readable and cannot
+        // overlap the caller-owned destination.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                pointer.cast_const(),
+                destination.as_mut_ptr(),
+                destination.len(),
+            )
+        };
         Ok(())
     }
 
@@ -1420,6 +1445,17 @@ mod tests {
             Ok(())
         }
 
+        fn read_bytes(
+            &self,
+            frame: PhysicalAddress,
+            offset: usize,
+            destination: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            let (frame, range) = self.range(frame, offset, destination.len())?;
+            destination.copy_from_slice(&self.frames[frame][range]);
+            Ok(())
+        }
+
         fn bytes_equal(
             &self,
             frame: PhysicalAddress,
@@ -1468,6 +1504,14 @@ mod tests {
             bytes: &[u8],
         ) -> Result<(), Self::Error> {
             (**self).write_bytes(frame, offset, bytes)
+        }
+        fn read_bytes(
+            &self,
+            frame: PhysicalAddress,
+            offset: usize,
+            destination: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            (**self).read_bytes(frame, offset, destination)
         }
         fn bytes_equal(
             &self,
