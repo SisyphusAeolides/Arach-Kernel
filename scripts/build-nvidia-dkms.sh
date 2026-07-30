@@ -108,6 +108,9 @@ cat >"$report" <<EOF
   "exact_vermagic": true,
   "symbol_crc_admission": true,
   "export_policy_admission": true,
+  "load_layout_planning": true,
+  "wx_region_planning": true,
+  "relocation_binding": true,
   "build_qualified": true,
   "runtime_qualified": false
 }

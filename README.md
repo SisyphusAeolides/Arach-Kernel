@@ -26,14 +26,15 @@ system release. Status claims are tied to executable gates:
 | Kernel workspace | Rust workspace formatting, all-target compilation and tests; C and Fortran ABI checks | Host CI qualified |
 | Formal contracts | Idris 2 total specifications and Agda safe proof models compile in CI | Build-evidence qualified |
 | C0 system bundle | Pinned Granite, Arach Kernel and Push artifacts plus a bounded ring-3 syscall probe build into one measured bundle | Build qualified; QEMU execution pending |
-| Linux external modules | Real Kbuild modules from RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 pass bounded ELF inspection, exact vermagic, symbol CRC, export-class and namespace admission | Build/admission qualified |
-| NVIDIA open modules | Pinned NVIDIA `610.43.03` sources produce and admit `nvidia`, `nvidia-modeset`, `nvidia-drm` and `nvidia-uvm` with four workers | Build qualified; Arach load/init/remove pending |
+| Linux external modules | Real Kbuild modules from RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 pass bounded ELF inspection, exact ABI admission, six-region W^X load planning and allocated-section relocation binding | Build and static load-admission qualified; native execution pending |
+| NVIDIA open modules | Pinned NVIDIA `610.43.03` sources produce all four required modules; each passes ABI admission, lifecycle placement and complete allocated-section relocation binding | Build and static load-admission qualified; Arach init/device/remove pending |
 | Native Arach boot | Boot structures, memory, interrupt, process, driver and ABI subsystems are implemented and host-tested | Granite-to-Arach QEMU boot gate pending |
 | COSMIC Epoch | The complete greeter, session, compositor, portal, application and hardware contract is specified | Runtime qualification pending |
 
 The immediate critical path is: boot the measured C0 bundle under QEMU, bring
-up the Linux-compatible userspace surface, load and exercise qualified modules
-through Arach's own W^X loader, then run an unmodified pinned COSMIC session.
+up the Linux-compatible userspace surface, connect the W^X module transaction
+to Arach's native memory/execution backend and exercise qualified modules, then
+run an unmodified pinned COSMIC session.
 Passing a source build or host unit test never counts as boot, runtime, or
 hardware evidence.
 
@@ -117,10 +118,12 @@ Arach targets NVIDIA's open `610.43.03` kernel modules through a measured
 external-Kbuild and Linux-KPI compatibility layer. The pinned source audit and
 build entry point are documented in the
 [NVIDIA DKMS compatibility contract](docs/NVIDIA_DKMS.md). All four required
-modules currently pass the external build and static admission gates. Arach
-does not yet advertise NVIDIA runtime readiness because relocation against
-live KPI addresses, W^X sealing, module initialization, device exercise and
-clean removal still require native execution evidence.
+modules currently pass the external build and static load-admission gates,
+including load-region planning and allocated-section relocation binding. Arach
+does not yet advertise NVIDIA runtime readiness because live KPI resolution,
+native W^X publication, Linux special-section processing, module
+initialization, device exercise and clean removal still require native
+execution evidence.
 
 ## License
 

@@ -27,9 +27,9 @@ and load, unload, suspend, resume, and failure rollback.
 
 The reusable [Linux kernel compatibility contract](LINUX_KERNEL_CONTRACT.md)
 owns these gates. `src/nvidia_dkms.rs` pins the NVIDIA revision and qualifies it
-against the external-module and NVIDIA-runtime profiles. The current evidence
-is intentionally empty until the corresponding Arach implementation and
-integration test exist.
+against the external-module and NVIDIA-runtime profiles. Build and static
+load-admission evidence exists; NVIDIA-runtime evidence remains intentionally
+empty until native Arach execution and hardware integration tests pass.
 
 ## Source audit
 
@@ -66,9 +66,12 @@ contract-SDK vermagic, then its SHA-256 digest is recorded in
 runtime qualification false until the Arach loader and GPU lifecycle suites
 pass.
 
-Each artifact also passes Arach's bounded structural parser and build-admission
-engine. The engine checks every `__versions` CRC against both the SDK export
-catalog and the NVIDIA modules' generated `Module.symvers`, including GPL-only
-and namespace rules. These catalogs use placeholder addresses, so this proves
+Each artifact also passes Arach's bounded structural parser and static
+load-admission engine. The engine checks every `__versions` CRC against both
+the SDK export catalog and the NVIDIA modules' generated `Module.symvers`,
+including GPL-only and namespace rules. It then plans page-separated core/init
+RX, R and RW regions, locates init/cleanup in their required regions, and
+freezes every allocated-section relocation after bounds, range and overlap
+checks. These catalogs use placeholder addresses, so this proves ELF/linker and
 ABI consistency without claiming that Arach implements or can execute the
 resolved KPI surface.

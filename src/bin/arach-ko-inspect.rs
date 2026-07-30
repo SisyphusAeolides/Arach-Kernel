@@ -28,6 +28,13 @@ fn main() -> ExitCode {
     };
     match arach::module::linux_ko::requirements(&bytes) {
         Ok(requirements) => {
+            let blueprint = match arach::module::linux_loader::LinuxKoLoadBlueprint::parse(&bytes) {
+                Ok(blueprint) => blueprint,
+                Err(error) => {
+                    eprintln!("Linux module load-layout planning failed: {error:?}");
+                    return ExitCode::FAILURE;
+                }
+            };
             if let Some(output) = vermagic_output {
                 let mut measured = requirements.vermagic.to_vec();
                 measured.push(b'\n');
@@ -37,13 +44,18 @@ fn main() -> ExitCode {
                 }
             }
             println!(
-                "{:?} name={} license={} vermagic={} imports={} versioned_symbols={}",
+                "{:?} name={} license={} vermagic={} imports={} versioned_symbols={} load_sections={} load_regions={} image_bytes={} core_bytes={} init_bytes={}",
                 requirements.manifest,
                 String::from_utf8_lossy(requirements.name),
                 String::from_utf8_lossy(requirements.license),
                 String::from_utf8_lossy(requirements.vermagic),
                 requirements.imports().len(),
                 requirements.symbols().len(),
+                blueprint.sections().len(),
+                blueprint.regions().len(),
+                blueprint.image_size(),
+                blueprint.core_size(),
+                blueprint.init_size(),
             );
             ExitCode::SUCCESS
         }

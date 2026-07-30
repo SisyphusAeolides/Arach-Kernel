@@ -148,25 +148,28 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let requirements = match arach::module::linux_ko::requirements(&module) {
-        Ok(requirements) => requirements,
+    let blueprint = match arach::module::linux_loader::LinuxKoLoadBlueprint::parse(&module) {
+        Ok(blueprint) => blueprint,
         Err(error) => {
-            eprintln!("Linux module requirements failed: {error:?}");
+            eprintln!("Linux module load blueprint failed: {error:?}");
             return ExitCode::FAILURE;
         }
     };
-    match requirements.admit(&vermagic, &catalog) {
-        Ok(admission) => {
+    match blueprint.bind(0x1000_0000, &vermagic, &catalog) {
+        Ok(plan) => {
+            let admission = plan.admission();
             println!(
-                "build-admitted {} exports={} gpl_compatible={}",
-                String::from_utf8_lossy(requirements.name),
+                "load-admitted {} exports={} relocations={} image_bytes={} gpl_compatible={}",
+                String::from_utf8_lossy(plan.name()),
                 admission.resolved_symbols,
+                plan.relocation_count(),
+                plan.image_size(),
                 admission.gpl_compatible,
             );
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("Linux module build admission failed: {error:?}");
+            eprintln!("Linux module load admission failed: {error:?}");
             ExitCode::FAILURE
         }
     }

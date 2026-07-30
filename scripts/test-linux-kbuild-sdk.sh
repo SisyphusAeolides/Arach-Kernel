@@ -76,7 +76,7 @@ test -n "$kernel_release" || fail "generated UTS release is empty"
 cat >"$report" <<EOF
 {
   "suite": "arach-linux-external-kbuild-smoke",
-  "passing_cases": 11,
+  "passing_cases": 14,
   "artifact": "arach_contract_smoke.ko",
   "artifact_sha256": "$module_digest",
   "kernel_release": "$kernel_release",
@@ -91,7 +91,10 @@ cat >"$report" <<EOF
   "arach_structural_preflight": true,
   "exact_vermagic": true,
   "symbol_crc_admission": true,
-  "export_policy_admission": true
+  "export_policy_admission": true,
+  "load_layout_planning": true,
+  "wx_region_planning": true,
+  "relocation_binding": true
 }
 EOF
 

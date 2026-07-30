@@ -96,10 +96,29 @@ impl<'a> LinuxKoRequirements<'a> {
         expected_vermagic: &[u8],
         resolver: &R,
     ) -> Result<LinuxKoAdmission, LinuxKoAdmissionError> {
+        self.resolve(expected_vermagic, resolver)
+            .map(|resolution| resolution.admission)
+    }
+
+    /// Validates and freezes every live kernel export used by this module.
+    ///
+    /// Each resolver entry is consulted exactly once. The returned addresses
+    /// are the only external values a relocation transaction may use, which
+    /// prevents a mutable resolver from changing an admitted binding between
+    /// policy validation and relocation.
+    pub fn resolve<R: LinuxKernelSymbolResolver + ?Sized>(
+        &self,
+        expected_vermagic: &[u8],
+        resolver: &R,
+    ) -> Result<LinuxKoResolution<'a>, LinuxKoAdmissionError> {
         if self.vermagic != expected_vermagic {
             return Err(LinuxKoAdmissionError::VermagicMismatch);
         }
         let gpl_compatible = is_gpl_compatible(self.license);
+        let mut symbols = Vec::new();
+        symbols
+            .try_reserve_exact(self.symbols.len())
+            .map_err(|_| LinuxKoAdmissionError::ResolutionAllocationFailed)?;
         for (index, required) in self.symbols.iter().enumerate() {
             let resolved = resolver
                 .resolve(required.name)
@@ -118,11 +137,43 @@ impl<'a> LinuxKoRequirements<'a> {
                     return Err(LinuxKoAdmissionError::MissingNamespace(index));
                 }
             }
+            symbols.push(LinuxResolvedSymbol {
+                name: required.name,
+                address: resolved.address,
+            });
         }
-        Ok(LinuxKoAdmission {
-            resolved_symbols: self.symbols.len(),
-            gpl_compatible,
+        Ok(LinuxKoResolution {
+            admission: LinuxKoAdmission {
+                resolved_symbols: self.symbols.len(),
+                gpl_compatible,
+            },
+            symbols,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinuxResolvedSymbol<'a> {
+    pub name: &'a [u8],
+    pub address: u64,
+}
+
+#[derive(Debug)]
+pub struct LinuxKoResolution<'a> {
+    pub admission: LinuxKoAdmission,
+    symbols: Vec<LinuxResolvedSymbol<'a>>,
+}
+
+impl<'a> LinuxKoResolution<'a> {
+    pub fn symbols(&self) -> &[LinuxResolvedSymbol<'a>] {
+        &self.symbols
+    }
+
+    pub fn address(&self, name: &[u8]) -> Option<u64> {
+        self.symbols
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .map(|symbol| symbol.address)
     }
 }
 
@@ -158,6 +209,7 @@ pub enum LinuxKoAdmissionError {
     CrcMismatch(usize),
     GplOnlyExport(usize),
     MissingNamespace(usize),
+    ResolutionAllocationFailed,
 }
 
 pub fn preflight(bytes: &[u8]) -> Result<LinuxKoManifest, LinuxKoError> {
@@ -595,12 +647,14 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use core::cell::Cell;
+
     use super::*;
 
     const HEADER_BYTES: usize = 64;
     const SECTION_BYTES: usize = 64;
-    const SECTION_COUNT: usize = 8;
+    const SECTION_COUNT: usize = 10;
     const LAYOUT_CRC: u32 = 0x1122_3344;
     const EXTERNAL_CRC: u32 = 0xaabb_ccdd;
 
@@ -623,6 +677,27 @@ mod tests {
                 crc: crc.wrapping_add(self.crc_delta),
                 class: self.class,
                 namespace: self.namespace,
+            })
+        }
+    }
+
+    struct CountingResolver {
+        calls: Cell<usize>,
+    }
+
+    impl LinuxKernelSymbolResolver for CountingResolver {
+        fn resolve<'a>(&'a self, name: &[u8]) -> Option<LinuxKernelSymbol<'a>> {
+            self.calls.set(self.calls.get() + 1);
+            let crc = match name {
+                b"module_layout" => LAYOUT_CRC,
+                b"external" => EXTERNAL_CRC,
+                _ => return None,
+            };
+            Some(LinuxKernelSymbol {
+                address: 0x2000 + self.calls.get() as u64 * 0x100,
+                crc,
+                class: LinuxExportClass::Regular,
+                namespace: None,
             })
         }
     }
@@ -664,15 +739,24 @@ mod tests {
         write_u64(bytes, base + 56, entry_size);
     }
 
-    fn fixture() -> alloc::vec::Vec<u8> {
-        let names = b"\0.shstrtab\0.modinfo\0.gnu.linkonce.this_module\0__versions\0.strtab\0.symtab\0.rela.gnu.linkonce.this_module\0";
+    fn name_offset(names: &[u8], name: &[u8]) -> u32 {
+        names
+            .windows(name.len() + 1)
+            .position(|window| window == [name, b"\0"].concat())
+            .unwrap() as u32
+    }
+
+    pub(crate) fn fixture() -> alloc::vec::Vec<u8> {
+        let names = b"\0.shstrtab\0.modinfo\0.gnu.linkonce.this_module\0__versions\0.init.text\0.exit.text\0.strtab\0.symtab\0.rela.gnu.linkonce.this_module\0";
         let info = b"license=MIT\0name=smoke\0vermagic=6.12\0";
         let strings = b"\0init_module\0cleanup_module\0external\0";
         let names_offset = HEADER_BYTES;
         let info_offset = names_offset + names.len();
         let this_offset = info_offset + info.len();
         let versions_offset = this_offset + 64;
-        let strings_offset = versions_offset + 2 * MODVERSION_ENTRY_BYTES;
+        let init_offset = versions_offset + 2 * MODVERSION_ENTRY_BYTES;
+        let exit_offset = init_offset + 16;
+        let strings_offset = exit_offset + 16;
         let symbols_offset = strings_offset + strings.len();
         let relocations_offset = symbols_offset + 4 * SYMBOL_ENTRY_BYTES;
         let table = (relocations_offset + RELOCATION_ENTRY_BYTES + 7) & !7;
@@ -693,6 +777,8 @@ mod tests {
 
         bytes[names_offset..info_offset].copy_from_slice(names);
         bytes[info_offset..this_offset].copy_from_slice(info);
+        bytes[init_offset..init_offset + 4].copy_from_slice(&[0x31, 0xc0, 0xc3, 0x90]);
+        bytes[exit_offset..exit_offset + 2].copy_from_slice(&[0xc3, 0x90]);
         bytes[strings_offset..symbols_offset].copy_from_slice(strings);
         write_u64(&mut bytes, versions_offset, u64::from(LAYOUT_CRC));
         bytes[versions_offset + 8..versions_offset + 8 + b"module_layout".len()]
@@ -705,11 +791,13 @@ mod tests {
         let init = symbols_offset + SYMBOL_ENTRY_BYTES;
         write_u32(&mut bytes, init, 1);
         bytes[init + 4] = 0x12;
-        write_u16(&mut bytes, init + 6, 3);
+        write_u16(&mut bytes, init + 6, 5);
+        write_u64(&mut bytes, init + 16, 4);
         let cleanup = symbols_offset + 2 * SYMBOL_ENTRY_BYTES;
         write_u32(&mut bytes, cleanup, 13);
         bytes[cleanup + 4] = 0x12;
-        write_u16(&mut bytes, cleanup + 6, 3);
+        write_u16(&mut bytes, cleanup + 6, 6);
+        write_u64(&mut bytes, cleanup + 16, 2);
         let external = symbols_offset + 3 * SYMBOL_ENTRY_BYTES;
         write_u32(&mut bytes, external, 28);
         bytes[external + 4] = 0x10;
@@ -725,7 +813,7 @@ mod tests {
             &mut bytes,
             table,
             1,
-            1,
+            name_offset(names, b".shstrtab"),
             3,
             0,
             names_offset,
@@ -738,7 +826,7 @@ mod tests {
             &mut bytes,
             table,
             2,
-            11,
+            name_offset(names, b".modinfo"),
             1,
             2,
             info_offset,
@@ -747,12 +835,24 @@ mod tests {
             0,
             0,
         );
-        section(&mut bytes, table, 3, 20, 1, 3, this_offset, 64, 0, 0, 0);
+        section(
+            &mut bytes,
+            table,
+            3,
+            name_offset(names, b".gnu.linkonce.this_module"),
+            1,
+            3,
+            this_offset,
+            64,
+            0,
+            0,
+            0,
+        );
         section(
             &mut bytes,
             table,
             4,
-            46,
+            name_offset(names, b"__versions"),
             1,
             2,
             versions_offset,
@@ -765,7 +865,33 @@ mod tests {
             &mut bytes,
             table,
             5,
-            57,
+            name_offset(names, b".init.text"),
+            1,
+            6,
+            init_offset,
+            16,
+            0,
+            0,
+            0,
+        );
+        section(
+            &mut bytes,
+            table,
+            6,
+            name_offset(names, b".exit.text"),
+            1,
+            6,
+            exit_offset,
+            16,
+            0,
+            0,
+            0,
+        );
+        section(
+            &mut bytes,
+            table,
+            7,
+            name_offset(names, b".strtab"),
             3,
             0,
             strings_offset,
@@ -777,26 +903,26 @@ mod tests {
         section(
             &mut bytes,
             table,
-            6,
-            65,
+            8,
+            name_offset(names, b".symtab"),
             2,
             0,
             symbols_offset,
             4 * SYMBOL_ENTRY_BYTES,
-            5,
+            7,
             1,
             SYMBOL_ENTRY_BYTES as u64,
         );
         section(
             &mut bytes,
             table,
-            7,
-            73,
+            9,
+            name_offset(names, b".rela.gnu.linkonce.this_module"),
             SECTION_TYPE_RELA,
             SECTION_FLAG_INFO_LINK,
             relocations_offset,
             RELOCATION_ENTRY_BYTES,
-            6,
+            8,
             3,
             RELOCATION_ENTRY_BYTES as u64,
         );
@@ -854,12 +980,12 @@ mod tests {
     #[test]
     fn relocation_symbol_table_and_target_are_bound() {
         let mut bytes = fixture();
-        let relocation = bytes.len() - SECTION_COUNT * SECTION_BYTES + 7 * SECTION_BYTES;
-        write_u32(&mut bytes, relocation + 40, 5);
+        let relocation = bytes.len() - SECTION_COUNT * SECTION_BYTES + 9 * SECTION_BYTES;
+        write_u32(&mut bytes, relocation + 40, 7);
         assert_eq!(preflight(&bytes), Err(LinuxKoError::InvalidRelocations));
 
         let mut bytes = fixture();
-        let relocation = bytes.len() - SECTION_COUNT * SECTION_BYTES + 7 * SECTION_BYTES;
+        let relocation = bytes.len() - SECTION_COUNT * SECTION_BYTES + 9 * SECTION_BYTES;
         write_u32(&mut bytes, relocation + 44, 0);
         assert_eq!(preflight(&bytes), Err(LinuxKoError::InvalidRelocations));
     }
@@ -886,6 +1012,20 @@ mod tests {
             .unwrap();
         assert_eq!(admission.resolved_symbols, 2);
         assert!(!admission.gpl_compatible);
+    }
+
+    #[test]
+    fn resolution_freezes_each_live_export_exactly_once() {
+        let bytes = fixture();
+        let requirements = requirements(&bytes).unwrap();
+        let resolver = CountingResolver {
+            calls: Cell::new(0),
+        };
+        let resolution = requirements.resolve(b"6.12", &resolver).unwrap();
+        assert_eq!(resolver.calls.get(), 2);
+        assert_eq!(resolution.symbols().len(), 2);
+        assert_eq!(resolution.address(b"module_layout"), Some(0x2100));
+        assert_eq!(resolution.address(b"external"), Some(0x2200));
     }
 
     #[test]

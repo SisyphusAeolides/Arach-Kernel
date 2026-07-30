@@ -51,11 +51,19 @@ derives the required KPI from that source's conftests and behavioral tests.
 
 ## Current state
 
-The current Arach tree has a native driver ABI, a bounded ET_REL loader, a
-partial Linux memory/string KPI, and native GPU infrastructure. These are
-useful implementation inputs but do not yet pass the external-module or
-NVIDIA-runtime profiles. `current_arach_evidence()` therefore returns no Linux
-contract credit until the corresponding integration suites exist and pass.
+The current tree passes external-Kbuild and static load-admission gates against
+real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux
+`.ko` path now plans six page-separated core/init RX, R and RW regions, freezes
+one live-export snapshot before mutation, validates and freezes the supported
+x86-64 relocations, and models transactional seal, init, init-discard, cleanup,
+rollback and release through a kernel-backend contract. Unit tests exercise
+those ownership transitions, including failed init and retryable cleanup.
+
+That is not runtime qualification. The backend is not yet connected to Arach's
+native page tables and execution dispatcher, Linux special sections still need
+their runtime processors, and no admitted module has executed in an Arach boot.
+`current_arach_evidence()` therefore grants no NVIDIA-runtime credit until a
+native integration suite supplies those observations.
 
 ## External-Kbuild smoke test
 
@@ -85,8 +93,10 @@ ARACH_KBUILD_OUTPUT=/path/to/arach-contract/output \
 The generated measurement is written below `target/linux-contract/`. This
 smoke test can qualify the external-build profile for that exact SDK artifact;
 it provides no runtime credit until Arach loads and exercises the module.
-The same artifact is also parsed by Arach's bounded `arach-ko-inspect` preflight
-to keep the build fixture and loader vocabulary synchronized.
+The same artifact is also parsed by Arach's bounded `arach-ko-inspect` preflight.
+Inspection validates its allocatable sections and produces the page-separated
+core/init load blueprint, keeping the build fixture and loader vocabulary
+synchronized.
 
 The smoke gate preserves the complete Kbuild-generated vermagic byte string
 and feeds the module through `arach-ko-admit`. Admission parses fixed-layout
@@ -94,7 +104,10 @@ Linux 6.12 `__versions` records and the chained, padded records measured from
 Ubuntu Linux 6.8, requires every undefined global to be versioned, resolves
 every CRC against the SDK `Module.symvers`, and enforces GPL-only and
 symbol-namespace policy. Both record streams are bounded and completely
-validated; unknown encodings fail closed. This is still build admission:
-catalog addresses are deliberately non-executable placeholders. Runtime
-credit requires an Arach export catalog backed by live KPI addresses plus
-successful relocation, W^X sealing, initialization, and removal.
+validated; unknown encodings fail closed. The admission command also binds a
+deterministic image address, resolves lifecycle symbols, and freezes every
+allocated-section relocation after range and overlap checks. Catalog addresses
+are deliberately non-executable placeholders, so this remains static load
+admission. Runtime credit requires an Arach export catalog backed by live KPI
+addresses, a native W^X memory backend, Linux special-section processing, and
+observed initialization, operation, removal and rollback.
