@@ -28,6 +28,8 @@ const ALT_SUPPORTED_FLAGS: u16 = ALT_FLAG_NOT | ALT_FLAG_DIRECT_CALL;
 const JUMP_ENTRY_BYTES: usize = 16;
 const JUMP_KEY_FLAGS: u64 = 0b11;
 const JUMP_KEY_TYPE_TRUE: u64 = 1;
+const STATIC_CALL_SITE_BYTES: usize = 8;
+const STATIC_CALL_SITE_FLAGS: u64 = 0b11;
 
 #[derive(Clone, Copy)]
 pub struct X86_64LinuxModuleIdentityProcessor {
@@ -276,6 +278,9 @@ impl X86_64LinuxModuleIdentityProcessor {
 /// `feature_enabled` must report a feature only when every CPU that may execute
 /// the module supports it. The result must remain valid until the module is
 /// unloaded or CPU admission must prevent an incompatible CPU from running it.
+/// `static_key_state` and `static_call_function` must return only addresses and
+/// state that are valid for the committed kernel ABI and remain stable for the
+/// entire module lifetime; returning an arbitrary pointer is unsound.
 pub unsafe trait X86_64AlternativeFeatures {
     type Error;
 
@@ -284,6 +289,12 @@ pub unsafe trait X86_64AlternativeFeatures {
     /// Returns `(initial_type, enabled)` for a static key outside the module
     /// image. Module-local keys are read from the staged image directly.
     fn static_key_state(&self, _key: u64) -> Result<Option<(bool, bool)>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Returns the stable function address for an external static-call key.
+    /// Module-local keys are read from the staged image directly.
+    fn static_call_function(&self, _key: u64) -> Result<Option<u64>, Self::Error> {
         Ok(None)
     }
 
@@ -338,11 +349,13 @@ where
         let mut coverage = identity.coverage();
         let mut has_alternatives = false;
         let mut has_jump_labels = false;
+        let mut has_static_calls = false;
         for section in special_sections {
             match section.kind {
                 LinuxKoSpecialSectionKind::ModuleIdentity => {}
                 LinuxKoSpecialSectionKind::Alternatives => has_alternatives = true,
                 LinuxKoSpecialSectionKind::JumpLabels => has_jump_labels = true,
+                LinuxKoSpecialSectionKind::StaticCalls => has_static_calls = true,
                 kind => return Err(LinuxSpecialSectionError::UnsupportedCategory(kind)),
             }
         }
@@ -369,6 +382,18 @@ where
                 &self.features,
             )?;
             coverage.acknowledge(LinuxKoSpecialSectionKind::JumpLabels);
+        }
+        if has_static_calls {
+            apply_static_calls(
+                memory,
+                reservation,
+                plan.image_virtual_address(),
+                plan.image_size(),
+                plan.regions(),
+                special_sections,
+                &self.features,
+            )?;
+            coverage.acknowledge(LinuxKoSpecialSectionKind::StaticCalls);
         }
         Ok(X86_64LinuxPreSealReceipt::new(
             coverage,
@@ -399,6 +424,14 @@ pub enum LinuxSpecialSectionError<MemoryError, FeatureError> {
     JumpLabelTargetNotExecutable,
     JumpLabelKeyStateUnavailable,
     InvalidJumpLabelInstruction,
+    MissingStaticCallSites,
+    DuplicateStaticCallSites,
+    InvalidStaticCallTable,
+    StaticCallKeyOutOfRange,
+    StaticCallTargetNotExecutable,
+    StaticCallFunctionUnavailable,
+    UnsupportedStaticCallSite,
+    UnsupportedStaticCallSection,
     AllocationFailed,
     VerificationFailed,
 }
@@ -680,6 +713,195 @@ where
         .map_err(map_identity_memory_error)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct StaticCallPatch {
+    image_offset: usize,
+    bytes: [u8; 5],
+}
+
+fn apply_static_calls<Memory, Tlb, Features>(
+    memory: &mut X86_64LinuxModuleMemory<Memory, Tlb>,
+    mapping: LinuxModuleMapping,
+    image_base: u64,
+    image_size: usize,
+    regions: &[LinuxKoMemoryRegion],
+    sections: &[LinuxKoSpecialSection<'_>],
+    features: &Features,
+) -> Result<(), LinuxSpecialSectionError<Memory::Error, Features::Error>>
+where
+    Memory: ProcessFrameMemory,
+    Tlb: LinuxModuleTlb,
+    Features: X86_64AlternativeFeatures,
+{
+    let mut sites = None;
+    let mut tramp_keys = Vec::new();
+    for section in sections {
+        if section.kind != LinuxKoSpecialSectionKind::StaticCalls {
+            continue;
+        }
+        match section.name {
+            b".static_call_sites" => {
+                if sites.replace(*section).is_some() {
+                    return Err(LinuxSpecialSectionError::DuplicateStaticCallSites);
+                }
+            }
+            b".static_call_tramp_key" => tramp_keys.push(*section),
+            b".static_call.text" => {
+                if !range_has_permissions(regions, section.image_offset, section.size, true) {
+                    return Err(LinuxSpecialSectionError::StaticCallTargetNotExecutable);
+                }
+            }
+            _ => return Err(LinuxSpecialSectionError::UnsupportedStaticCallSection),
+        }
+    }
+    let sites = sites.ok_or(LinuxSpecialSectionError::MissingStaticCallSites)?;
+    if sites.size == 0 || sites.size % STATIC_CALL_SITE_BYTES != 0 {
+        return Err(LinuxSpecialSectionError::InvalidStaticCallTable);
+    }
+    for section in tramp_keys {
+        if section.size == 0 || section.size % STATIC_CALL_SITE_BYTES != 0 {
+            return Err(LinuxSpecialSectionError::InvalidStaticCallTable);
+        }
+        // The trampoline-key records are consumed by the runtime registration
+        // layer. Validate both relative addresses now so malformed metadata
+        // cannot be retained behind an otherwise successful load.
+        let mut record = [0; STATIC_CALL_SITE_BYTES];
+        for index in 0..section.size / STATIC_CALL_SITE_BYTES {
+            let offset = section
+                .image_offset
+                .checked_add(index * STATIC_CALL_SITE_BYTES)
+                .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+            read(memory, mapping, offset, &mut record).map_err(map_identity_memory_error)?;
+            let tramp = relative_image_offset(
+                image_base,
+                image_size,
+                offset,
+                i32::from_le_bytes(record[0..4].try_into().unwrap()),
+                1,
+            )?;
+            let key = relative_image_address(
+                image_base,
+                offset + 4,
+                i64::from(i32::from_le_bytes(record[4..8].try_into().unwrap()))
+                    & !(STATIC_CALL_SITE_FLAGS as i64),
+            )?;
+            if !range_has_permissions(regions, tramp, 1, true) || key & 7 != 0 {
+                return Err(LinuxSpecialSectionError::StaticCallKeyOutOfRange);
+            }
+        }
+    }
+
+    let mut patches = Vec::new();
+    patches
+        .try_reserve_exact(sites.size / STATIC_CALL_SITE_BYTES)
+        .map_err(|_| LinuxSpecialSectionError::AllocationFailed)?;
+    let mut record = [0; STATIC_CALL_SITE_BYTES];
+    for index in 0..sites.size / STATIC_CALL_SITE_BYTES {
+        let record_offset = sites
+            .image_offset
+            .checked_add(index * STATIC_CALL_SITE_BYTES)
+            .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+        read(memory, mapping, record_offset, &mut record).map_err(map_identity_memory_error)?;
+        let code_offset = relative_image_offset(
+            image_base,
+            image_size,
+            record_offset,
+            i32::from_le_bytes(record[0..4].try_into().unwrap()),
+            5,
+        )?;
+        if !range_has_permissions(regions, code_offset, 5, true) {
+            return Err(LinuxSpecialSectionError::StaticCallTargetNotExecutable);
+        }
+        let key_relative = i64::from(i32::from_le_bytes(record[4..8].try_into().unwrap()));
+        let key_flags = (key_relative as u64) & STATIC_CALL_SITE_FLAGS;
+        if key_flags & 1 != 0 {
+            return Err(LinuxSpecialSectionError::UnsupportedStaticCallSite);
+        }
+        let key_address = relative_image_address(
+            image_base,
+            record_offset + 4,
+            key_relative & !(STATIC_CALL_SITE_FLAGS as i64),
+        )?;
+        if key_address & 7 != 0 {
+            return Err(LinuxSpecialSectionError::StaticCallKeyOutOfRange);
+        }
+        let key_offset = key_address
+            .checked_sub(image_base)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .filter(|offset| offset.checked_add(8).is_some_and(|end| end <= image_size));
+        let key_in_image = key_offset.is_some();
+        let function = if let Some(key_offset) = key_offset {
+            read_u64(memory, mapping, key_offset).map_err(map_identity_memory_error)?
+        } else {
+            features
+                .static_call_function(key_address)
+                .map_err(LinuxSpecialSectionError::Feature)?
+                .ok_or(LinuxSpecialSectionError::StaticCallFunctionUnavailable)?
+        };
+        if function != 0
+            && function
+                .checked_sub(image_base)
+                .and_then(|offset| usize::try_from(offset).ok())
+                .is_some_and(|offset| range_has_permissions(regions, offset, 1, true))
+        {
+            // Module-local targets are checked by the region table. External
+            // targets are trusted only through the unsafe provider contract.
+        } else if function != 0 && key_in_image {
+            return Err(LinuxSpecialSectionError::StaticCallTargetNotExecutable);
+        }
+
+        let mut current = [0; 5];
+        read(memory, mapping, code_offset, &mut current).map_err(map_identity_memory_error)?;
+        let current_is_nop = current == [0x0f, 0x1f, 0x44, 0x00, 0x00];
+        let current_is_return_zero = current == [0x2e, 0x2e, 0x2e, 0x31, 0xc0];
+        if !current_is_nop && !current_is_return_zero && current[0] != 0xe8 {
+            return Err(LinuxSpecialSectionError::UnsupportedStaticCallSite);
+        }
+        let desired = static_call_bytes(image_base, code_offset, function)?;
+        if current != desired {
+            if let Some(previous) = patches
+                .iter()
+                .find(|patch: &&StaticCallPatch| patch.image_offset == code_offset)
+            {
+                if previous.bytes != desired {
+                    return Err(LinuxSpecialSectionError::UnsupportedStaticCallSite);
+                }
+            } else {
+                patches.push(StaticCallPatch {
+                    image_offset: code_offset,
+                    bytes: desired,
+                });
+            }
+        }
+    }
+    for patch in patches {
+        write_verified(memory, mapping, patch.image_offset, &patch.bytes)
+            .map_err(map_identity_memory_error)?;
+    }
+    Ok(())
+}
+
+fn static_call_bytes<MemoryError, FeatureError>(
+    image_base: u64,
+    code_offset: usize,
+    function: u64,
+) -> Result<[u8; 5], LinuxSpecialSectionError<MemoryError, FeatureError>> {
+    let mut bytes = [0x90; 5];
+    if function == 0 {
+        bytes.copy_from_slice(&[0x0f, 0x1f, 0x44, 0x00, 0x00]);
+        return Ok(bytes);
+    }
+    let next = image_base
+        .checked_add(code_offset as u64)
+        .and_then(|address| address.checked_add(5))
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let displacement = i32::try_from(i128::from(function) - i128::from(next))
+        .map_err(|_| LinuxSpecialSectionError::StaticCallTargetNotExecutable)?;
+    bytes[0] = 0xe8;
+    bytes[1..5].copy_from_slice(&displacement.to_le_bytes());
+    Ok(bytes)
 }
 
 fn relative_image_address<MemoryError, FeatureError>(
@@ -1587,6 +1809,59 @@ mod tests {
         assert_eq!(
             i32::from_le_bytes(observed[1..5].try_into().unwrap()),
             i32::try_from(target_offset as i64 - (code_offset + 5) as i64).unwrap()
+        );
+    }
+
+    #[test]
+    fn patches_module_local_static_call_site_to_direct_call() {
+        let mut mapper = mapper();
+        let mapping = mapper.reserve_zeroed(PAGE_SIZE * 6, PAGE_SIZE).unwrap();
+        let base = mapper.mapping_base(mapping).unwrap();
+        let code_offset = 96;
+        let function_offset = 256;
+        let sites_offset = PAGE_SIZE * 2 + 128;
+        let key_offset = PAGE_SIZE * 2 + 512;
+        let key_relative = i32::try_from(key_offset as i64 - (sites_offset + 4) as i64).unwrap();
+        let mut record = [0; STATIC_CALL_SITE_BYTES];
+        record[0..4].copy_from_slice(&relative(sites_offset, code_offset).to_le_bytes());
+        record[4..8].copy_from_slice(&key_relative.to_le_bytes());
+
+        mapper
+            .write(mapping, code_offset, &[0x0f, 0x1f, 0x44, 0x00, 0x00])
+            .unwrap();
+        mapper.write(mapping, function_offset, &[0x90]).unwrap();
+        mapper.write(mapping, sites_offset, &record).unwrap();
+        mapper
+            .write(
+                mapping,
+                key_offset,
+                &(base + function_offset as u64).to_le_bytes(),
+            )
+            .unwrap();
+
+        apply_static_calls(
+            &mut mapper,
+            mapping,
+            base,
+            PAGE_SIZE * 6,
+            &regions(),
+            &[LinuxKoSpecialSection {
+                section_index: 22,
+                name: b".static_call_sites",
+                image_offset: sites_offset,
+                size: record.len(),
+                kind: LinuxKoSpecialSectionKind::StaticCalls,
+            }],
+            &TestFeatures(true),
+        )
+        .unwrap();
+
+        let mut observed = [0; 5];
+        mapper.read(mapping, code_offset, &mut observed).unwrap();
+        assert_eq!(observed[0], 0xe8);
+        assert_eq!(
+            i32::from_le_bytes(observed[1..5].try_into().unwrap()),
+            i32::try_from(function_offset as i64 - (code_offset + 5) as i64).unwrap()
         );
     }
 

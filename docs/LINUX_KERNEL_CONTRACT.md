@@ -104,6 +104,13 @@ been preflighted. Dynamic static-key registration and later SMP text updates
 remain a separate runtime contract; a successfully admitted table is not
 claimed as full jump-label parity by itself.
 
+The same processor now preflights x86-64 `.static_call_sites` and optional
+`.static_call_tramp_key` records. It admits only non-tail five-byte call sites,
+validates trampoline metadata, resolves module-local function pointers from the
+staged image (or requires an explicit external-key provider), and transitions
+only recognized NOP/return-zero/call forms to a checked direct call. Tail-call
+transforms and dynamic static-call registration remain runtime work.
+
 Host fault-injection tests cover stale handles, conflicting hierarchy
 ownership, allocation failure, partial page-table publication, failed seal
 rollback, partial init discard, TLB flush ordering, retryable reclamation,
@@ -112,10 +119,10 @@ dispatch retry.
 
 That is still not runtime qualification. Arach has no qualified synchronous
 all-CPU TLB implementation or concrete native lifecycle executor for this
-path. Dynamic jump-label registration/updates, static calls, tracing, unwind
-data, parameters, exports, per-CPU data, and the other inventoried Linux
-categories still need production runtime processors, and no admitted module
-has executed in an Arach boot.
+path. Dynamic jump-label/static-call registration and updates, tail-call static
+call transforms, tracing, unwind data, parameters, exports, per-CPU data, and
+the other inventoried Linux categories still need production runtime
+processors, and no admitted module has executed in an Arach boot.
 `current_arach_evidence()` therefore grants no NVIDIA-runtime credit until a
 native integration suite supplies those observations.
 
