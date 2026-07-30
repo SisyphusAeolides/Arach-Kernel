@@ -14,6 +14,7 @@ on:
       - scripts/materialize-linux-contract-sdk.sh
       - scripts/test-linux-kbuild-sdk.sh
       - src/linux_contract.rs
+      - src/bin/**
       - src/module/**
       - src/nvidia_dkms.rs
   pull_request:
@@ -28,6 +29,7 @@ on:
       - scripts/materialize-linux-contract-sdk.sh
       - scripts/test-linux-kbuild-sdk.sh
       - src/linux_contract.rs
+      - src/bin/**
       - src/module/**
       - src/nvidia_dkms.rs
 

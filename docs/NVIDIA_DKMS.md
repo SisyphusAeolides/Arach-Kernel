@@ -65,3 +65,10 @@ contract-SDK vermagic, then its SHA-256 digest is recorded in
 `target/nvidia-dkms/build-measurement.json`. The report explicitly keeps
 runtime qualification false until the Arach loader and GPU lifecycle suites
 pass.
+
+Each artifact also passes Arach's bounded structural parser and build-admission
+engine. The engine checks every `__versions` CRC against both the SDK export
+catalog and the NVIDIA modules' generated `Module.symvers`, including GPL-only
+and namespace rules. These catalogs use placeholder addresses, so this proves
+ABI consistency without claiming that Arach implements or can execute the
+resolved KPI surface.

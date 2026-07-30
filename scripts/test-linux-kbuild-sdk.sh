@@ -6,6 +6,7 @@ readonly kernel_source=${ARACH_KBUILD_SOURCE:-/usr/src/kernels/$(uname -r)}
 readonly kernel_output=${ARACH_KBUILD_OUTPUT:-$kernel_source}
 readonly work=${ARACH_KBUILD_SMOKE_OUTPUT:-$root/target/linux-contract/smoke}
 readonly report=${ARACH_KBUILD_REPORT:-$root/target/linux-contract/kbuild-measurement.json}
+readonly vermagic_file=${ARACH_KBUILD_VERMAGIC_FILE:-$root/target/arach-kbuild/vermagic}
 
 fail() {
     echo "Linux Kbuild contract: $*" >&2
@@ -56,8 +57,15 @@ for symbol in init_module cleanup_module; do
         fail "$module lacks $symbol"
 done
 
+mkdir -p -- "$(dirname -- "$vermagic_file")"
 cargo run --quiet --manifest-path "$root/Cargo.toml" \
-    --bin arach-ko-inspect -- "$module"
+    --bin arach-ko-inspect -- "$module" "$vermagic_file"
+
+readonly vermagic=$(sed -n '1p' "$vermagic_file")
+test -n "$vermagic" || fail "$module has empty vermagic"
+cargo run --quiet --manifest-path "$root/Cargo.toml" \
+    --bin arach-ko-admit -- \
+    "$module" "$vermagic_file" "$kernel_output/Module.symvers"
 
 readonly module_digest=$(sha256sum -- "$module" | cut -d' ' -f1)
 readonly kernel_release=$(sed -n \
@@ -68,17 +76,22 @@ test -n "$kernel_release" || fail "generated UTS release is empty"
 cat >"$report" <<EOF
 {
   "suite": "arach-linux-external-kbuild-smoke",
-  "passing_cases": 7,
+  "passing_cases": 11,
   "artifact": "arach_contract_smoke.ko",
   "artifact_sha256": "$module_digest",
   "kernel_release": "$kernel_release",
+  "vermagic": "$vermagic",
   "external_kbuild": true,
   "generated_configuration": true,
   "symbol_versions": true,
   "modpost": true,
   "module_linker_scripts": true,
   "linux_headers": true,
-  "linux_module_elf": true
+  "linux_module_elf": true,
+  "arach_structural_preflight": true,
+  "exact_vermagic": true,
+  "symbol_crc_admission": true,
+  "export_policy_admission": true
 }
 EOF
 
