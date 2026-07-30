@@ -57,7 +57,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: target/formal/toolchains
-          key: arach-c0-formal-idris2-0.8.0-agda-2.8.0-v1
+          key: arach-formal-idris2-0.8.0-agda-2.8.0-v1
       - run: scripts/bootstrap-formal-toolchains.sh
       - run: scripts/build-c0-bundle.sh
         env:

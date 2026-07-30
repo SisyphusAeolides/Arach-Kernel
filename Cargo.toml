@@ -40,6 +40,11 @@ members = [
     "core/*",
     "libraries/*",
 ]
+exclude = [
+    "probes/c0",
+    "target/c0-sources/push",
+    "target/c0-sources/granite",
+]
 
 [workspace.package]
 version = "0.1.0"
