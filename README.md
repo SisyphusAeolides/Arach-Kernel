@@ -4,8 +4,12 @@
 
 # Arach Kernel
 
-Arach is an experimental Rust-first monolithic kernel whose long-term userspace
-target is an unmodified, pinned release of COSMIC Epoch.
+[![Arach validation](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/ci.yml)
+[![NVIDIA Linux contract](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/nvidia-build.yml/badge.svg?branch=main)](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/nvidia-build.yml)
+
+Arach is the experimental, Rust-first monolithic kernel for Arach OS. Its
+userspace compatibility target is an unmodified, reproducibly pinned release
+of COSMIC Epoch on x86-64 systems.
 
 Monolithic describes the kernel architecture: core scheduling, memory,
 interrupt, device, filesystem, and networking services may execute in the
@@ -14,27 +18,31 @@ PipeWire, or ordinary applications into ring 0.
 
 ## Current status
 
-The Boulder kernel sources and several shared libraries from Sisyphus-OS have
-been imported. The host workspace builds and its unit tests pass, but the
-bare-metal image has not yet been requalified under the Arach name. Arach does
-not yet satisfy the Linux userspace ABI or device interfaces required to start
-COSMIC Epoch.
+Arach is an active kernel implementation, not yet a bootable COSMIC operating
+system release. Status claims are tied to executable gates:
 
-The C0 bundle builder now consumes immutable Push and Granite checkouts plus a
-bounded ring-3 syscall probe through explicit artifact paths. This removes the
-old monorepo target-directory dependency and proves that all four measured
-artifacts can be built together. QEMU serial execution remains the next C0
-gate; a successful build alone is not boot evidence.
+| Area | Evidence available now | Qualification |
+|---|---|---|
+| Kernel workspace | Rust workspace formatting, all-target compilation and tests; C and Fortran ABI checks | Host CI qualified |
+| Formal contracts | Idris 2 total specifications and Agda safe proof models compile in CI | Build-evidence qualified |
+| C0 system bundle | Pinned Granite, Arach Kernel and Push artifacts plus a bounded ring-3 syscall probe build into one measured bundle | Build qualified; QEMU execution pending |
+| Linux external modules | Real Kbuild modules from RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 pass bounded ELF inspection, exact vermagic, symbol CRC, export-class and namespace admission | Build/admission qualified |
+| NVIDIA open modules | Pinned NVIDIA `610.43.03` sources produce and admit `nvidia`, `nvidia-modeset`, `nvidia-drm` and `nvidia-uvm` with four workers | Build qualified; Arach load/init/remove pending |
+| Native Arach boot | Boot structures, memory, interrupt, process, driver and ABI subsystems are implemented and host-tested | Granite-to-Arach QEMU boot gate pending |
+| COSMIC Epoch | The complete greeter, session, compositor, portal, application and hardware contract is specified | Runtime qualification pending |
 
-Sisyphus-OS remains migration input until every retained component, build
-script, asset, and relevant history has a verified destination. Do not delete
-or archive it based only on the current source import.
+The immediate critical path is: boot the measured C0 bundle under QEMU, bring
+up the Linux-compatible userspace surface, load and exercise qualified modules
+through Arach's own W^X loader, then run an unmodified pinned COSMIC session.
+Passing a source build or host unit test never counts as boot, runtime, or
+hardware evidence.
 
 ## Language boundary
 
 | Language | Production role |
 |---|---|
 | Rust | Kernel runtime, drivers, memory safety boundaries, and ABI implementation |
+| C | Firmware and Linux ABI shims, external-driver compatibility, and reference drivers |
 | Fortran | Bounded, allocation-free numerical kernels exported through a narrow C ABI |
 | Idris 2 | Total protocol and state-machine specifications used to validate generated tables and manifests |
 | Agda | Safe proofs of transition, authority, and compatibility laws |
@@ -48,17 +56,19 @@ Rust-owned safe wrapper.
 
 ```text
 src/                    Arach kernel
-core/                   imported bounded kernel primitives
+core/                   bounded kernel primitives
 libraries/driver-abi/   stable foreign-driver boundary
-libraries/slope/        imported kernel/userspace ABI definitions
+libraries/slope/        typed kernel/userspace ABI definitions
 drivers/reference/      reference C driver used by ABI tests
 formal/idris2/          total executable specifications
 formal/agda/            safe proof models
 ```
 
-The current `core/` and `libraries/` copies are an integration snapshot, not a
-decision to collapse the component repositories early. See
-[the migration plan](docs/MIGRATION.md).
+The `core/` and `libraries/` trees are integration snapshots. Granite, Push,
+Slope, Corinth and the other independently versioned Arach OS components
+remain separate repositories until their interfaces and release gates are
+stable. Component provenance and extraction are tracked in
+[the migration plan](docs/MIGRATION.md), not treated as the kernel's identity.
 
 ## Host validation
 
@@ -106,10 +116,11 @@ The first separately versioned system integrations are
 Arach targets NVIDIA's open `610.43.03` kernel modules through a measured
 external-Kbuild and Linux-KPI compatibility layer. The pinned source audit and
 build entry point are documented in the
-[NVIDIA DKMS compatibility contract](docs/NVIDIA_DKMS.md). The current native
-module loader and Hermes GSP driver do not yet satisfy that contract, so Arach
-does not advertise NVIDIA DKMS readiness until the real module build and
-runtime lifecycle gates pass.
+[NVIDIA DKMS compatibility contract](docs/NVIDIA_DKMS.md). All four required
+modules currently pass the external build and static admission gates. Arach
+does not yet advertise NVIDIA runtime readiness because relocation against
+live KPI addresses, W^X sealing, module initialization, device exercise and
+clean removal still require native execution evidence.
 
 ## License
 
