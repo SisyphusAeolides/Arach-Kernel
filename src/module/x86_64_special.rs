@@ -16,11 +16,15 @@ use crate::module::linux_loader::{
 use crate::module::x86_64_memory::{
     LinuxModuleMapping, LinuxModuleTlb, X86_64LinuxModuleMemory, X86_64ModuleMapError,
 };
-use crate::module::x86_64_native::X86_64LinuxPreSealReceipt;
+use crate::module::x86_64_native::{X86_64LinuxPreSeal, X86_64LinuxPreSealReceipt};
 use crate::process::x86_64::ProcessFrameMemory;
 
 const MODULE_STATE_COMING: u32 = 1;
 const LINUX_6_12_MEMORY_TYPES: u32 = 7;
+const ALT_INSTR_BYTES: usize = 14;
+const ALT_FLAG_NOT: u16 = 1 << 0;
+const ALT_FLAG_DIRECT_CALL: u16 = 1 << 1;
+const ALT_SUPPORTED_FLAGS: u16 = ALT_FLAG_NOT | ALT_FLAG_DIRECT_CALL;
 
 #[derive(Clone, Copy)]
 pub struct X86_64LinuxModuleIdentityProcessor {
@@ -260,6 +264,463 @@ impl X86_64LinuxModuleIdentityProcessor {
         }
         Ok(())
     }
+}
+
+/// CPU-feature view used while selecting x86 alternatives.
+///
+/// # Safety
+///
+/// `feature_enabled` must report a feature only when every CPU that may execute
+/// the module supports it. The result must remain valid until the module is
+/// unloaded or CPU admission must prevent an incompatible CPU from running it.
+pub unsafe trait X86_64AlternativeFeatures {
+    type Error;
+
+    fn feature_enabled(&self, feature: u16) -> Result<bool, Self::Error>;
+
+    fn nop_function_address(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// Complete pre-seal processor currently admitted by the native backend.
+/// Categories without a production processor are rejected explicitly.
+pub struct X86_64LinuxSpecialProcessor<Features> {
+    identity: X86_64LinuxModuleIdentityProcessor,
+    features: Features,
+}
+
+impl<Features> X86_64LinuxSpecialProcessor<Features> {
+    pub fn new(
+        abi: LinuxModuleAbiContract,
+        features: Features,
+    ) -> Result<Self, LinuxModuleIdentityError<()>> {
+        Ok(Self {
+            identity: X86_64LinuxModuleIdentityProcessor::new(abi)?,
+            features,
+        })
+    }
+
+    pub const fn identity(&self) -> &X86_64LinuxModuleIdentityProcessor {
+        &self.identity
+    }
+}
+
+unsafe impl<Memory, Tlb, Features> X86_64LinuxPreSeal<Memory, Tlb>
+    for X86_64LinuxSpecialProcessor<Features>
+where
+    Memory: ProcessFrameMemory,
+    Tlb: LinuxModuleTlb,
+    Features: X86_64AlternativeFeatures,
+{
+    type Error = LinuxSpecialSectionError<Memory::Error, Features::Error>;
+
+    fn prepare(
+        &mut self,
+        memory: &mut X86_64LinuxModuleMemory<Memory, Tlb>,
+        reservation: LinuxModuleMapping,
+        plan: &LinuxKoLoadPlan<'_>,
+        special_sections: &[LinuxKoSpecialSection<'_>],
+    ) -> Result<X86_64LinuxPreSealReceipt, Self::Error> {
+        let identity = self
+            .identity
+            .prepare(memory, reservation, plan, special_sections)
+            .map_err(LinuxSpecialSectionError::Identity)?;
+        let mut coverage = identity.coverage();
+        let mut has_alternatives = false;
+        for section in special_sections {
+            match section.kind {
+                LinuxKoSpecialSectionKind::ModuleIdentity => {}
+                LinuxKoSpecialSectionKind::Alternatives => has_alternatives = true,
+                kind => return Err(LinuxSpecialSectionError::UnsupportedCategory(kind)),
+            }
+        }
+        if has_alternatives {
+            apply_alternatives(
+                memory,
+                reservation,
+                plan.image_virtual_address(),
+                plan.image_size(),
+                plan.regions(),
+                special_sections,
+                &self.features,
+            )?;
+            coverage.acknowledge(LinuxKoSpecialSectionKind::Alternatives);
+        }
+        Ok(X86_64LinuxPreSealReceipt::new(
+            coverage,
+            identity.module_state_offset(),
+        ))
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum LinuxSpecialSectionError<MemoryError, FeatureError> {
+    Identity(LinuxModuleIdentityError<MemoryError>),
+    Memory(X86_64ModuleMapError<MemoryError>),
+    Feature(FeatureError),
+    UnsupportedCategory(LinuxKoSpecialSectionKind),
+    MissingAlternativeTable,
+    DuplicateAlternativeTable,
+    InvalidAlternativeTable,
+    InvalidAlternativeRecord,
+    UnsupportedAlternativeFlags,
+    AlternativeAddressOutOfRange,
+    AlternativeTargetNotExecutable,
+    InvalidDirectCall,
+    UnsupportedAlternativeInstruction,
+    AllocationFailed,
+    VerificationFailed,
+}
+
+fn apply_alternatives<Memory, Tlb, Features>(
+    memory: &mut X86_64LinuxModuleMemory<Memory, Tlb>,
+    mapping: LinuxModuleMapping,
+    image_base: u64,
+    image_size: usize,
+    regions: &[LinuxKoMemoryRegion],
+    sections: &[LinuxKoSpecialSection<'_>],
+    features: &Features,
+) -> Result<(), LinuxSpecialSectionError<Memory::Error, Features::Error>>
+where
+    Memory: ProcessFrameMemory,
+    Tlb: LinuxModuleTlb,
+    Features: X86_64AlternativeFeatures,
+{
+    let mut table = None;
+    for section in sections {
+        if section.kind == LinuxKoSpecialSectionKind::Alternatives
+            && section.name == b".altinstructions"
+            && table.replace(*section).is_some()
+        {
+            return Err(LinuxSpecialSectionError::DuplicateAlternativeTable);
+        }
+    }
+    let table = table.ok_or(LinuxSpecialSectionError::MissingAlternativeTable)?;
+    if table.size == 0 || table.size % ALT_INSTR_BYTES != 0 {
+        return Err(LinuxSpecialSectionError::InvalidAlternativeTable);
+    }
+    let mut record = [0; ALT_INSTR_BYTES];
+    let mut instruction_shapes = Vec::new();
+    instruction_shapes
+        .try_reserve_exact(table.size / ALT_INSTR_BYTES)
+        .map_err(|_| LinuxSpecialSectionError::AllocationFailed)?;
+    for index in 0..table.size / ALT_INSTR_BYTES {
+        let record_offset = table
+            .image_offset
+            .checked_add(index * ALT_INSTR_BYTES)
+            .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+        read(memory, mapping, record_offset, &mut record).map_err(map_identity_memory_error)?;
+        let instruction_relative = i32::from_le_bytes(record[0..4].try_into().unwrap());
+        let replacement_relative = i32::from_le_bytes(record[4..8].try_into().unwrap());
+        let feature = u16::from_le_bytes(record[8..10].try_into().unwrap());
+        let flags = u16::from_le_bytes(record[10..12].try_into().unwrap());
+        let instruction_length = usize::from(record[12]);
+        let replacement_length = usize::from(record[13]);
+        if flags & !ALT_SUPPORTED_FLAGS != 0
+            || instruction_length == 0
+            || replacement_length > instruction_length
+        {
+            return Err(if flags & !ALT_SUPPORTED_FLAGS != 0 {
+                LinuxSpecialSectionError::UnsupportedAlternativeFlags
+            } else {
+                LinuxSpecialSectionError::InvalidAlternativeRecord
+            });
+        }
+        let instruction_offset = relative_image_offset(
+            image_base,
+            image_size,
+            record_offset,
+            instruction_relative,
+            instruction_length,
+        )?;
+        if !range_has_permissions(regions, instruction_offset, instruction_length, true) {
+            return Err(LinuxSpecialSectionError::AlternativeTargetNotExecutable);
+        }
+        if let Some((_, length)) = instruction_shapes
+            .iter()
+            .find(|(offset, _)| *offset == instruction_offset)
+        {
+            if *length != instruction_length {
+                return Err(LinuxSpecialSectionError::InvalidAlternativeRecord);
+            }
+        } else {
+            instruction_shapes.push((instruction_offset, instruction_length));
+        }
+        let mut selected = features
+            .feature_enabled(feature)
+            .map_err(LinuxSpecialSectionError::Feature)?;
+        if flags & ALT_FLAG_NOT != 0 {
+            selected = !selected;
+        }
+        if !selected {
+            continue;
+        }
+        let replacement_offset = relative_image_offset(
+            image_base,
+            image_size,
+            record_offset + 4,
+            replacement_relative,
+            replacement_length,
+        )?;
+        let mut patch = Vec::new();
+        patch
+            .try_reserve_exact(instruction_length)
+            .map_err(|_| LinuxSpecialSectionError::AllocationFailed)?;
+        patch.resize(instruction_length, 0x90);
+        let mut original = Vec::new();
+        original
+            .try_reserve_exact(instruction_length)
+            .map_err(|_| LinuxSpecialSectionError::AllocationFailed)?;
+        original.resize(instruction_length, 0);
+        read(memory, mapping, instruction_offset, &mut original)
+            .map_err(map_identity_memory_error)?;
+        if replacement_length != 0 {
+            read(
+                memory,
+                mapping,
+                replacement_offset,
+                &mut patch[..replacement_length],
+            )
+            .map_err(map_identity_memory_error)?;
+        }
+        if flags & ALT_FLAG_DIRECT_CALL != 0 {
+            retarget_direct_call(
+                memory,
+                mapping,
+                image_base,
+                replacement_offset,
+                instruction_offset,
+                replacement_length,
+                &original,
+                &mut patch,
+                features.nop_function_address(),
+            )?;
+        } else {
+            relocate_supported_replacement(
+                image_base,
+                replacement_offset,
+                instruction_offset,
+                &mut patch[..replacement_length],
+            )?;
+        }
+        write_verified(memory, mapping, instruction_offset, &patch)
+            .map_err(map_identity_memory_error)?;
+    }
+    Ok(())
+}
+
+fn map_identity_memory_error<MemoryError, FeatureError>(
+    error: LinuxModuleIdentityError<MemoryError>,
+) -> LinuxSpecialSectionError<MemoryError, FeatureError> {
+    match error {
+        LinuxModuleIdentityError::Memory(error) => LinuxSpecialSectionError::Memory(error),
+        LinuxModuleIdentityError::AllocationFailed => LinuxSpecialSectionError::AllocationFailed,
+        LinuxModuleIdentityError::VerificationFailed => {
+            LinuxSpecialSectionError::VerificationFailed
+        }
+        other => LinuxSpecialSectionError::Identity(other),
+    }
+}
+
+fn relative_image_offset<MemoryError, FeatureError>(
+    image_base: u64,
+    image_size: usize,
+    field_offset: usize,
+    relative: i32,
+    length: usize,
+) -> Result<usize, LinuxSpecialSectionError<MemoryError, FeatureError>> {
+    let field_address = image_base
+        .checked_add(field_offset as u64)
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let target = if relative >= 0 {
+        field_address.checked_add(relative as u64)
+    } else {
+        field_address.checked_sub(u64::from(relative.unsigned_abs()))
+    }
+    .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let offset = target
+        .checked_sub(image_base)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    if offset
+        .checked_add(length)
+        .is_none_or(|end| end > image_size)
+    {
+        return Err(LinuxSpecialSectionError::AlternativeAddressOutOfRange);
+    }
+    Ok(offset)
+}
+
+fn range_has_permissions(
+    regions: &[LinuxKoMemoryRegion],
+    offset: usize,
+    length: usize,
+    executable: bool,
+) -> bool {
+    let Some(end) = offset.checked_add(length) else {
+        return false;
+    };
+    regions.iter().any(|region| {
+        region
+            .image_offset
+            .checked_add(region.size)
+            .is_some_and(|region_end| {
+                offset >= region.image_offset
+                    && end <= region_end
+                    && region.executable == executable
+                    && !region.writable
+            })
+    })
+}
+
+fn retarget_direct_call<Memory, Tlb, FeatureError>(
+    memory: &X86_64LinuxModuleMemory<Memory, Tlb>,
+    mapping: LinuxModuleMapping,
+    image_base: u64,
+    replacement_offset: usize,
+    instruction_offset: usize,
+    replacement_length: usize,
+    original: &[u8],
+    patch: &mut [u8],
+    nop_function_address: Option<u64>,
+) -> Result<(), LinuxSpecialSectionError<Memory::Error, FeatureError>>
+where
+    Memory: ProcessFrameMemory,
+    Tlb: LinuxModuleTlb,
+{
+    if replacement_length != 5
+        || original.len() != 6
+        || patch.len() < 6
+        || patch[0] != 0xe8
+        || original[0..2] != [0xff, 0x15]
+    {
+        return Err(LinuxSpecialSectionError::InvalidDirectCall);
+    }
+    let indirect_displacement = i32::from_le_bytes(original[2..6].try_into().unwrap());
+    let instruction_next = image_base
+        .checked_add(instruction_offset as u64)
+        .and_then(|address| address.checked_add(6))
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let pointer_address = if indirect_displacement >= 0 {
+        instruction_next.checked_add(indirect_displacement as u64)
+    } else {
+        instruction_next.checked_sub(u64::from(indirect_displacement.unsigned_abs()))
+    }
+    .ok_or(LinuxSpecialSectionError::InvalidDirectCall)?;
+    let pointer_offset = pointer_address
+        .checked_sub(image_base)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .ok_or(LinuxSpecialSectionError::InvalidDirectCall)?;
+    let mut target_bytes = [0; 8];
+    read(memory, mapping, pointer_offset, &mut target_bytes).map_err(map_identity_memory_error)?;
+    let mut target = u64::from_le_bytes(target_bytes);
+    let replacement_next = image_base
+        .checked_add(replacement_offset as u64)
+        .and_then(|address| address.checked_add(5))
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    if target == 0 {
+        let old_displacement = i32::from_le_bytes(patch[1..5].try_into().unwrap());
+        target = if old_displacement >= 0 {
+            replacement_next.checked_add(old_displacement as u64)
+        } else {
+            replacement_next.checked_sub(u64::from(old_displacement.unsigned_abs()))
+        }
+        .ok_or(LinuxSpecialSectionError::InvalidDirectCall)?;
+    }
+    if nop_function_address == Some(target) {
+        patch.fill(0x90);
+        return Ok(());
+    }
+    let direct_call_next = image_base
+        .checked_add(instruction_offset as u64)
+        .and_then(|address| address.checked_add(5))
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let displacement = i128::from(target) - i128::from(direct_call_next);
+    let displacement =
+        i32::try_from(displacement).map_err(|_| LinuxSpecialSectionError::InvalidDirectCall)?;
+    patch[1..5].copy_from_slice(&displacement.to_le_bytes());
+    Ok(())
+}
+
+/// Conservative decoder for the replacement forms admitted by the current
+/// RHEL/NVIDIA evidence. Relative calls, jumps, and long conditional branches
+/// are retargeted; unknown encodings are rejected instead of copied blindly.
+fn relocate_supported_replacement<MemoryError, FeatureError>(
+    image_base: u64,
+    replacement_offset: usize,
+    instruction_offset: usize,
+    bytes: &mut [u8],
+) -> Result<(), LinuxSpecialSectionError<MemoryError, FeatureError>> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        let length = match remaining {
+            [0x90 | 0xc3 | 0xcc, ..] => 1,
+            [0xf3, 0x90, ..] => 2,
+            [0x31 | 0x33 | 0x85 | 0x89 | 0x8b, modrm, ..] if modrm >> 6 == 3 => 2,
+            [0x0f, 0xae, modrm, ..] if modrm >> 6 == 3 => 3,
+            [0x48, 0x31 | 0x33 | 0x85 | 0x89 | 0x8b, modrm, ..] if modrm >> 6 == 3 => 3,
+            [0xf3, 0x0f, 0xb8, modrm, ..] if modrm >> 6 == 3 => 4,
+            [0xf3, 0x48, 0x0f, 0xb8, modrm, ..] if modrm >> 6 == 3 => 5,
+            [0x48, register, ..] if (0xb8..=0xbf).contains(register) && remaining.len() >= 10 => 10,
+            [0xe8 | 0xe9, _, _, _, _, ..] => {
+                relocate_rel32(
+                    image_base,
+                    replacement_offset + offset,
+                    instruction_offset + offset,
+                    &mut bytes[offset + 1..offset + 5],
+                    5,
+                )?;
+                5
+            }
+            [0x0f, condition, _, _, _, _, ..] if (0x80..=0x8f).contains(condition) => {
+                relocate_rel32(
+                    image_base,
+                    replacement_offset + offset,
+                    instruction_offset + offset,
+                    &mut bytes[offset + 2..offset + 6],
+                    6,
+                )?;
+                6
+            }
+            _ => return Err(LinuxSpecialSectionError::UnsupportedAlternativeInstruction),
+        };
+        offset += length;
+    }
+    Ok(())
+}
+
+fn relocate_rel32<MemoryError, FeatureError>(
+    image_base: u64,
+    old_instruction_offset: usize,
+    new_instruction_offset: usize,
+    displacement: &mut [u8],
+    instruction_length: usize,
+) -> Result<(), LinuxSpecialSectionError<MemoryError, FeatureError>> {
+    let old_displacement = i32::from_le_bytes(
+        displacement
+            .try_into()
+            .map_err(|_| LinuxSpecialSectionError::UnsupportedAlternativeInstruction)?,
+    );
+    let old_next = image_base
+        .checked_add(old_instruction_offset as u64)
+        .and_then(|address| address.checked_add(instruction_length as u64))
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let target = if old_displacement >= 0 {
+        old_next.checked_add(old_displacement as u64)
+    } else {
+        old_next.checked_sub(u64::from(old_displacement.unsigned_abs()))
+    }
+    .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let new_next = image_base
+        .checked_add(new_instruction_offset as u64)
+        .and_then(|address| address.checked_add(instruction_length as u64))
+        .ok_or(LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    let new_displacement = i32::try_from(i128::from(target) - i128::from(new_next))
+        .map_err(|_| LinuxSpecialSectionError::AlternativeAddressOutOfRange)?;
+    displacement.copy_from_slice(&new_displacement.to_le_bytes());
+    Ok(())
 }
 
 struct IdentityInputs<'a> {
@@ -603,6 +1064,237 @@ mod tests {
 
     fn read_u64_at(bytes: &[u8], offset: usize) -> u64 {
         u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    }
+
+    struct TestFeatures(bool);
+
+    unsafe impl X86_64AlternativeFeatures for TestFeatures {
+        type Error = core::convert::Infallible;
+
+        fn feature_enabled(&self, _feature: u16) -> Result<bool, Self::Error> {
+            Ok(self.0)
+        }
+    }
+
+    fn relative(from: usize, to: usize) -> i32 {
+        i32::try_from(to as i64 - from as i64).unwrap()
+    }
+
+    fn alternative_sections(
+        table_offset: usize,
+        table_size: usize,
+        replacement_offset: usize,
+        replacement_size: usize,
+    ) -> [LinuxKoSpecialSection<'static>; 2] {
+        [
+            LinuxKoSpecialSection {
+                section_index: 20,
+                name: b".altinstructions",
+                image_offset: table_offset,
+                size: table_size,
+                kind: LinuxKoSpecialSectionKind::Alternatives,
+            },
+            LinuxKoSpecialSection {
+                section_index: 21,
+                name: b".altinstr_replacement",
+                image_offset: replacement_offset,
+                size: replacement_size,
+                kind: LinuxKoSpecialSectionKind::Alternatives,
+            },
+        ]
+    }
+
+    #[test]
+    fn applies_selected_alternative_and_preserves_unselected_baseline() {
+        for selected in [false, true] {
+            let mut mapper = mapper();
+            let mapping = mapper.reserve_zeroed(PAGE_SIZE * 6, PAGE_SIZE).unwrap();
+            let base = mapper.mapping_base(mapping).unwrap();
+            let instruction_offset = 64;
+            let table_offset = PAGE_SIZE * 2 + 128;
+            let replacement_offset = PAGE_SIZE * 2 + 512;
+            let mut record = [0; ALT_INSTR_BYTES];
+            record[0..4].copy_from_slice(&relative(table_offset, instruction_offset).to_le_bytes());
+            record[4..8]
+                .copy_from_slice(&relative(table_offset + 4, replacement_offset).to_le_bytes());
+            record[8..10].copy_from_slice(&7_u16.to_le_bytes());
+            record[12] = 8;
+            record[13] = 3;
+            mapper
+                .write(mapping, instruction_offset, &[0xcc; 8])
+                .unwrap();
+            mapper.write(mapping, table_offset, &record).unwrap();
+            mapper
+                .write(mapping, replacement_offset, &[0x31, 0xc0, 0xc3])
+                .unwrap();
+            apply_alternatives(
+                &mut mapper,
+                mapping,
+                base,
+                PAGE_SIZE * 6,
+                &regions(),
+                &alternative_sections(table_offset, record.len(), replacement_offset, 3),
+                &TestFeatures(selected),
+            )
+            .unwrap();
+            let mut observed = [0; 8];
+            mapper
+                .read(mapping, instruction_offset, &mut observed)
+                .unwrap();
+            assert_eq!(
+                observed,
+                if selected {
+                    [0x31, 0xc0, 0xc3, 0x90, 0x90, 0x90, 0x90, 0x90]
+                } else {
+                    [0xcc; 8]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn retargets_selected_direct_call_from_replacement_to_instruction_site() {
+        let mut mapper = mapper();
+        let mapping = mapper.reserve_zeroed(PAGE_SIZE * 6, PAGE_SIZE).unwrap();
+        let base = mapper.mapping_base(mapping).unwrap();
+        let instruction_offset = 96;
+        let call_target_offset = 256;
+        let pointer_offset = PAGE_SIZE * 2 + 1000;
+        let table_offset = PAGE_SIZE * 2 + 160;
+        let replacement_offset = PAGE_SIZE * 2 + 600;
+        let old_displacement = i32::try_from(300_i64 - (replacement_offset + 5) as i64).unwrap();
+        let mut replacement = [0; 5];
+        replacement[0] = 0xe8;
+        replacement[1..5].copy_from_slice(&old_displacement.to_le_bytes());
+        let mut record = [0; ALT_INSTR_BYTES];
+        record[0..4].copy_from_slice(&relative(table_offset, instruction_offset).to_le_bytes());
+        record[4..8].copy_from_slice(&relative(table_offset + 4, replacement_offset).to_le_bytes());
+        record[8..10].copy_from_slice(&11_u16.to_le_bytes());
+        record[10..12].copy_from_slice(&ALT_FLAG_DIRECT_CALL.to_le_bytes());
+        record[12] = 6;
+        record[13] = 5;
+        let pointer_displacement =
+            i32::try_from(pointer_offset as i64 - (instruction_offset + 6) as i64).unwrap();
+        let mut indirect = [0; 6];
+        indirect[0..2].copy_from_slice(&[0xff, 0x15]);
+        indirect[2..6].copy_from_slice(&pointer_displacement.to_le_bytes());
+        mapper
+            .write(mapping, instruction_offset, &indirect)
+            .unwrap();
+        mapper.write(mapping, table_offset, &record).unwrap();
+        mapper
+            .write(mapping, replacement_offset, &replacement)
+            .unwrap();
+        mapper
+            .write(
+                mapping,
+                pointer_offset,
+                &(base + call_target_offset as u64).to_le_bytes(),
+            )
+            .unwrap();
+        apply_alternatives(
+            &mut mapper,
+            mapping,
+            base,
+            PAGE_SIZE * 6,
+            &regions(),
+            &alternative_sections(table_offset, record.len(), replacement_offset, 5),
+            &TestFeatures(true),
+        )
+        .unwrap();
+        let mut observed = [0; 6];
+        mapper
+            .read(mapping, instruction_offset, &mut observed)
+            .unwrap();
+        let expected_displacement =
+            i32::try_from(call_target_offset as i64 - (instruction_offset + 5) as i64).unwrap();
+        assert_eq!(observed[0], 0xe8);
+        assert_eq!(
+            i32::from_le_bytes(observed[1..5].try_into().unwrap()),
+            expected_displacement
+        );
+        assert_eq!(observed[5], 0x90);
+    }
+
+    #[test]
+    fn relocates_supported_rel32_and_rejects_unknown_rip_relative_encoding() {
+        for supported in [true, false] {
+            let mut mapper = mapper();
+            let mapping = mapper.reserve_zeroed(PAGE_SIZE * 6, PAGE_SIZE).unwrap();
+            let base = mapper.mapping_base(mapping).unwrap();
+            let instruction_offset = 160;
+            let target_offset = 320;
+            let table_offset = PAGE_SIZE * 2 + 200;
+            let replacement_offset = PAGE_SIZE * 2 + 720;
+            let replacement = if supported {
+                let mut branch = [0; 7];
+                branch[0] = 0xe9;
+                let displacement =
+                    i32::try_from(target_offset as i64 - (replacement_offset + 5) as i64).unwrap();
+                branch[1..5].copy_from_slice(&displacement.to_le_bytes());
+                branch
+            } else {
+                [0x48, 0x8b, 0x05, 0, 0, 0, 0]
+            };
+            let mut record = [0; ALT_INSTR_BYTES];
+            record[0..4].copy_from_slice(&relative(table_offset, instruction_offset).to_le_bytes());
+            record[4..8]
+                .copy_from_slice(&relative(table_offset + 4, replacement_offset).to_le_bytes());
+            record[8..10].copy_from_slice(&3_u16.to_le_bytes());
+            record[12] = 7;
+            record[13] = if supported { 5 } else { 7 };
+            mapper
+                .write(mapping, instruction_offset, &[0xcc; 7])
+                .unwrap();
+            mapper.write(mapping, table_offset, &record).unwrap();
+            mapper
+                .write(mapping, replacement_offset, &replacement)
+                .unwrap();
+            let result = apply_alternatives(
+                &mut mapper,
+                mapping,
+                base,
+                PAGE_SIZE * 6,
+                &regions(),
+                &alternative_sections(table_offset, record.len(), replacement_offset, 7),
+                &TestFeatures(true),
+            );
+            let mut observed = [0; 7];
+            mapper
+                .read(mapping, instruction_offset, &mut observed)
+                .unwrap();
+            if supported {
+                result.unwrap();
+                assert_eq!(observed[0], 0xe9);
+                assert_eq!(
+                    i32::from_le_bytes(observed[1..5].try_into().unwrap()),
+                    i32::try_from(target_offset as i64 - (instruction_offset + 5) as i64).unwrap()
+                );
+            } else {
+                assert_eq!(
+                    result,
+                    Err(LinuxSpecialSectionError::UnsupportedAlternativeInstruction)
+                );
+                assert_eq!(observed, [0xcc; 7]);
+            }
+        }
+    }
+
+    #[test]
+    fn admits_measured_nvidia_popcnt_and_movabs_replacements() {
+        let cases: &[&[u8]] = &[
+            &[0xf3, 0x0f, 0xb8, 0xc7],
+            &[0xf3, 0x48, 0x0f, 0xb8, 0xc7],
+            &[0x48, 0xb8, 0x00, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00],
+            &[0x48, 0xba, 0x00, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00],
+        ];
+        for bytes in cases {
+            let mut replacement = bytes.to_vec();
+            let original = replacement.clone();
+            relocate_supported_replacement::<(), ()>(0x20_0000, 4096, 128, &mut replacement)
+                .unwrap();
+            assert_eq!(replacement, original);
+        }
     }
 
     #[test]

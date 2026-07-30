@@ -87,6 +87,15 @@ unsafe executor contract whose error path guarantees module control was never
 entered. There are intentionally no permissive no-op or host-call
 implementations of either contract.
 
+The first production category processor handles the packed 14-byte x86-64
+`.altinstructions` format measured in the RHEL 10 SDK and NVIDIA open modules.
+It selects features against an all-eligible-CPU policy, validates every relative
+target, retargets admitted rel32 branches and direct calls, pads the original
+instruction span, and verifies the staged patch. The currently measured NVIDIA
+POPCNT and movabs replacements are admitted. Unknown flags, instruction forms,
+or alternative targets outside executable module regions reject the module;
+they are never copied speculatively.
+
 Host fault-injection tests cover stale handles, conflicting hierarchy
 ownership, allocation failure, partial page-table publication, failed seal
 rollback, partial init discard, TLB flush ordering, retryable reclamation,
@@ -95,8 +104,9 @@ dispatch retry.
 
 That is still not runtime qualification. Arach has no qualified synchronous
 all-CPU TLB implementation or concrete native lifecycle executor for this
-path, Linux special sections still need their production runtime processors,
-and no admitted module has executed in an Arach boot.
+path. Jump labels, static calls, tracing, unwind data, parameters, exports,
+per-CPU data, and the other inventoried Linux categories still need production
+runtime processors, and no admitted module has executed in an Arach boot.
 `current_arach_evidence()` therefore grants no NVIDIA-runtime credit until a
 native integration suite supplies those observations.
 
