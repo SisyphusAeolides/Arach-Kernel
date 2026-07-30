@@ -42,7 +42,7 @@ under QEMU.
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and ABI code builds and passes host tests | Boot the native kernel through Granite and execute the ring-3 syscall probe |
 | System bootstrap | Granite, Arach Kernel, and Push can be assembled into a pinned, measured C0 bundle | Execute that bundle under QEMU and preserve its measurements across the boot boundary |
-| Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, W^X layout planning, and allocated-section relocation | Publish module memory through Arach's native W^X backend, run initialization, exercise the device, and remove it cleanly |
+| Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, native W^X mapping, and host-mode transaction tests | Implement production special-section, all-CPU TLB, and lifecycle execution backends; then initialize, exercise, and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete init, device operation, suspend/resume, and removal on Arach |
 | Formal specifications | Idris 2 total specifications and Agda safe proof models compile in CI | Connect each proof artifact to a measured generated table, manifest, or runtime boundary |
 | COSMIC Epoch | The complete desktop and session compatibility contract is documented | Boot the pinned COSMIC greeter and complete a login, desktop session, suspend/resume, logout, and shutdown cycle |

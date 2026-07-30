@@ -282,6 +282,12 @@ pub struct LinuxKoLoadPlan<'a> {
 }
 
 impl LinuxKoLoadPlan<'_> {
+    /// Returns the immutable admitted ELF source. Runtime processors must read
+    /// relocated values through the backend staging image, not this source.
+    pub const fn source_bytes(&self) -> &[u8] {
+        self.bytes
+    }
+
     pub const fn name(&self) -> &[u8] {
         self.name
     }
@@ -387,6 +393,8 @@ pub enum LinuxKoLoadError {
 /// Kernel-memory and execution boundary used by the transactional installer.
 ///
 /// `reserve_zeroed` must return inaccessible, zero-filled staging memory.
+/// `prepare_for_seal` processes architecture and Linux special sections while
+/// the relocated image is still writable but inaccessible to execution.
 /// `seal` must publish exactly the supplied page-separated permissions and
 /// reject writable+executable aliases. `abort`, `discard_init`, and `release`
 /// must synchronously revoke addressability; physical reclamation debt may be
@@ -415,6 +423,18 @@ pub trait LinuxKoBackend {
         offset: usize,
         expected: &[u8],
     ) -> Result<bool, Self::Error>;
+
+    /// Performs every required pre-publication transformation and runtime
+    /// registration against the fully relocated staging image.
+    ///
+    /// On failure the reservation remains owned by the backend and the
+    /// installer calls `abort` exactly once. Implementations must reject every
+    /// required special section they do not understand.
+    fn prepare_for_seal(
+        &mut self,
+        reservation: Self::Reservation,
+        plan: &LinuxKoLoadPlan<'_>,
+    ) -> Result<(), Self::Error>;
 
     fn seal(
         &mut self,
@@ -557,6 +577,10 @@ where
             backend.abort(reservation);
             return Err(error);
         }
+    }
+    if let Err(error) = backend.prepare_for_seal(reservation, &plan) {
+        backend.abort(reservation);
+        return Err(LinuxKoInstallError::Backend(error));
     }
     if let Err(error) = backend.seal(reservation, &plan.regions) {
         backend.abort(reservation);
@@ -1263,6 +1287,7 @@ mod tests {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum BackendError {
         InvalidOperation,
+        PrepareUnavailable,
         CleanupUnavailable,
     }
 
@@ -1275,11 +1300,14 @@ mod tests {
         staging: Option<Vec<u8>>,
         base: u64,
         sealed: bool,
+        prepared: bool,
         committed: bool,
         aborted: usize,
         released: usize,
         discarded: Option<(usize, usize)>,
         init_calls: usize,
+        prepare_calls: usize,
+        prepare_failures: usize,
         cleanup_calls: usize,
         init_status: i32,
         cleanup_failures: usize,
@@ -1291,11 +1319,14 @@ mod tests {
                 staging: None,
                 base: IMAGE_BASE,
                 sealed: false,
+                prepared: false,
                 committed: false,
                 aborted: 0,
                 released: 0,
                 discarded: None,
                 init_calls: 0,
+                prepare_calls: 0,
+                prepare_failures: 0,
                 cleanup_calls: 0,
                 init_status: 0,
                 cleanup_failures: 0,
@@ -1356,6 +1387,28 @@ mod tests {
             Ok(image.get(offset..offset + expected.len()) == Some(expected))
         }
 
+        fn prepare_for_seal(
+            &mut self,
+            reservation: Self::Reservation,
+            plan: &LinuxKoLoadPlan<'_>,
+        ) -> Result<(), Self::Error> {
+            if reservation != 1
+                || self.staging.is_none()
+                || self.sealed
+                || self.prepared
+                || plan.image_virtual_address() != self.base
+            {
+                return Err(BackendError::InvalidOperation);
+            }
+            self.prepare_calls += 1;
+            if self.prepare_failures != 0 {
+                self.prepare_failures -= 1;
+                return Err(BackendError::PrepareUnavailable);
+            }
+            self.prepared = true;
+            Ok(())
+        }
+
         fn seal(
             &mut self,
             reservation: Self::Reservation,
@@ -1363,6 +1416,7 @@ mod tests {
         ) -> Result<(), Self::Error> {
             if reservation != 1
                 || self.staging.is_none()
+                || !self.prepared
                 || self.sealed
                 || regions.is_empty()
                 || regions.iter().any(|region| {
@@ -1432,6 +1486,7 @@ mod tests {
         fn abort(&mut self, reservation: Self::Reservation) {
             assert_eq!(reservation, 1);
             self.staging = None;
+            self.prepared = false;
             self.sealed = false;
             self.aborted += 1;
         }
@@ -1494,6 +1549,7 @@ mod tests {
         let live =
             unsafe { install_linux_module(&bytes, b"6.12", &Resolver, &mut backend).unwrap() };
         assert_eq!(backend.init_calls, 1);
+        assert_eq!(backend.prepare_calls, 1);
         assert!(backend.discarded.is_some_and(|(_, size)| size > 0));
         assert_eq!(backend.aborted, 0);
         assert_eq!(backend.released, 0);
@@ -1514,6 +1570,24 @@ mod tests {
         assert_eq!(backend.released, 1);
         assert_eq!(backend.aborted, 0);
         assert!(backend.discarded.is_none());
+    }
+
+    #[test]
+    fn failed_pre_seal_processing_aborts_without_publishing_pages() {
+        let bytes = super::linux_ko::tests::fixture();
+        let mut backend = DryBackend::new();
+        backend.prepare_failures = 1;
+        let result = unsafe { install_linux_module(&bytes, b"6.12", &Resolver, &mut backend) };
+        assert!(matches!(
+            result,
+            Err(LinuxKoInstallError::Backend(
+                BackendError::PrepareUnavailable
+            ))
+        ));
+        assert_eq!(backend.prepare_calls, 1);
+        assert_eq!(backend.aborted, 1);
+        assert_eq!(backend.init_calls, 0);
+        assert_eq!(backend.released, 0);
     }
 
     #[test]

@@ -85,6 +85,7 @@ enum SlotPhase {
     Free,
     Staging,
     Sealed,
+    Committed,
     Quarantined,
 }
 
@@ -193,6 +194,48 @@ where
         mapping: LinuxModuleMapping,
     ) -> Result<usize, X86_64ModuleMapError<Memory::Error>> {
         Ok(self.slot(mapping)?.image_size)
+    }
+
+    /// Transfers a sealed reservation into the live module lifecycle.
+    pub fn commit(
+        &mut self,
+        mapping: LinuxModuleMapping,
+    ) -> Result<(), X86_64ModuleMapError<Memory::Error>> {
+        let slot_index = self.sealed_slot(mapping)?;
+        self.slots[slot_index].phase = SlotPhase::Committed;
+        Ok(())
+    }
+
+    /// Proves that `address` resolves to this module's present RX mapping.
+    pub fn executable_address(
+        &self,
+        mapping: LinuxModuleMapping,
+        address: u64,
+    ) -> Result<bool, X86_64ModuleMapError<Memory::Error>> {
+        let slot_index = self.committed_slot(mapping)?;
+        let slot = &self.slots[slot_index];
+        let Some(offset) = address.checked_sub(slot.base()) else {
+            return Ok(false);
+        };
+        let Ok(offset) = usize::try_from(offset) else {
+            return Ok(false);
+        };
+        if offset >= slot.image_size {
+            return Ok(false);
+        }
+        let page = offset / PAGE_SIZE;
+        let Some(expected_frame) = slot.data_frames.get(page).copied().flatten() else {
+            return Ok(false);
+        };
+        let table =
+            slot.leaf_tables[page / PAGES_PER_EXTENT].ok_or(X86_64ModuleMapError::InvalidState)?;
+        let entry = self
+            .memory
+            .read_entry(table, page % PAGES_PER_EXTENT)
+            .map_err(X86_64ModuleMapError::Memory)?;
+        Ok(entry & ENTRY_PRESENT != 0
+            && entry & (ENTRY_WRITABLE | ENTRY_USER | ENTRY_NO_EXECUTE) == 0
+            && entry & PAGE_ADDRESS_MASK == expected_frame.as_u64())
     }
 
     /// Allocates zeroed data and leaf-table frames without publishing a single
@@ -460,7 +503,7 @@ where
         offset: usize,
         size: usize,
     ) -> Result<(), X86_64ModuleMapError<Memory::Error>> {
-        let slot_index = self.sealed_slot(mapping)?;
+        let slot_index = self.committed_slot(mapping)?;
         if size == 0
             || offset % PAGE_SIZE != 0
             || size % PAGE_SIZE != 0
@@ -502,20 +545,36 @@ where
         }
     }
 
-    /// Revokes the complete image, detaches its private leaf tables and then
-    /// reclaims every owned frame. Failed physical reclamation quarantines the
-    /// slot and its virtual extent instead of permitting aliasing reuse.
-    pub fn release(
+    /// Revokes an uncommitted staging or sealed reservation.
+    pub fn abort(
         &mut self,
         mapping: LinuxModuleMapping,
     ) -> Result<(), X86_64ModuleMapError<Memory::Error>> {
         let slot_index = self.slot_index(mapping)?;
-        if matches!(
+        if !matches!(
             self.slots[slot_index].phase,
-            SlotPhase::Free | SlotPhase::Quarantined
+            SlotPhase::Staging | SlotPhase::Sealed
         ) {
             return Err(X86_64ModuleMapError::InvalidState);
         }
+        self.revoke_mapping(slot_index)
+    }
+
+    /// Revokes a committed module and reclaims every exclusively owned frame.
+    pub fn release(
+        &mut self,
+        mapping: LinuxModuleMapping,
+    ) -> Result<(), X86_64ModuleMapError<Memory::Error>> {
+        let slot_index = self.committed_slot(mapping)?;
+        self.revoke_mapping(slot_index)
+    }
+
+    /// Detaches a complete image before reclaiming physical ownership. Any
+    /// incomplete revocation quarantines the slot and its virtual extent.
+    fn revoke_mapping(
+        &mut self,
+        slot_index: usize,
+    ) -> Result<(), X86_64ModuleMapError<Memory::Error>> {
         let base = self.slots[slot_index].base();
         let leaves_cleared = self.clear_all_leaves(slot_index);
         let tables_detached = self.detach_slot_tables(slot_index);
@@ -690,6 +749,17 @@ where
     ) -> Result<usize, X86_64ModuleMapError<Memory::Error>> {
         let index = self.slot_index(mapping)?;
         if self.slots[index].phase != SlotPhase::Sealed {
+            return Err(X86_64ModuleMapError::InvalidState);
+        }
+        Ok(index)
+    }
+
+    fn committed_slot(
+        &self,
+        mapping: LinuxModuleMapping,
+    ) -> Result<usize, X86_64ModuleMapError<Memory::Error>> {
+        let index = self.slot_index(mapping)?;
+        if self.slots[index].phase != SlotPhase::Committed {
             return Err(X86_64ModuleMapError::InvalidState);
         }
         Ok(index)
@@ -1094,6 +1164,25 @@ mod tests {
             Some(&(LINUX_MODULE_WINDOW_BASE, PAGE_SIZE * 3))
         );
 
+        assert_eq!(
+            mapper.executable_address(mapping, LINUX_MODULE_WINDOW_BASE),
+            Err(X86_64ModuleMapError::InvalidState)
+        );
+        mapper.commit(mapping).unwrap();
+        assert!(
+            mapper
+                .executable_address(mapping, LINUX_MODULE_WINDOW_BASE)
+                .unwrap()
+        );
+        assert!(
+            !mapper
+                .executable_address(mapping, LINUX_MODULE_WINDOW_BASE + PAGE_SIZE as u64)
+                .unwrap()
+        );
+        assert_eq!(
+            mapper.commit(mapping),
+            Err(X86_64ModuleMapError::InvalidState)
+        );
         mapper.discard(mapping, PAGE_SIZE, PAGE_SIZE * 2).unwrap();
         assert_eq!(mapper.memory.read_entry(leaf, 1).unwrap(), 0);
         assert_eq!(mapper.memory.read_entry(leaf, 2).unwrap(), 0);
@@ -1115,7 +1204,7 @@ mod tests {
             mapper.mapping_base(second).unwrap(),
             LINUX_MODULE_WINDOW_BASE + LINUX_MODULE_EXTENT_SIZE as u64
         );
-        mapper.release(first).unwrap();
+        mapper.abort(first).unwrap();
         let replacement = mapper.reserve_zeroed(PAGE_SIZE, PAGE_SIZE).unwrap();
         assert_eq!(
             mapper.mapping_base(replacement).unwrap(),
@@ -1296,6 +1385,7 @@ mod tests {
         let mut mapper = mapper();
         let mapping = mapper.reserve_zeroed(PAGE_SIZE * 3, PAGE_SIZE).unwrap();
         mapper.seal(mapping, &regions()).unwrap();
+        mapper.commit(mapping).unwrap();
         let pml2 = mapper.module_pml2.unwrap();
         let leaf =
             PhysicalAddress::new(mapper.memory.read_entry(pml2, 0).unwrap() & PAGE_ADDRESS_MASK);
@@ -1338,7 +1428,7 @@ mod tests {
         );
         assert_eq!(mapper.memory.read_entry(leaf, 0).unwrap(), 0);
         assert_eq!(mapper.memory.read_entry(leaf, 1).unwrap(), 0);
-        mapper.release(mapping).unwrap();
+        mapper.abort(mapping).unwrap();
     }
 
     #[test]
@@ -1346,6 +1436,7 @@ mod tests {
         let mut mapper = mapper();
         let mapping = mapper.reserve_zeroed(PAGE_SIZE * 3, PAGE_SIZE).unwrap();
         mapper.seal(mapping, &regions()).unwrap();
+        mapper.commit(mapping).unwrap();
         let slot = usize::from(mapping.slot());
         let failed_frame = mapper.slots[slot].data_frames[0].unwrap();
         mapper.memory.fail_release = Some(failed_frame);
