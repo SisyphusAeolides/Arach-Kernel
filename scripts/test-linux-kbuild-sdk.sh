@@ -33,6 +33,10 @@ mkdir -p -- "$work" "$(dirname -- "$report")"
 cp -- "$root/compat/linux-module-smoke/Makefile" "$work/Makefile"
 cp -- "$root/compat/linux-module-smoke/arach_contract_smoke.c" \
     "$work/arach_contract_smoke.c"
+if grep -Eq '^[[:space:]]*bool[[:space:]]+is_rox;' \
+    "$kernel_source/include/linux/module.h"; then
+    printf '%s\n' 'ccflags-y += -DARACH_MODULE_MEMORY_HAS_ROX=1' >>"$work/Makefile"
+fi
 
 make -C "$kernel_source" \
     O="$kernel_output" \
@@ -47,7 +51,7 @@ readonly symbols=$work/symbols.txt
 readelf --sections --wide "$module" >"$sections"
 readelf --symbols --wide "$module" >"$symbols"
 
-for section in .modinfo .gnu.linkonce.this_module; do
+for section in .modinfo .gnu.linkonce.this_module .arach.module_abi; do
     grep -Fq "$section" "$sections" || \
         fail "$module lacks $section"
 done
@@ -58,8 +62,10 @@ for symbol in init_module cleanup_module; do
 done
 
 mkdir -p -- "$(dirname -- "$vermagic_file")"
+readonly module_abi_file=$work/module-abi.json
 cargo run --quiet --manifest-path "$root/Cargo.toml" \
-    --bin arach-ko-inspect -- "$module" "$vermagic_file"
+    --bin arach-ko-inspect -- "$module" "$vermagic_file" "$module_abi_file"
+test -s "$module_abi_file" || fail "$module has no validated ABI measurement"
 
 readonly vermagic=$(sed -n '1p' "$vermagic_file")
 test -n "$vermagic" || fail "$module has empty vermagic"
@@ -76,7 +82,7 @@ test -n "$kernel_release" || fail "generated UTS release is empty"
 cat >"$report" <<EOF
 {
   "suite": "arach-linux-external-kbuild-smoke",
-  "passing_cases": 14,
+  "passing_cases": 15,
   "artifact": "arach_contract_smoke.ko",
   "artifact_sha256": "$module_digest",
   "kernel_release": "$kernel_release",
@@ -94,7 +100,9 @@ cat >"$report" <<EOF
   "export_policy_admission": true,
   "load_layout_planning": true,
   "wx_region_planning": true,
-  "relocation_binding": true
+  "relocation_binding": true,
+  "module_abi_measurement": true,
+  "module_abi": $(cat -- "$module_abi_file")
 }
 EOF
 

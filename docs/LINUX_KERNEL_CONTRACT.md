@@ -151,6 +151,18 @@ Inspection validates its allocatable sections and produces the page-separated
 core/init load blueprint, keeping the build fixture and loader vocabulary
 synchronized.
 
+The smoke source additionally asks the exact configured Kbuild compiler to
+emit `.arach.module_abi`. Its fixed-width record measures `struct module`,
+`struct module_memory`, name/state/list/lifecycle offsets, every module-memory
+slot, alignment, and optional unload/ROX fields after configuration and
+randstruct have taken effect. `arach-ko-inspect` bounds-checks every field and
+requires the measured structure size to equal
+`.gnu.linkonce.this_module` before writing `module-abi.json`. This is necessary
+even within one distribution release: the installed RHEL 10.0 and 10.2 SDKs
+already differ in the module-memory ROX field and unload offsets. Arach carries
+the SDK-derived contract forward instead of borrowing offsets from the running
+host kernel.
+
 The smoke gate preserves the complete Kbuild-generated vermagic byte string
 and feeds the module through `arach-ko-admit`. Admission parses fixed-layout
 Linux 6.12 `__versions` records and the chained, padded records measured from

@@ -1,6 +1,7 @@
 pub mod elf;
 pub mod elf_headers;
 pub mod foreign_elf;
+pub mod linux_abi;
 pub mod linux_ko;
 pub mod linux_loader;
 pub mod loader;
