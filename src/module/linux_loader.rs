@@ -157,6 +157,10 @@ impl LinuxKoSpecialSectionCoverage {
         self.0 |= 1_u16 << kind as u8;
     }
 
+    pub fn merge(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+
     pub fn from_sections(sections: &[LinuxKoSpecialSection<'_>]) -> Self {
         let mut coverage = Self::empty();
         for section in sections {

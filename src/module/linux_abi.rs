@@ -113,7 +113,7 @@ impl LinuxModuleAbiContract {
         Ok(contract)
     }
 
-    fn validate(self) -> Result<(), LinuxModuleAbiError> {
+    pub fn validate(self) -> Result<(), LinuxModuleAbiError> {
         let module_size = self.module_size as usize;
         if module_size == 0
             || module_size > MAXIMUM_MODULE_STRUCTURE_BYTES

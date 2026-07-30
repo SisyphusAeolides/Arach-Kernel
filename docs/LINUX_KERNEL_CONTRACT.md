@@ -163,6 +163,17 @@ already differ in the module-memory ROX field and unload offsets. Arach carries
 the SDK-derived contract forward instead of borrowing offsets from the running
 host kernel.
 
+The first consumer of that contract is the native x86-64 module-identity
+processor. While the mapping is still non-present, it validates the compiled
+name and relocated init/exit pointers, clears the untrusted compiler-provided
+module object, and reconstructs only the measured state, self-linked list,
+canonical name, lifecycle pointers, optional reference count, and all seven
+Linux 6.12 memory descriptors from the admitted W^X regions. Every write is
+read back through owned staging frames. Identity mismatch and unknown memory
+models fail before mutation. This processor supplies only the module-identity
+coverage bit; it does not grant runtime qualification while the remaining
+special-section categories are unimplemented.
+
 The smoke gate preserves the complete Kbuild-generated vermagic byte string
 and feeds the module through `arach-ko-admit`. Admission parses fixed-layout
 Linux 6.12 `__versions` records and the chained, padded records measured from
