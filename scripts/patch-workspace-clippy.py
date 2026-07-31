@@ -145,3 +145,231 @@ fn encode_wire<T: Wire64>(value: &T) -> [u64; 8] {''',
     "observation page Default",
 )
 resonance_path.write_text(resonance, encoding="utf-8")
+
+memory_path = root / "libraries/slope/src/memory/mod.rs"
+memory = memory_path.read_text(encoding="utf-8")
+memory = replace_once(
+    memory,
+    '''        for i in 0..word_count.min(BITMASK_WORDS) {
+            mask[i] = u64::MAX;
+        }''',
+    '''        for word in mask.iter_mut().take(word_count.min(BITMASK_WORDS)) {
+            *word = u64::MAX;
+        }''',
+    "slab free-mask initialization",
+)
+memory = replace_once(
+    memory,
+    ".fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {",
+    ".try_update(Ordering::AcqRel, Ordering::Acquire, |current| {",
+    "atomic page cursor update",
+)
+memory = replace_once(
+    memory,
+    '''    pub fn stats(&self) -> HeapStats {
+        // Try to observe — if busy, return zeros (non-blocking)
+        // SAFETY: cell is process-local here; lock is a spinlock
+        let pair = unsafe { crate::sync::entanglement::EntangledPair::from_mapping(&self.cell, 0) };
+        pair.try_observe(|h| HeapStats {
+            alloc_count: h.alloc_count,
+            dealloc_count: h.dealloc_count,
+            oom_count: h.oom_count,
+        })
+        .unwrap_or(HeapStats {
+            alloc_count: 0,
+            dealloc_count: 0,
+            oom_count: 0,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]''',
+    '''    pub fn stats(&self) -> HeapStats {
+        // Try to observe — if busy, return zeros (non-blocking)
+        // SAFETY: cell is process-local here; lock is a spinlock
+        let pair = unsafe { crate::sync::entanglement::EntangledPair::from_mapping(&self.cell, 0) };
+        pair.try_observe(|h| HeapStats {
+            alloc_count: h.alloc_count,
+            dealloc_count: h.dealloc_count,
+            oom_count: h.oom_count,
+        })
+        .unwrap_or(HeapStats {
+            alloc_count: 0,
+            dealloc_count: 0,
+            oom_count: 0,
+        })
+    }
+}
+
+impl Default for GlobalSlabHeap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]''',
+    "global slab heap Default",
+)
+memory_path.write_text(memory, encoding="utf-8")
+
+executor_path = root / "libraries/slope/src/executor.rs"
+executor = executor_path.read_text(encoding="utf-8")
+executor = replace_once(
+    executor,
+    '''    pub const fn task_count(&self) -> usize {
+        self.count
+    }
+}
+
+// ─── CEREBRAL SPAWNER ABI''',
+    '''    pub const fn task_count(&self) -> usize {
+        self.count
+    }
+}
+
+impl Default for OuroborosExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ─── CEREBRAL SPAWNER ABI''',
+    "Ouroboros executor Default",
+)
+executor_path.write_text(executor, encoding="utf-8")
+
+fabric_path = root / "libraries/slope/src/fabric.rs"
+fabric = fabric_path.read_text(encoding="utf-8")
+fabric = replace_once(
+    fabric,
+    '''/// Called by the kernel on the new thread. Extracts args, runs F, exits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _fabric_trampoline(args_ptr: *mut u8) -> ! {''',
+    '''/// Called by the kernel on the new thread. Extracts args, runs F, exits.
+///
+/// # Safety
+///
+/// `args_ptr` must be non-null, properly aligned, and point to an initialized
+/// `FiberArgs` whose closure and outcome storage remain valid for the lifetime
+/// of this thread. The pointed-to closure must match its erased entry function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _fabric_trampoline(args_ptr: *mut u8) -> ! {''',
+    "fabric trampoline safety contract",
+)
+fabric = replace_once(
+    fabric,
+    '''    pub const fn live_count(&self) -> usize {
+        self.count
+    }
+}
+
+#[cfg(test)]''',
+    '''    pub const fn live_count(&self) -> usize {
+        self.count
+    }
+}
+
+impl Default for FabricWeave {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]''',
+    "fabric weave Default",
+)
+fabric_path.write_text(fabric, encoding="utf-8")
+
+hypermedia_path = root / "libraries/slope/src/hypermedia.rs"
+hypermedia = hypermedia_path.read_text(encoding="utf-8")
+hypermedia = replace_once(
+    hypermedia,
+    '''    /// Imports a trust decision made by the authenticated Boulder/Hermes
+    /// broker. A zero fingerprint or generation is never a valid authority.
+    pub unsafe fn from_broker(''',
+    '''    /// Imports a trust decision made by the authenticated Boulder/Hermes
+    /// broker. A zero fingerprint or generation is never a valid authority.
+    ///
+    /// # Safety
+    ///
+    /// The caller must have received all three values from the authenticated
+    /// broker after certificate-chain, hostname, and origin validation. Values
+    /// assembled from untrusted application input must never enter this API.
+    pub unsafe fn from_broker(''',
+    "broker trust-anchor safety contract",
+)
+hypermedia_path.write_text(hypermedia, encoding="utf-8")
+
+signal_path = root / "libraries/slope/src/signal.rs"
+signal = signal_path.read_text(encoding="utf-8")
+signal = replace_once(
+    signal,
+    '''    pub fn install(&self, trampoline: usize) -> Result<(), SyscallError> {
+        let args = [trampoline, self as *const Self as usize, 0, 0, 0, 0];
+        unsafe { syscall(SYS_SIGNAL_DELIVER, args) }.map(|_| ())
+    }
+}
+
+/// The kernel calls this. It dispatches into the matrix.
+/// # Safety: called from kernel context — no Rust stack unwinding.
+#[unsafe(no_mangle)]''',
+    '''    pub fn install(&self, trampoline: usize) -> Result<(), SyscallError> {
+        let args = [trampoline, self as *const Self as usize, 0, 0, 0, 0];
+        unsafe { syscall(SYS_SIGNAL_DELIVER, args) }.map(|_| ())
+    }
+}
+
+impl Default for CoronalMatrix {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The kernel calls this. It dispatches into the matrix.
+///
+/// # Safety
+///
+/// Both pointers must be non-null, properly aligned, and point to initialized
+/// values that remain valid for the duration of the call. The trampoline runs
+/// in kernel delivery context and must not unwind across the ABI boundary.
+#[unsafe(no_mangle)]''',
+    "coronal matrix Default and trampoline safety contract",
+)
+signal_path.write_text(signal, encoding="utf-8")
+
+slope_lib_path = root / "libraries/slope/src/lib.rs"
+slope_lib = slope_lib_path.read_text(encoding="utf-8")
+slope_lib = replace_once(
+    slope_lib,
+    '''/// Executes Sisyphus's six-register syscall ABI only in a native Sisyphus
+/// image. Host builds must never accidentally interpret these numbers as the
+/// host kernel's unrelated syscall table.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]''',
+    '''/// Executes Sisyphus's six-register syscall ABI only in a native Sisyphus
+/// image. Host builds must never accidentally interpret these numbers as the
+/// host kernel's unrelated syscall table.
+///
+/// # Safety
+///
+/// The caller must satisfy the selected syscall's pointer, length, ownership,
+/// and lifetime contract. Invalid user pointers or mismatched argument layouts
+/// can violate memory safety before the kernel can reject the request.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]''',
+    "native syscall safety contract",
+)
+slope_lib = replace_once(
+    slope_lib,
+    '''#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+pub unsafe fn syscall''',
+    '''/// Fail-closed host implementation of the native syscall ABI.
+///
+/// # Safety
+///
+/// The same call-site contract as the native implementation applies even
+/// though this host stub never dereferences arguments and always returns
+/// `ENOSYS`.
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+pub unsafe fn syscall''',
+    "host syscall safety contract",
+)
+slope_lib_path.write_text(slope_lib, encoding="utf-8")
