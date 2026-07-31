@@ -71,7 +71,7 @@ timeout --kill-after=5s "${timeout_seconds}s" "$qemu" \
     -drive "format=raw,if=virtio,file=$image"
 status=$?
 set -e
-if [[ "$status" -ne 0 ]]; then
+if [[ "$status" -ne 0 && "$status" -ne 124 ]]; then
     echo "C0 QEMU exited with status $status" >&2
     exit "$status"
 fi
@@ -84,4 +84,8 @@ for marker in \
         exit 1
     }
 done
-echo "C0 execution gate passed: $log"
+if [[ "$status" -eq 124 ]]; then
+    echo "C0 execution gate passed before bounded QEMU timeout: $log"
+else
+    echo "C0 execution gate passed: $log"
+fi
