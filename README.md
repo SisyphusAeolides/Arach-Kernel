@@ -40,7 +40,7 @@ under QEMU.
 
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
-| Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata build and pass host tests; Linux identity and process-exit calls use the generation-safe lifecycle while other Linux calls fail closed | Boot the native kernel through Granite, execute the ring-3 probe, then admit Linux syscall implementations one measured surface at a time |
+| Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata build and pass host tests; Linux identity/process-exit calls and bounded anonymous `mmap`/`munmap` use real lifecycle/page-table paths while other Linux calls fail closed | Boot the native kernel through Granite, execute the ring-3 probe, then admit Linux syscall implementations one measured surface at a time |
 | System bootstrap | Granite, Arach Kernel, and Push can be assembled into a pinned, measured C0 bundle | Execute that bundle under QEMU and preserve its measurements across the boot boundary |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends; then initialize, exercise, and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete init, device operation, suspend/resume, and removal on Arach |

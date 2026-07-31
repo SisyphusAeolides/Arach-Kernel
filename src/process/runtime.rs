@@ -78,6 +78,48 @@ pub fn reap_after_root_switch() -> Result<bool, ProcessRuntimeError> {
     }
 }
 
+/// Services the Linux anonymous-memory subset against the exact lifecycle
+/// root currently running.  The root lookup is repeated under the runtime
+/// lock, so a recycled PID or a stale syscall frame cannot mutate another
+/// process's page tables.
+#[cfg(target_os = "none")]
+pub fn linux_mmap_current(
+    hint: u64,
+    length: usize,
+    permissions: crate::process::install::MappingPermissions,
+) -> Result<u64, ProcessRuntimeError> {
+    let snapshot = crate::process::lifecycle::current_handle()
+        .and_then(crate::process::lifecycle::snapshot_exact)
+        .ok_or(ProcessRuntimeError::Unavailable)?;
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    runtime
+        .backend
+        .linux_mmap_for_root(
+            snapshot.launch.address_space_root,
+            hint,
+            length,
+            permissions,
+        )
+        .map_err(ProcessRuntimeError::Backend)
+}
+
+#[cfg(target_os = "none")]
+pub fn linux_munmap_current(
+    virtual_address: u64,
+    length: usize,
+) -> Result<(), ProcessRuntimeError> {
+    let snapshot = crate::process::lifecycle::current_handle()
+        .and_then(crate::process::lifecycle::snapshot_exact)
+        .ok_or(ProcessRuntimeError::Unavailable)?;
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    runtime
+        .backend
+        .linux_munmap_for_root(snapshot.launch.address_space_root, virtual_address, length)
+        .map_err(ProcessRuntimeError::Backend)
+}
+
 /// Switches the idle scheduler path back to the immutable kernel root, then
 /// drains any image retired by the syscall that selected PID0.
 ///

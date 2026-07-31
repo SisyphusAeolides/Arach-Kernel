@@ -4,7 +4,10 @@ use crate::capability::{Capability, ProcessInstallControl};
 use crate::module::loader::LoaderError;
 use crate::process::image::PreparedUserImage;
 
-pub const MAXIMUM_PROCESS_SEGMENTS: usize = 16;
+/// Static ELF images plus a bounded set of runtime mappings.  The latter are
+/// needed by the Linux personality for anonymous `mmap`; keeping the array
+/// fixed preserves the kernel's allocation-free process control path.
+pub const MAXIMUM_PROCESS_SEGMENTS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MappingPermissions {

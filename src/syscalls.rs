@@ -22,6 +22,8 @@ const ERROR_BAD_FILE_DESCRIPTOR: isize = -9;
 const ERROR_BAD_ADDRESS: isize = -14;
 const ERROR_INVALID_ARGUMENT: isize = -22;
 const ERROR_NOT_IMPLEMENTED: isize = -38;
+#[cfg(target_os = "none")]
+const ERROR_OUT_OF_MEMORY: isize = -12;
 #[cfg(any(target_os = "none", test))]
 const USER_ADDRESS_MINIMUM: u64 = 0x1000;
 #[cfg(any(target_os = "none", test))]
@@ -342,8 +344,67 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
                 .map(|snapshot| snapshot.parent as isize)
                 .unwrap_or(-3)
         }
+        Some(crate::process::abi::LinuxSyscall::Mmap) => linux_mmap(arguments),
+        Some(crate::process::abi::LinuxSyscall::Munmap) => linux_munmap(arguments),
         Some(_) => ERROR_NOT_IMPLEMENTED,
         None => ERROR_NOT_IMPLEMENTED,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_mmap(arguments: [u64; 6]) -> isize {
+    const PROT_READ: u64 = 0x1;
+    const PROT_WRITE: u64 = 0x2;
+    const PROT_EXEC: u64 = 0x4;
+    const MAP_PRIVATE: u64 = 0x02;
+    const MAP_ANONYMOUS: u64 = 0x20;
+    const MAP_STACK: u64 = 0x20_000;
+    const MAP_NORESERVE: u64 = 0x4000;
+    let [hint, length, prot, flags, fd, offset] = arguments;
+    if length == 0
+        || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
+        || prot & PROT_READ == 0
+        || prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0
+        || flags & (MAP_PRIVATE | MAP_ANONYMOUS) != (MAP_PRIVATE | MAP_ANONYMOUS)
+        || flags & !(MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_NORESERVE) != 0
+        || fd != u64::MAX
+        || offset != 0
+    {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let permissions = crate::process::install::MappingPermissions {
+        readable: true,
+        writable: prot & PROT_WRITE != 0,
+        executable: prot & PROT_EXEC != 0,
+    };
+    match crate::process::runtime::linux_mmap_current(
+        hint,
+        usize::try_from(length).unwrap_or(usize::MAX),
+        permissions,
+    ) {
+        Ok(address) => isize::try_from(address).unwrap_or(-75),
+        Err(crate::process::runtime::ProcessRuntimeError::Backend(
+            crate::process::x86_64::FrameBackedError::CapacityExceeded,
+        ))
+        | Err(crate::process::runtime::ProcessRuntimeError::Backend(
+            crate::process::x86_64::FrameBackedError::Memory(_),
+        )) => ERROR_OUT_OF_MEMORY,
+        Err(_) => ERROR_INVALID_ARGUMENT,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_munmap(arguments: [u64; 6]) -> isize {
+    // Linux consumes only the first two registers for `munmap`; the remaining
+    // syscall registers are caller-clobbered and must not be treated as
+    // hidden validation fields.
+    let [address, length, _, _, _, _] = arguments;
+    match crate::process::runtime::linux_munmap_current(
+        address,
+        usize::try_from(length).unwrap_or(usize::MAX),
+    ) {
+        Ok(()) => 0,
+        Err(_) => ERROR_INVALID_ARGUMENT,
     }
 }
 
