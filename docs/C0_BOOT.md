@@ -29,7 +29,11 @@ containing all of the following evidence from the same bundle:
 - Push reached PID 1;
 - `ARACH_C0_RING3_SYSCALL_PASS` was emitted by the measured probe.
 
-Until that execution gate is implemented and green, C0 remains incomplete.
+The execution gate is implemented in the Arach validation workflow: CI installs
+QEMU/OVMF, runs this helper against the freshly assembled image, and uploads
+the serial transcript. C0 remains incomplete until that workflow is green for
+the exact revision being released; a host build or a missing local QEMU
+installation never counts as qualification.
 
 The image and execution helpers are now available:
 
