@@ -8,9 +8,14 @@ const SEGMENT_EXECUTABLE: u32 = 1 << 0;
 const SEGMENT_WRITABLE: u32 = 1 << 1;
 const SEGMENT_READABLE: u32 = 1 << 2;
 const SEGMENT_FLAGS: u32 = SEGMENT_EXECUTABLE | SEGMENT_WRITABLE | SEGMENT_READABLE;
-const SEGMENT_DYNAMIC: u32 = 2;
 const SEGMENT_INTERPRETER: u32 = 3;
 const MAXIMUM_LOAD_SEGMENTS: usize = 16;
+/// Position-independent user images are mapped at one deterministic, isolated
+/// base.  The address stays well above the fixed bootstrap heap/stack and
+/// below the Linux anonymous-mapping arena.  ASLR is deliberately not part of
+/// the measured-image contract yet; reproducibility requires one load bias.
+pub const POSITION_INDEPENDENT_LOAD_BASE: u64 = 0x0000_1000_0000;
+const PAGE_SIZE: u64 = 0x1000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadSegment {
@@ -52,6 +57,14 @@ pub struct LoadPlan {
     pub image_start: u64,
     pub image_end: u64,
     pub entry_point: u64,
+    /// Runtime bias applied to ET_DYN virtual addresses.  ET_EXEC images use
+    /// zero.  The bias is part of the validated plan so the installer and the
+    /// measurement record cannot disagree about the entry address.
+    pub load_bias: u64,
+    /// A PT_INTERP segment names a separate runtime linker.  Arach currently
+    /// admits self-relocating ET_DYN/static-PIE images but keeps ordinary
+    /// dynamically linked Linux binaries fail-closed until that linker is
+    /// measured and installed as a second image.
     pub requires_runtime_linker: bool,
 }
 
@@ -76,19 +89,22 @@ impl LoadPlan {
             return Err(LoaderError::InvalidProgramHeaders);
         }
 
+        let image_type = read_u16(bytes, 16).ok_or(LoaderError::Truncated)?;
+        let position_independent = image_type == ELF_TYPE_SHARED_OBJECT;
         let mut plan = Self {
             segments: [LoadSegment::EMPTY; MAXIMUM_LOAD_SEGMENTS],
             segment_count: 0,
             image_start: u64::MAX,
             image_end: 0,
             entry_point: read_u64(bytes, 24).ok_or(LoaderError::Truncated)?,
+            load_bias: 0,
             requires_runtime_linker: false,
         };
         for index in 0..program_header_count {
             let offset = program_header_offset + index * program_header_size;
             let header = &bytes[offset..offset + program_header_size];
             let segment_type = read_u32(header, 0).ok_or(LoaderError::InvalidProgramHeaders)?;
-            if matches!(segment_type, SEGMENT_DYNAMIC | SEGMENT_INTERPRETER) {
+            if segment_type == SEGMENT_INTERPRETER {
                 plan.requires_runtime_linker = true;
             }
             if segment_type != SEGMENT_LOAD {
@@ -162,6 +178,31 @@ impl LoadPlan {
         {
             return Err(LoaderError::InvalidEntryPoint);
         }
+        if position_independent {
+            let raw_start = align_down(plan.image_start);
+            let load_bias = POSITION_INDEPENDENT_LOAD_BASE
+                .checked_sub(raw_start)
+                .ok_or(LoaderError::InvalidImageBias)?;
+            for segment in &mut plan.segments[..plan.segment_count] {
+                segment.virtual_address = segment
+                    .virtual_address
+                    .checked_add(load_bias)
+                    .ok_or(LoaderError::InvalidImageBias)?;
+            }
+            plan.image_start = plan
+                .image_start
+                .checked_add(load_bias)
+                .ok_or(LoaderError::InvalidImageBias)?;
+            plan.image_end = plan
+                .image_end
+                .checked_add(load_bias)
+                .ok_or(LoaderError::InvalidImageBias)?;
+            plan.entry_point = plan
+                .entry_point
+                .checked_add(load_bias)
+                .ok_or(LoaderError::InvalidImageBias)?;
+            plan.load_bias = load_bias;
+        }
         Ok(plan)
     }
 
@@ -211,6 +252,11 @@ pub enum LoaderError {
     TooManySegments,
     MissingLoadSegment,
     InvalidEntryPoint,
+    InvalidImageBias,
+}
+
+const fn align_down(address: u64) -> u64 {
+    address & !(PAGE_SIZE - 1)
 }
 
 fn validate_header(bytes: &[u8]) -> Result<(), LoaderError> {
@@ -302,8 +348,10 @@ mod tests {
     fn builds_a_bounded_read_execute_plan() {
         let bytes = shared_object(SEGMENT_READABLE | SEGMENT_EXECUTABLE);
         let plan = LoadPlan::parse(&bytes).unwrap();
-        assert_eq!(plan.image_start, 0x1000);
-        assert_eq!(plan.image_end, 0x2000);
+        assert_eq!(plan.image_start, POSITION_INDEPENDENT_LOAD_BASE);
+        assert_eq!(plan.image_end, POSITION_INDEPENDENT_LOAD_BASE + 0x1000);
+        assert_eq!(plan.entry_point, POSITION_INDEPENDENT_LOAD_BASE);
+        assert_eq!(plan.load_bias, POSITION_INDEPENDENT_LOAD_BASE - 0x1000);
         assert_eq!(plan.segments().len(), 1);
         assert!(!plan.requires_runtime_linker);
         assert_eq!(plan.entry_file_offset(), Ok(128));
@@ -326,6 +374,40 @@ mod tests {
     fn accepts_a_fixed_address_static_executable() {
         let mut bytes = shared_object(SEGMENT_READABLE | SEGMENT_EXECUTABLE);
         bytes[16..18].copy_from_slice(&ELF_TYPE_EXECUTABLE.to_le_bytes());
-        assert!(LoadPlan::parse(&bytes).is_ok());
+        let plan = LoadPlan::parse(&bytes).unwrap();
+        assert_eq!(plan.load_bias, 0);
+        assert_eq!(plan.image_start, 0x1000);
+    }
+
+    #[test]
+    fn keeps_pt_interp_images_fail_closed_for_the_runtime_linker() {
+        let mut bytes = [0_u8; 188];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        bytes[16..18].copy_from_slice(&ELF_TYPE_SHARED_OBJECT.to_le_bytes());
+        bytes[18..20].copy_from_slice(&MACHINE_X86_64.to_le_bytes());
+        bytes[20..24].copy_from_slice(&(1_u32).to_le_bytes());
+        bytes[24..32].copy_from_slice(&(0x1000_u64).to_le_bytes());
+        bytes[32..40].copy_from_slice(&(64_u64).to_le_bytes());
+        bytes[52..54].copy_from_slice(&(64_u16).to_le_bytes());
+        bytes[54..56].copy_from_slice(&(56_u16).to_le_bytes());
+        bytes[56..58].copy_from_slice(&(2_u16).to_le_bytes());
+
+        let load = &mut bytes[64..120];
+        load[0..4].copy_from_slice(&SEGMENT_LOAD.to_le_bytes());
+        load[4..8].copy_from_slice(&(SEGMENT_READABLE | SEGMENT_EXECUTABLE).to_le_bytes());
+        load[8..16].copy_from_slice(&(176_u64).to_le_bytes());
+        load[16..24].copy_from_slice(&(0x1000_u64).to_le_bytes());
+        load[32..40].copy_from_slice(&(4_u64).to_le_bytes());
+        load[40..48].copy_from_slice(&(0x1000_u64).to_le_bytes());
+        load[48..56].copy_from_slice(&(1_u64).to_le_bytes());
+        bytes[120..124].copy_from_slice(&SEGMENT_INTERPRETER.to_le_bytes());
+        bytes[176..180].copy_from_slice(&[1, 2, 3, 4]);
+
+        let plan = LoadPlan::parse(&bytes).unwrap();
+        assert!(plan.requires_runtime_linker);
+        assert_eq!(plan.entry_file_offset(), Ok(176));
     }
 }

@@ -1912,6 +1912,7 @@ mod tests {
     use std::thread;
 
     use crate::capability::{Authority, ProcessInstallControl, UserlandImageControl};
+    use crate::module::loader::POSITION_INDEPENDENT_LOAD_BASE;
     use crate::process::image::prepare_user_image;
     use crate::process::install::{InstallError, install_user_image};
 
@@ -2183,12 +2184,18 @@ mod tests {
             & PAGE_ADDRESS_MASK;
         let p1 = backend
             .memory()
-            .read_entry(PhysicalAddress::new(p2), 0)
+            .read_entry(
+                PhysicalAddress::new(p2),
+                ((POSITION_INDEPENDENT_LOAD_BASE >> 21) & 0x1ff) as usize,
+            )
             .unwrap()
             & PAGE_ADDRESS_MASK;
         let leaf = backend
             .memory()
-            .read_entry(PhysicalAddress::new(p1), 1)
+            .read_entry(
+                PhysicalAddress::new(p1),
+                ((POSITION_INDEPENDENT_LOAD_BASE >> 12) & 0x1ff) as usize,
+            )
             .unwrap();
         assert_eq!(
             leaf & (ENTRY_PRESENT | ENTRY_USER),

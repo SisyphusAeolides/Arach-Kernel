@@ -512,6 +512,7 @@ mod tests {
     };
 
     use crate::capability::{Authority, UserlandImageControl};
+    use crate::module::loader::POSITION_INDEPENDENT_LOAD_BASE;
     use crate::process::image::prepare_user_image;
 
     use super::*;
@@ -557,12 +558,12 @@ mod tests {
         let image = prepared(&catalog, &mut bytes, &image_control);
         let mut backend = DryRunAddressSpace::<256>::new();
         let installed = install_user_image(image, &mut backend, &install_control).unwrap();
-        assert_eq!(installed.entry_point, 0x1000);
+        assert_eq!(installed.entry_point, POSITION_INDEPENDENT_LOAD_BASE);
         assert_eq!(installed.segment_count, 1);
         assert_eq!(
             backend.resolve_process(&installed.process),
             Some(ProcessImageInfo {
-                entry_point: 0x1000,
+                entry_point: POSITION_INDEPENDENT_LOAD_BASE,
                 segment_count: 1,
                 address_space_root: None,
                 owned_frames: 0,

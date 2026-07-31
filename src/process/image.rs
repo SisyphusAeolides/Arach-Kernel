@@ -98,6 +98,7 @@ mod tests {
     };
 
     use crate::capability::Authority;
+    use crate::module::loader::POSITION_INDEPENDENT_LOAD_BASE;
 
     use super::*;
 
@@ -130,7 +131,7 @@ mod tests {
         let authority = unsafe { Authority::assume_root() };
         let image_control = authority.grant::<UserlandImageControl>();
         let prepared = prepare_user_image(artifact, &image_control).unwrap();
-        assert_eq!(prepared.plan().entry_point, 0x1000);
+        assert_eq!(prepared.plan().entry_point, POSITION_INDEPENDENT_LOAD_BASE);
         assert_eq!(prepared.plan().entry_file_offset(), Ok(128));
         assert_eq!(&prepared.bytes()[162..], b"PID1 syscall write\n");
         assert_eq!(&prepared.bytes()[128..133], &[0xb8, 1, 0, 0, 0]);
