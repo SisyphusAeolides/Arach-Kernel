@@ -31,9 +31,10 @@ containing all of the following evidence from the same bundle:
 
 The execution gate is implemented in the Arach validation workflow: CI installs
 QEMU/OVMF, runs this helper against the freshly assembled image, and uploads
-the serial transcript. Revision `6ca3ca7eccf16e6d9df76b2b573b93ad56004a34`
-passed the complete gate, including the measured `ARACH_C0_RING3_SYSCALL_PASS`
-marker. Future releases must keep this workflow green for their exact revision;
+the serial transcript. Revision `b396d3a7fc6538eacc60058d7067bebe9de43537`
+is the current qualified release and passed the complete gate, including the
+measured `ARACH_C0_RING3_SYSCALL_PASS` marker. Future releases must keep this
+workflow green for their exact revision;
 a host build or a missing local QEMU installation never counts as qualification.
 
 The image and execution helpers are now available:
