@@ -48,7 +48,7 @@ jobs:
           repository: SisyphusAeolides/Granite
           ref: c990385d767c49c508e3ca5271bf657d5a5b4836
           path: target/c0-sources/granite
-      - run: sudo apt-get update && sudo apt-get install -y build-essential chezscheme gfortran libgmp-dev xz-utils curl
+      - run: sudo apt-get update && sudo apt-get install -y build-essential chezscheme dosfstools gfortran libgmp-dev mtools xz-utils curl
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-20
@@ -63,6 +63,15 @@ jobs:
         env:
           ARACH_PUSH_ROOT: ${{ github.workspace }}/target/c0-sources/push
           ARACH_GRANITE_ROOT: ${{ github.workspace }}/target/c0-sources/granite
+      - run: |
+          scripts/build-c0-fat-image.sh \
+            target/c0/granite/x86_64-unknown-uefi/release/granite.efi \
+            target/c0/kernel/x86_64-arach/release/arach \
+            target/c0/push/x86_64-arach/release/push \
+            target/c0/probe/x86_64-arach/release/arach-c0-probe \
+            "$PWD/target/c0/arach-c0.img"
+          mdir -i "$PWD/target/c0/arach-c0.img" ::/EFI/BOOT
+          mdir -i "$PWD/target/c0/arach-c0.img" ::/BOOT
       - run: git diff --check
 
   nvidia-source-contract:

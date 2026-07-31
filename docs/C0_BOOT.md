@@ -30,3 +30,19 @@ containing all of the following evidence from the same bundle:
 - `ARACH_C0_RING3_SYSCALL_PASS` was emitted by the measured probe.
 
 Until that execution gate is implemented and green, C0 remains incomplete.
+
+The image and execution helpers are now available:
+
+```sh
+scripts/build-c0-fat-image.sh \
+  target/c0/granite/x86_64-unknown-uefi/release/granite.efi \
+  target/c0/kernel/x86_64-arach/release/arach \
+  target/c0/push/x86_64-arach/release/push \
+  target/c0/probe/x86_64-arach/release/arach-c0-probe \
+  "$PWD/target/c0/arach-c0.img"
+
+scripts/run-c0-qemu.sh "$PWD/target/c0/arach-c0.img"
+```
+
+The runner fails with status 69 when QEMU or OVMF is unavailable and never
+turns a missing execution environment into a green qualification result.
