@@ -188,6 +188,8 @@ mod tests {
         assert_eq!(LinuxSyscall::from_number(1), Some(LinuxSyscall::Write));
         assert_eq!(LinuxSyscall::from_number(9), Some(LinuxSyscall::Mmap));
         assert_eq!(LinuxSyscall::from_number(16), Some(LinuxSyscall::Ioctl));
+        assert_eq!(LinuxSyscall::from_number(0), Some(LinuxSyscall::Read));
+        assert_eq!(LinuxSyscall::from_number(3), Some(LinuxSyscall::Close));
         assert_eq!(LinuxSyscall::from_number(39), Some(LinuxSyscall::Getpid));
         assert_eq!(LinuxSyscall::from_number(110), Some(LinuxSyscall::Getppid));
         assert_eq!(LinuxSyscall::from_number(202), Some(LinuxSyscall::Futex));
@@ -196,6 +198,7 @@ mod tests {
             LinuxSyscall::from_number(294),
             Some(LinuxSyscall::InotifyInit1)
         );
+        assert_eq!(LinuxSyscall::from_number(290), Some(LinuxSyscall::Eventfd2));
         assert_eq!(
             LinuxSyscall::from_number(318),
             Some(LinuxSyscall::Getrandom)

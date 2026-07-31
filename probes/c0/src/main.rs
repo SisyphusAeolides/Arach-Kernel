@@ -8,6 +8,8 @@ const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
 const PANIC: &[u8] = b"ARACH_C0_RING3_PANIC\n";
 
 const SYS_WRITE: usize = 1;
+const SYS_READ: usize = 0;
+const SYS_CLOSE: usize = 3;
 const SYS_MMAP: usize = 9;
 const SYS_MUNMAP: usize = 11;
 const SYS_BRK: usize = 12;
@@ -19,6 +21,9 @@ const SYS_GETPPID: usize = 110;
 const SYS_GETTID: usize = 186;
 const SYS_CLOCK_GETTIME: usize = 228;
 const SYS_EXIT_GROUP: usize = 231;
+const SYS_EVENTFD2: usize = 290;
+
+const EFD_SEMAPHORE: usize = 0x1;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
@@ -149,10 +154,10 @@ pub extern "C" fn _start() -> ! {
         tv_sec: -1,
         tv_nsec: -1,
     };
-    let mut identity = LinuxUtsName { fields: [[0; 65]; 6] };
-    if unsafe {
-        linux_syscall3(SYS_CLOCK_GETTIME, 1, &mut clock as *mut _ as usize, 0)
-    } != 0
+    let mut identity = LinuxUtsName {
+        fields: [[0; 65]; 6],
+    };
+    if unsafe { linux_syscall3(SYS_CLOCK_GETTIME, 1, &mut clock as *mut _ as usize, 0) } != 0
         || clock.tv_sec < 0
         || !(0..1_000_000_000).contains(&clock.tv_nsec)
         || unsafe { linux_syscall3(SYS_UNAME, &mut identity as *mut _ as usize, 0, 0) } != 0
@@ -195,6 +200,75 @@ pub extern "C" fn _start() -> ! {
     // A zero brk query must return the process's bounded initial break.
     // SAFETY: brk's first argument is a scalar query.
     if unsafe { linux_syscall1(SYS_BRK, 0) } <= 0 {
+        fail();
+    }
+
+    // Exercise the first real Linux descriptor object.  The normal counter
+    // must accumulate and drain atomically; semaphore mode must release one
+    // unit per read; an empty read must return EAGAIN rather than sleeping.
+    let mut event_value: u64;
+    let eventfd = unsafe { linux_syscall3(SYS_EVENTFD2, 5, 0, 0) };
+    if eventfd < 3 {
+        fail();
+    }
+    event_value = 7;
+    if unsafe {
+        linux_syscall3(
+            SYS_WRITE,
+            eventfd as usize,
+            &event_value as *const _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    } != core::mem::size_of::<u64>() as isize
+    {
+        fail();
+    }
+    event_value = 0;
+    if unsafe {
+        linux_syscall3(
+            SYS_READ,
+            eventfd as usize,
+            &mut event_value as *mut _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    } != core::mem::size_of::<u64>() as isize
+        || event_value != 12
+    {
+        fail();
+    }
+    if unsafe {
+        linux_syscall3(
+            SYS_READ,
+            eventfd as usize,
+            &mut event_value as *mut _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    } != -11
+        || unsafe { linux_syscall1(SYS_CLOSE, eventfd as usize) } != 0
+    {
+        fail();
+    }
+
+    let semaphore = unsafe { linux_syscall3(SYS_EVENTFD2, 2, EFD_SEMAPHORE, 0) };
+    if semaphore < 3 {
+        fail();
+    }
+    for _ in 0..2 {
+        event_value = 0;
+        if unsafe {
+            linux_syscall3(
+                SYS_READ,
+                semaphore as usize,
+                &mut event_value as *mut _ as usize,
+                core::mem::size_of::<u64>(),
+            )
+        } != core::mem::size_of::<u64>() as isize
+            || event_value != 1
+        {
+            fail();
+        }
+    }
+    if unsafe { linux_syscall1(SYS_CLOSE, semaphore as usize) } != 0 {
         fail();
     }
 

@@ -19,6 +19,8 @@ use aether::grimoire;
 
 const ERROR_BAD_FILE_DESCRIPTOR: isize = -9;
 #[cfg(target_os = "none")]
+const ERROR_TRY_AGAIN: isize = -11;
+#[cfg(target_os = "none")]
 const ERROR_BAD_ADDRESS: isize = -14;
 const ERROR_INVALID_ARGUMENT: isize = -22;
 const ERROR_NOT_IMPLEMENTED: isize = -38;
@@ -310,6 +312,10 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         Some(handle) => handle,
         None => crate::arch::x86_64::halt(),
     };
+    // Linux descriptors are process-owned. Reclaim the bounded eventfd set
+    // before publishing the zombie transition so an exiting service cannot
+    // leak wake objects into a later PID generation.
+    let _ = crate::linux_eventfd::close_all(exiting.pid);
     let decision = match crate::process::lifecycle::schedule_exit(exit_code) {
         Ok(decision) => decision,
         Err(_) => crate::arch::x86_64::halt(),
@@ -353,11 +359,12 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
 fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
     match crate::process::abi::LinuxSyscall::from_number(number) {
         // The bounded serial write has the same first three scalar arguments
-        // on x86-64 Linux and Arach. Keeping this one implementation useful
-        // lets a statically linked probe report that the Linux personality is
-        // actually selected, while every other call remains explicit until
-        // its Linux semantics are implemented and tested.
-        Some(crate::process::abi::LinuxSyscall::Write) => write_from_user(arguments),
+        // on x86-64 Linux and Arach. Eventfd is the first real Linux file
+        // descriptor object: it gives libc/COSMIC a wake primitive without
+        // claiming that ordinary path/socket descriptors already exist.
+        Some(crate::process::abi::LinuxSyscall::Read) => linux_read(arguments),
+        Some(crate::process::abi::LinuxSyscall::Write) => linux_write(arguments),
+        Some(crate::process::abi::LinuxSyscall::Close) => linux_close(arguments),
         Some(crate::process::abi::LinuxSyscall::Getpid) => {
             crate::process::lifecycle::current_pid() as isize
         }
@@ -387,8 +394,95 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Mmap) => linux_mmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Munmap) => linux_munmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Brk) => linux_brk(arguments),
+        Some(crate::process::abi::LinuxSyscall::Eventfd2) => linux_eventfd2(arguments),
         Some(_) => ERROR_NOT_IMPLEMENTED,
         None => ERROR_NOT_IMPLEMENTED,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_eventfd2(arguments: [u64; 6]) -> isize {
+    let initial = arguments[0];
+    let Ok(flags) = u32::try_from(arguments[1]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = crate::process::lifecycle::current_pid();
+    if owner == 0 {
+        return -13;
+    }
+    match crate::linux_eventfd::create(owner, initial, flags) {
+        Ok(fd) => fd as isize,
+        Err(crate::linux_eventfd::EventFdError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
+        Err(crate::linux_eventfd::EventFdError::Capacity) => -28,
+        Err(_) => -5,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_read(arguments: [u64; 6]) -> isize {
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    // eventfd's ABI is exactly one native-endian u64. Ordinary file reads
+    // remain deliberately unavailable until the general descriptor layer is
+    // implemented; accepting a different length would hide that boundary.
+    if arguments[2] != core::mem::size_of::<u64>() as u64 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let owner = crate::process::lifecycle::current_pid();
+    let value = match crate::linux_eventfd::read(owner, fd) {
+        Ok(value) => value,
+        Err(crate::linux_eventfd::EventFdError::WouldBlock) => return ERROR_TRY_AGAIN,
+        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => {
+            return ERROR_BAD_FILE_DESCRIPTOR;
+        }
+        Err(_) => return -5,
+    };
+    if copy_value_to_user(arguments[1], &value).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        core::mem::size_of::<u64>() as isize
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_write(arguments: [u64; 6]) -> isize {
+    // Keep the established serial probe ABI for stdout/stderr. Every other
+    // descriptor currently means eventfd and must carry one complete u64.
+    if arguments[0] == 1 || arguments[0] == 2 {
+        return write_from_user(arguments);
+    }
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    if arguments[2] != core::mem::size_of::<u64>() as u64 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let mut bytes = [0_u8; core::mem::size_of::<u64>()];
+    if copy_from_user(arguments[1], &mut bytes).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    let value = u64::from_ne_bytes(bytes);
+    let owner = crate::process::lifecycle::current_pid();
+    match crate::linux_eventfd::write(owner, fd, value) {
+        Ok(()) => core::mem::size_of::<u64>() as isize,
+        Err(crate::linux_eventfd::EventFdError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
+        Err(crate::linux_eventfd::EventFdError::Overflow) => ERROR_TRY_AGAIN,
+        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => ERROR_BAD_FILE_DESCRIPTOR,
+        Err(_) => -5,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_close(arguments: [u64; 6]) -> isize {
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let owner = crate::process::lifecycle::current_pid();
+    match crate::linux_eventfd::close(owner, fd) {
+        Ok(()) => 0,
+        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => ERROR_BAD_FILE_DESCRIPTOR,
+        Err(_) => -5,
     }
 }
 

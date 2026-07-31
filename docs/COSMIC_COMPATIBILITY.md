@@ -90,9 +90,13 @@ by the calibrated periodic timer rather than exposing an unscaled TSC, and the
 initial single-root credential calls return the authenticated boot identity.
 Anonymous private `mmap`/exact-range `munmap` and the bounded `brk` heap
 allocate and reclaim real zeroed user pages with W^X checks; the probe writes
-and reads a returned page before unmapping it. File-backed mappings,
-`mprotect`, and the dynamic linker remain gated. Every other decoded Linux
-syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
+and reads a returned page before unmapping it. A bounded, process-owned
+`eventfd2` table now implements the eight-byte counter ABI, semaphore mode,
+ownership checks, close, and non-sleeping `EAGAIN` behavior. This is a real
+wake primitive for early COSMIC services, not a claim that ordinary files,
+`epoll`, timerfd, or device descriptors are available yet. File-backed
+mappings, `mprotect`, and the dynamic linker remain gated. Every other decoded
+Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.
 
 ## Push PID 1 boundary

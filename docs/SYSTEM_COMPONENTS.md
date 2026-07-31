@@ -23,6 +23,13 @@ Arach must provide the Linux interfaces libinput-rs and COSMIC observe:
 - permissions, restricted-open behavior and stable object lifetime;
 - touchpad, mouse, TrackPoint, keyboard, switch, tablet and tablet-pad devices.
 
+The current kernel bring-up provides the first bounded Linux wake object:
+process-owned `eventfd2` descriptors support counter and semaphore reads,
+eight-byte writes, close, ownership validation, and non-sleeping `EAGAIN` on
+an empty read. `poll`/`epoll`, timerfd, and ordinary device descriptors remain
+separate qualification work; they must not be treated as implemented merely
+because their syscall numbers decode.
+
 The gate runs upstream libinput behavioral tests plus COSMIC compositor tests.
 No companion process may grab a physical device in the parity path.
 
@@ -63,4 +70,3 @@ The future system integration repository will carry an immutable manifest with
 repository URL, signed tag, commit, source digest, ABI version and required
 test suite for every component. Arach itself stores only the interface contract
 and minimum compatible versions.
-
