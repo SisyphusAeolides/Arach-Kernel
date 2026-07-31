@@ -451,11 +451,11 @@ fn verify_formal_attestation(
     linux_contract_idris_digest: [u8; 32],
     linux_contract_agda_digest: [u8; 32],
 ) {
-    let path = workspace.join("target/formal/verified.lock");
+    let path = workspace.join("formal/verified.lock");
     println!("cargo:rerun-if-changed={}", path.display());
     let actual = fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
-            "failed to read {}: {error}; run scripts/check-formal-models.sh before cargo kernel",
+            "failed to read {}: {error}; the tracked formal release attestation is missing",
             path.display()
         )
     });
