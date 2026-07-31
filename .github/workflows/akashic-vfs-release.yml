@@ -1,0 +1,35 @@
+name: Akashic VFS release
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - run: sudo apt-get update && sudo apt-get install -y gfortran
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          components: rustfmt,rust-src
+      - run: python3 scripts/patch-akashic-vfs.py
+      - run: cargo fmt --all
+      - run: cargo check --workspace --all-targets
+      - run: cargo test --workspace --all-targets
+      - run: git diff --check
+      - name: Publish validated source
+        run: |
+          git config user.name "SisyphusAeolides"
+          git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
+          git add src/akashic_vfs.rs src/lib.rs src/syscalls.rs
+          git commit -m "Add bounded Akashic VFS"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
