@@ -26,17 +26,7 @@ jobs:
           if grep -Fq 'pub mod linux_file;' src/lib.rs; then
             printf 'Linux file syscall integration is already published\n'
           else
-            python3 - <<'PY'
-            from pathlib import Path
-
-            path = Path("scripts/patch-linux-file-syscalls.py")
-            text = path.read_text(encoding="utf-8")
-            old = "'#[cfg(target_os = \"none\")]\\nfn linux_eventfd2(arguments: [u64; 6]) -> isize {'"
-            new = "'fn linux_eventfd2(arguments: [u64; 6]) -> isize {'"
-            if text.count(old) != 1:
-                raise SystemExit("unexpected linux_eventfd2 patch boundary")
-            path.write_text(text.replace(old, new), encoding="utf-8")
-            PY
+            python3 scripts/fix-linux-file-patch.py
             python3 scripts/patch-linux-file-syscalls.py
           fi
       - run: cargo fmt --all
