@@ -199,6 +199,20 @@ mod tests {
             Some(LinuxSyscall::InotifyInit1)
         );
         assert_eq!(LinuxSyscall::from_number(290), Some(LinuxSyscall::Eventfd2));
+        assert_eq!(LinuxSyscall::from_number(7), Some(LinuxSyscall::Poll));
+        assert_eq!(
+            LinuxSyscall::from_number(232),
+            Some(LinuxSyscall::EpollWait)
+        );
+        assert_eq!(LinuxSyscall::from_number(233), Some(LinuxSyscall::EpollCtl));
+        assert_eq!(
+            LinuxSyscall::from_number(281),
+            Some(LinuxSyscall::EpollPwait)
+        );
+        assert_eq!(
+            LinuxSyscall::from_number(291),
+            Some(LinuxSyscall::EpollCreate1)
+        );
         assert_eq!(
             LinuxSyscall::from_number(318),
             Some(LinuxSyscall::Getrandom)

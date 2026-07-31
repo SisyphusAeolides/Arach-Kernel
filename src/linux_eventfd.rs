@@ -15,6 +15,12 @@ pub const EFD_NONBLOCK: u32 = 0x800;
 pub const EFD_CLOEXEC: u32 = 0x80000;
 pub const EVENTFD_ALLOWED_FLAGS: u32 = EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC;
 
+/// Linux readiness bits shared by `poll(2)` and `epoll(7)`.
+pub const READY_IN: u32 = 0x001;
+pub const READY_OUT: u32 = 0x004;
+pub const READY_ERR: u32 = 0x008;
+pub const READY_HUP: u32 = 0x010;
+
 const MAXIMUM_EVENTFDS: usize = 64;
 const EVENTFD_BASE: u32 = 3;
 
@@ -33,6 +39,10 @@ struct EventFdSlot {
     owner: u32,
     counter: u64,
     flags: u32,
+    /// Monotonic readiness transition generation used by edge-triggered
+    /// epoll watches.  It advances whenever the counter crosses between
+    /// empty and readable (or the reserved full and writable states).
+    readiness_generation: u64,
 }
 
 impl EventFdSlot {
@@ -40,6 +50,7 @@ impl EventFdSlot {
         owner: 0,
         counter: 0,
         flags: 0,
+        readiness_generation: 0,
     };
 
     const fn occupied(self) -> bool {
@@ -84,6 +95,7 @@ pub fn create(owner: u32, initial: u64, flags: u32) -> Result<u32, EventFdError>
         owner,
         counter: initial,
         flags,
+        readiness_generation: u64::from(initial != 0),
     };
     Ok(fd_for_index(index))
 }
@@ -101,12 +113,19 @@ pub fn read(owner: u32, fd: u32) -> Result<u64, EventFdError> {
         return Err(EventFdError::WouldBlock);
     }
 
+    let previous = slot.counter;
     if slot.flags & EFD_SEMAPHORE != 0 {
         slot.counter -= 1;
+        if slot.counter == 0 {
+            slot.readiness_generation = slot.readiness_generation.wrapping_add(1);
+        }
         Ok(1)
     } else {
         let value = slot.counter;
         slot.counter = 0;
+        if previous != 0 {
+            slot.readiness_generation = slot.readiness_generation.wrapping_add(1);
+        }
         Ok(value)
     }
 }
@@ -124,11 +143,46 @@ pub fn write(owner: u32, fd: u32, value: u64) -> Result<(), EventFdError> {
     if !slot.occupied() || slot.owner != owner {
         return Err(EventFdError::BadFileDescriptor);
     }
+    let previous = slot.counter;
     slot.counter = slot
         .counter
         .checked_add(value)
         .ok_or(EventFdError::Overflow)?;
+    if previous == 0 && slot.counter != 0 {
+        slot.readiness_generation = slot.readiness_generation.wrapping_add(1);
+    }
     Ok(())
+}
+
+/// Return the currently observable readiness bits without consuming state.
+/// Eventfds are readable when their counter is non-zero and writable until
+/// their counter reaches the reserved all-ones value.
+pub fn readiness(owner: u32, fd: u32) -> Result<u32, EventFdError> {
+    let index = index_for_fd(fd).ok_or(EventFdError::BadFileDescriptor)?;
+    let table = EVENTFDS.lock();
+    let slot = &table[index];
+    if !slot.occupied() || slot.owner != owner {
+        return Err(EventFdError::BadFileDescriptor);
+    }
+    let mut ready = READY_OUT;
+    if slot.counter != 0 {
+        ready |= READY_IN;
+    }
+    if slot.counter == u64::MAX {
+        ready &= !READY_OUT;
+    }
+    Ok(ready)
+}
+
+/// Return the readiness transition generation without consuming the counter.
+pub fn readiness_generation(owner: u32, fd: u32) -> Result<u64, EventFdError> {
+    let index = index_for_fd(fd).ok_or(EventFdError::BadFileDescriptor)?;
+    let table = EVENTFDS.lock();
+    let slot = &table[index];
+    if !slot.occupied() || slot.owner != owner {
+        return Err(EventFdError::BadFileDescriptor);
+    }
+    Ok(slot.readiness_generation)
 }
 
 /// Close an eventfd owned by `owner`.
@@ -205,6 +259,18 @@ mod tests {
         assert_eq!(close_all(owner), 2);
         assert_eq!(close(owner, first), Err(EventFdError::BadFileDescriptor));
         assert_eq!(close(owner, second), Err(EventFdError::BadFileDescriptor));
+    }
+
+    #[test]
+    fn readiness_tracks_counter_without_consuming_it() {
+        let owner = 0x1007;
+        let fd = create(owner, 0, 0).unwrap();
+        assert_eq!(readiness(owner, fd), Ok(READY_OUT));
+        write(owner, fd, 1).unwrap();
+        assert_eq!(readiness(owner, fd), Ok(READY_IN | READY_OUT));
+        assert_eq!(read(owner, fd), Ok(1));
+        assert_eq!(readiness(owner, fd), Ok(READY_OUT));
+        close(owner, fd).unwrap();
     }
 
     #[test]

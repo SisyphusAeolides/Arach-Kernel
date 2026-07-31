@@ -26,7 +26,8 @@ Arach must provide the Linux interfaces libinput-rs and COSMIC observe:
 The current kernel bring-up provides the first bounded Linux wake object:
 process-owned `eventfd2` descriptors support counter and semaphore reads,
 eight-byte writes, close, ownership validation, and non-sleeping `EAGAIN` on
-an empty read. `poll`/`epoll`, timerfd, and ordinary device descriptors remain
+an empty read. `poll(2)` and level/edge `epoll(7)` are implemented over those
+eventfds. Timerfd, ordinary files, and ordinary device descriptors remain
 separate qualification work; they must not be treated as implemented merely
 because their syscall numbers decode.
 

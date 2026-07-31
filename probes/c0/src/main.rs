@@ -22,8 +22,15 @@ const SYS_GETTID: usize = 186;
 const SYS_CLOCK_GETTIME: usize = 228;
 const SYS_EXIT_GROUP: usize = 231;
 const SYS_EVENTFD2: usize = 290;
+const SYS_POLL: usize = 7;
+const SYS_EPOLL_WAIT: usize = 232;
+const SYS_EPOLL_CTL: usize = 233;
+const SYS_EPOLL_CREATE1: usize = 291;
 
 const EFD_SEMAPHORE: usize = 0x1;
+const POLLIN: u16 = 0x001;
+const EPOLLIN: u32 = 0x001;
+const EPOLL_CTL_ADD: usize = 1;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
@@ -39,6 +46,13 @@ struct LinuxTimespec {
 #[repr(C)]
 struct LinuxUtsName {
     fields: [[u8; 65]; 6],
+}
+
+#[repr(C)]
+struct LinuxPollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
 }
 
 #[inline(always)]
@@ -70,6 +84,33 @@ unsafe fn linux_syscall3(number: usize, arg0: usize, arg1: usize, arg2: usize) -
             in("rdi") arg0,
             in("rsi") arg1,
             in("rdx") arg2,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    result
+}
+
+#[inline(always)]
+unsafe fn linux_syscall4(
+    number: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+) -> isize {
+    let result: isize;
+    // SAFETY: Arguments use the stable x86-64 Linux syscall register order;
+    // the fourth argument is carried in R10 rather than RCX.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") number as isize => result,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            in("r10") arg3,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack),
@@ -223,6 +264,55 @@ pub extern "C" fn _start() -> ! {
     {
         fail();
     }
+    // poll(2) must observe the readable eventfd without consuming it.
+    let mut pollfd = LinuxPollFd {
+        fd: eventfd as i32,
+        events: POLLIN as i16,
+        revents: 0,
+    };
+    if unsafe { linux_syscall3(SYS_POLL, &mut pollfd as *mut _ as usize, 1, 0) } != 1
+        || pollfd.revents & POLLIN as i16 == 0
+    {
+        fail();
+    }
+
+    // epoll_wait uses the native x86-64 Linux epoll_event layout: a u32
+    // mask followed by the caller's u64 data value.
+    let epfd = unsafe { linux_syscall3(SYS_EPOLL_CREATE1, 0, 0, 0) };
+    if epfd < 3 {
+        fail();
+    }
+    let mut epoll_spec = [0_u8; 12];
+    epoll_spec[0..4].copy_from_slice(&EPOLLIN.to_ne_bytes());
+    epoll_spec[4..12].copy_from_slice(&0x55_u64.to_ne_bytes());
+    if unsafe {
+        linux_syscall4(
+            SYS_EPOLL_CTL,
+            epfd as usize,
+            EPOLL_CTL_ADD,
+            eventfd as usize,
+            epoll_spec.as_ptr() as usize,
+        )
+    } != 0
+    {
+        fail();
+    }
+    let mut epoll_out = [0_u8; 12];
+    if unsafe {
+        linux_syscall4(
+            SYS_EPOLL_WAIT,
+            epfd as usize,
+            epoll_out.as_mut_ptr() as usize,
+            1,
+            0,
+        )
+    } != 1
+        || u32::from_ne_bytes(epoll_out[0..4].try_into().unwrap()) & EPOLLIN == 0
+        || u64::from_ne_bytes(epoll_out[4..12].try_into().unwrap()) != 0x55
+    {
+        fail();
+    }
+
     event_value = 0;
     if unsafe {
         linux_syscall3(
@@ -236,14 +326,33 @@ pub extern "C" fn _start() -> ! {
     {
         fail();
     }
+    pollfd.revents = 0;
+    if unsafe { linux_syscall3(SYS_POLL, &mut pollfd as *mut _ as usize, 1, 0) } != 0
+        || pollfd.revents != 0
+    {
+        fail();
+    }
     if unsafe {
-        linux_syscall3(
-            SYS_READ,
-            eventfd as usize,
-            &mut event_value as *mut _ as usize,
-            core::mem::size_of::<u64>(),
+        linux_syscall4(
+            SYS_EPOLL_WAIT,
+            epfd as usize,
+            epoll_out.as_mut_ptr() as usize,
+            1,
+            0,
         )
-    } != -11
+    } != 0
+    {
+        fail();
+    }
+    if unsafe { linux_syscall1(SYS_CLOSE, epfd as usize) } != 0
+        || unsafe {
+            linux_syscall3(
+                SYS_READ,
+                eventfd as usize,
+                &mut event_value as *mut _ as usize,
+                core::mem::size_of::<u64>(),
+            )
+        } != -11
         || unsafe { linux_syscall1(SYS_CLOSE, eventfd as usize) } != 0
     {
         fail();

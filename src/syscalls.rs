@@ -45,6 +45,14 @@ const ENTRY_HUGE: u64 = 1 << 7;
 #[cfg(target_os = "none")]
 const MAXIMUM_WRITE_BYTES: usize = 256;
 #[cfg(target_os = "none")]
+const MAXIMUM_LINUX_POLL_FDS: usize = 64;
+#[cfg(target_os = "none")]
+const LINUX_POLLERR: u16 = 0x008;
+#[cfg(target_os = "none")]
+const LINUX_POLLHUP: u16 = 0x010;
+#[cfg(target_os = "none")]
+const LINUX_POLLNVAL: u16 = 0x020;
+#[cfg(target_os = "none")]
 // Crest's bounded 640×400 BGRA frame fits beneath this fixed one-MiB ceiling.
 // The limit remains explicit so an untrusted caller cannot turn present into
 // an unbounded kernel copy.
@@ -315,6 +323,7 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
     // Linux descriptors are process-owned. Reclaim the bounded eventfd set
     // before publishing the zombie transition so an exiting service cannot
     // leak wake objects into a later PID generation.
+    let _ = crate::linux_epoll::close_all(exiting.pid);
     let _ = crate::linux_eventfd::close_all(exiting.pid);
     let decision = match crate::process::lifecycle::schedule_exit(exit_code) {
         Ok(decision) => decision,
@@ -365,6 +374,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Read) => linux_read(arguments),
         Some(crate::process::abi::LinuxSyscall::Write) => linux_write(arguments),
         Some(crate::process::abi::LinuxSyscall::Close) => linux_close(arguments),
+        Some(crate::process::abi::LinuxSyscall::Poll) => linux_poll(arguments),
         Some(crate::process::abi::LinuxSyscall::Getpid) => {
             crate::process::lifecycle::current_pid() as isize
         }
@@ -395,6 +405,10 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Munmap) => linux_munmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Brk) => linux_brk(arguments),
         Some(crate::process::abi::LinuxSyscall::Eventfd2) => linux_eventfd2(arguments),
+        Some(crate::process::abi::LinuxSyscall::EpollWait) => linux_epoll_wait(arguments),
+        Some(crate::process::abi::LinuxSyscall::EpollPwait) => linux_epoll_pwait(arguments),
+        Some(crate::process::abi::LinuxSyscall::EpollCreate1) => linux_epoll_create1(arguments),
+        Some(crate::process::abi::LinuxSyscall::EpollCtl) => linux_epoll_ctl(arguments),
         Some(_) => ERROR_NOT_IMPLEMENTED,
         None => ERROR_NOT_IMPLEMENTED,
     }
@@ -481,9 +495,171 @@ fn linux_close(arguments: [u64; 6]) -> isize {
     let owner = crate::process::lifecycle::current_pid();
     match crate::linux_eventfd::close(owner, fd) {
         Ok(()) => 0,
-        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => ERROR_BAD_FILE_DESCRIPTOR,
+        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => {
+            match crate::linux_epoll::close(owner, fd) {
+                Ok(()) => 0,
+                Err(crate::linux_epoll::EpollError::BadFileDescriptor) => ERROR_BAD_FILE_DESCRIPTOR,
+                Err(_) => -5,
+            }
+        }
         Err(_) => -5,
     }
+}
+
+#[cfg(target_os = "none")]
+fn linux_descriptor_revents(owner: u32, fd: i32, requested: u16) -> u16 {
+    if fd < 0 {
+        return 0;
+    }
+    let Ok(fd) = u32::try_from(fd) else {
+        return LINUX_POLLNVAL;
+    };
+    let ready = if let Ok(ready) = crate::linux_eventfd::readiness(owner, fd) {
+        ready
+    } else if let Ok(ready) = crate::linux_epoll::readiness(owner, fd) {
+        ready
+    } else {
+        return LINUX_POLLNVAL;
+    };
+    let mut revents = (ready as u16) & requested;
+    revents |= (ready as u16) & (LINUX_POLLERR | LINUX_POLLHUP);
+    revents
+}
+
+#[cfg(target_os = "none")]
+fn linux_poll(arguments: [u64; 6]) -> isize {
+    let Ok(nfds) = usize::try_from(arguments[1]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if nfds > MAXIMUM_LINUX_POLL_FDS {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    if nfds == 0 {
+        // A positive timeout would normally sleep.  The early Arach
+        // personality is explicitly non-sleeping; return the empty result so
+        // an event loop can continue to make progress without a deadlock.
+        return 0;
+    }
+    let Some(length) = nfds.checked_mul(8) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let mut records = [0_u8; MAXIMUM_LINUX_POLL_FDS * 8];
+    if copy_from_user(arguments[0], &mut records[..length]).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    let owner = crate::process::lifecycle::current_pid();
+    let mut ready_count: isize = 0;
+    for index in 0..nfds {
+        let offset = index * 8;
+        let fd = i32::from_ne_bytes(records[offset..offset + 4].try_into().unwrap());
+        let requested = u16::from_ne_bytes(records[offset + 4..offset + 6].try_into().unwrap());
+        let revents = linux_descriptor_revents(owner, fd, requested);
+        records[offset + 6..offset + 8].copy_from_slice(&revents.to_ne_bytes());
+        if revents != 0 {
+            ready_count += 1;
+        }
+    }
+    if copy_to_user(arguments[0], &records[..length]).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        ready_count
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_epoll_create1(arguments: [u64; 6]) -> isize {
+    let Ok(flags) = u32::try_from(arguments[0]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = crate::process::lifecycle::current_pid();
+    if owner == 0 {
+        return -13;
+    }
+    match crate::linux_epoll::create(owner, flags) {
+        Ok(fd) => fd as isize,
+        Err(crate::linux_epoll::EpollError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
+        Err(crate::linux_epoll::EpollError::Capacity) => -28,
+        Err(_) => -5,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_epoll_ctl(arguments: [u64; 6]) -> isize {
+    let Ok(epfd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let Ok(operation) = u32::try_from(arguments[1]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(fd) = u32::try_from(arguments[2]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let mut events = 0_u32;
+    let mut data = 0_u64;
+    if operation != crate::linux_epoll::EPOLL_CTL_DEL {
+        let mut encoded = [0_u8; 12];
+        if copy_from_user(arguments[3], &mut encoded).is_err() {
+            return ERROR_BAD_ADDRESS;
+        }
+        events = u32::from_ne_bytes(encoded[0..4].try_into().unwrap());
+        data = u64::from_ne_bytes(encoded[4..12].try_into().unwrap());
+    }
+    let owner = crate::process::lifecycle::current_pid();
+    match crate::linux_epoll::ctl(owner, epfd, operation, fd, events, data) {
+        Ok(()) => 0,
+        Err(crate::linux_epoll::EpollError::BadFileDescriptor) => ERROR_BAD_FILE_DESCRIPTOR,
+        Err(crate::linux_epoll::EpollError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
+        Err(crate::linux_epoll::EpollError::AlreadyExists) => -17,
+        Err(crate::linux_epoll::EpollError::NotFound) => -2,
+        Err(crate::linux_epoll::EpollError::Capacity) => -28,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_epoll_wait(arguments: [u64; 6]) -> isize {
+    let Ok(epfd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let Ok(maxevents) = usize::try_from(arguments[2]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if maxevents == 0 || maxevents > crate::linux_epoll::MAXIMUM_READY_EVENTS {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let owner = crate::process::lifecycle::current_pid();
+    let mut ready = [crate::linux_epoll::ReadyEvent { events: 0, data: 0 };
+        crate::linux_epoll::MAXIMUM_READY_EVENTS];
+    let count = match crate::linux_epoll::wait(owner, epfd, &mut ready[..maxevents]) {
+        Ok(count) => count,
+        Err(crate::linux_epoll::EpollError::BadFileDescriptor) => {
+            return ERROR_BAD_FILE_DESCRIPTOR;
+        }
+        Err(crate::linux_epoll::EpollError::InvalidArgument) => {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        Err(_) => return -5,
+    };
+    let mut encoded = [0_u8; crate::linux_epoll::MAXIMUM_READY_EVENTS * 12];
+    for (index, event) in ready[..count].iter().enumerate() {
+        let offset = index * 12;
+        encoded[offset..offset + 4].copy_from_slice(&event.events.to_ne_bytes());
+        encoded[offset + 4..offset + 12].copy_from_slice(&event.data.to_ne_bytes());
+    }
+    if count != 0 && copy_to_user(arguments[1], &encoded[..count * 12]).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        count as isize
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_epoll_pwait(arguments: [u64; 6]) -> isize {
+    // Signal-mask installation is not yet part of the Linux personality. Do
+    // not silently ignore a caller that depends on it.
+    if arguments[4] != 0 || arguments[5] != 0 {
+        return ERROR_NOT_IMPLEMENTED;
+    }
+    linux_epoll_wait(arguments)
 }
 
 #[cfg(target_os = "none")]

@@ -92,9 +92,11 @@ Anonymous private `mmap`/exact-range `munmap` and the bounded `brk` heap
 allocate and reclaim real zeroed user pages with W^X checks; the probe writes
 and reads a returned page before unmapping it. A bounded, process-owned
 `eventfd2` table now implements the eight-byte counter ABI, semaphore mode,
-ownership checks, close, and non-sleeping `EAGAIN` behavior. This is a real
-wake primitive for early COSMIC services, not a claim that ordinary files,
-`epoll`, timerfd, or device descriptors are available yet. File-backed
+ownership checks, close, and non-sleeping `EAGAIN` behavior. The Linux
+personality also implements non-sleeping `poll(2)` plus level/edge `epoll(7)`
+control and wait over those eventfds. This is a real wake primitive for early
+COSMIC services, not a claim that ordinary files, timerfd, or device
+descriptors are available yet. File-backed
 mappings, `mprotect`, and the dynamic linker remain gated. Every other decoded
 Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.
