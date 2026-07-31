@@ -59,6 +59,7 @@ jobs:
           path: target/formal/toolchains
           key: arach-formal-idris2-0.8.0-agda-2.8.0-v1
       - run: scripts/bootstrap-formal-toolchains.sh
+      - run: bash -n scripts/build-desktop-bundle.sh
       - run: scripts/build-c0-bundle.sh
         env:
           ARACH_PUSH_ROOT: ${{ github.workspace }}/target/c0-sources/push
