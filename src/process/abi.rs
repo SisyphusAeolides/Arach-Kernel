@@ -45,6 +45,7 @@ pub enum LinuxSyscall {
     Dup3,
     Nanosleep,
     Getpid,
+    Getppid,
     Clone,
     Fork,
     Vfork,
@@ -113,6 +114,7 @@ impl LinuxSyscall {
             33 => Some(Self::Dup2),
             35 => Some(Self::Nanosleep),
             39 => Some(Self::Getpid),
+            110 => Some(Self::Getppid),
             41 => Some(Self::Socket),
             42 => Some(Self::Connect),
             43 => Some(Self::Accept),
@@ -176,6 +178,8 @@ mod tests {
         assert_eq!(LinuxSyscall::from_number(1), Some(LinuxSyscall::Write));
         assert_eq!(LinuxSyscall::from_number(9), Some(LinuxSyscall::Mmap));
         assert_eq!(LinuxSyscall::from_number(16), Some(LinuxSyscall::Ioctl));
+        assert_eq!(LinuxSyscall::from_number(39), Some(LinuxSyscall::Getpid));
+        assert_eq!(LinuxSyscall::from_number(110), Some(LinuxSyscall::Getppid));
         assert_eq!(LinuxSyscall::from_number(202), Some(LinuxSyscall::Futex));
         assert_eq!(LinuxSyscall::from_number(257), Some(LinuxSyscall::OpenAt));
         assert_eq!(

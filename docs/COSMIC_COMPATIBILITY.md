@@ -82,6 +82,12 @@ with Aether numbers. Linux compatibility must preserve
 observable errno values, structure layouts, ioctl encodings, readiness rules,
 object lifetime, and concurrency semantics.
 
+The first Linux personality slice is deliberately small but live: `write`,
+`getpid`, `getppid`, `gettid`, `exit`, and `exit_group` are routed through the
+existing bounded user-copy and generation-safe lifecycle paths. Every other
+decoded Linux syscall returns `ENOSYS` until its complete memory, signal, file,
+or IPC semantics are implemented and tested.
+
 ## Push PID 1 boundary
 
 Push stays in userspace. It can replace systemd as PID 1 only if it provides or

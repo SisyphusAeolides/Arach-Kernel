@@ -179,11 +179,19 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
     // (where, for example, Linux `pread64` would otherwise be interpreted as
     // Arach `yield`).
     let scheduled = if crate::process::lifecycle::current_execution_abi().is_linux() {
-        let mut saved = frame.dispatch.user;
-        saved.set_syscall_result(dispatch_linux_syscall(number, arguments));
-        match crate::process::lifecycle::resume_current(saved) {
-            Ok(scheduled) => scheduled,
-            Err(_) => crate::arch::x86_64::halt(),
+        match crate::process::abi::LinuxSyscall::from_number(number) {
+            Some(crate::process::abi::LinuxSyscall::Exit)
+            | Some(crate::process::abi::LinuxSyscall::ExitGroup) => {
+                schedule_exit_return(arguments[0] as isize)
+            }
+            _ => {
+                let mut saved = frame.dispatch.user;
+                saved.set_syscall_result(dispatch_linux_syscall(number, arguments));
+                match crate::process::lifecycle::resume_current(saved) {
+                    Ok(scheduled) => scheduled,
+                    Err(_) => crate::arch::x86_64::halt(),
+                }
+            }
         }
     } else {
         match number {
@@ -212,57 +220,7 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
                     Err(_) => crate::arch::x86_64::halt(),
                 }
             }
-            grimoire::SYS_EXIT => {
-                EXIT_REQUESTS.fetch_add(1, Ordering::AcqRel);
-                preemption::retire_superseded();
-                let exiting = match crate::process::lifecycle::current_handle() {
-                    Some(handle) => handle,
-                    None => crate::arch::x86_64::halt(),
-                };
-                let decision = match crate::process::lifecycle::schedule_exit(arguments[0] as isize)
-                {
-                    Ok(decision) => decision,
-                    Err(_) => crate::arch::x86_64::halt(),
-                };
-                match crate::process::service_registry::take_exited_service(exiting) {
-                    Ok(Some(image)) => {
-                        if crate::process::runtime::defer_reap(image).is_err() {
-                            crate::arch::x86_64::halt();
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => crate::arch::x86_64::halt(),
-                }
-                match decision {
-                    crate::process::lifecycle::ScheduleDecision::User(scheduled) => scheduled,
-                    crate::process::lifecycle::ScheduleDecision::Pid0(mut idle) => loop {
-                        // SAFETY: `schedule_exit` selected PID0 at a serialized
-                        // syscall boundary. The immutable kernel root remains
-                        // reachable through the retiring process hierarchy.
-                        if unsafe { crate::process::runtime::enter_kernel_idle_and_reap() }.is_err()
-                        {
-                            crate::arch::x86_64::halt();
-                        }
-                        // SAFETY: SYSCALL entered with interrupts masked and the
-                        // inherited kernel mapping retains this frame. STI's
-                        // one-instruction shadow makes HLT atomic with respect to
-                        // maskable wakeups; CLI restores the serialized return
-                        // boundary before lifecycle state is inspected.
-                        unsafe {
-                            core::arch::asm!("sti", "hlt", "cli", options(nostack));
-                        }
-                        match crate::process::lifecycle::schedule_from_pid0(idle) {
-                            Ok(crate::process::lifecycle::ScheduleDecision::User(scheduled)) => {
-                                break scheduled;
-                            }
-                            Ok(crate::process::lifecycle::ScheduleDecision::Pid0(next)) => {
-                                idle = next
-                            }
-                            Err(_) => crate::arch::x86_64::halt(),
-                        }
-                    },
-                }
-            }
+            grimoire::SYS_EXIT => schedule_exit_return(arguments[0] as isize),
             _ => {
                 let result = match number {
                     grimoire::SYS_WRITE => write_from_user(arguments),
@@ -315,6 +273,53 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
 }
 
 #[cfg(target_os = "none")]
+fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::ScheduledProcess {
+    EXIT_REQUESTS.fetch_add(1, Ordering::AcqRel);
+    preemption::retire_superseded();
+    let exiting = match crate::process::lifecycle::current_handle() {
+        Some(handle) => handle,
+        None => crate::arch::x86_64::halt(),
+    };
+    let decision = match crate::process::lifecycle::schedule_exit(exit_code) {
+        Ok(decision) => decision,
+        Err(_) => crate::arch::x86_64::halt(),
+    };
+    match crate::process::service_registry::take_exited_service(exiting) {
+        Ok(Some(image)) => {
+            if crate::process::runtime::defer_reap(image).is_err() {
+                crate::arch::x86_64::halt();
+            }
+        }
+        Ok(None) => {}
+        Err(_) => crate::arch::x86_64::halt(),
+    }
+    match decision {
+        crate::process::lifecycle::ScheduleDecision::User(scheduled) => scheduled,
+        crate::process::lifecycle::ScheduleDecision::Pid0(mut idle) => loop {
+            // SAFETY: `schedule_exit` selected PID0 at a serialized syscall
+            // boundary. The immutable kernel root remains reachable through
+            // the retiring process hierarchy.
+            if unsafe { crate::process::runtime::enter_kernel_idle_and_reap() }.is_err() {
+                crate::arch::x86_64::halt();
+            }
+            // SAFETY: SYSCALL entered with interrupts masked and the inherited
+            // kernel mapping retains this frame. STI's one-instruction shadow
+            // makes HLT atomic with respect to maskable wakeups.
+            unsafe {
+                core::arch::asm!("sti", "hlt", "cli", options(nostack));
+            }
+            match crate::process::lifecycle::schedule_from_pid0(idle) {
+                Ok(crate::process::lifecycle::ScheduleDecision::User(scheduled)) => {
+                    break scheduled;
+                }
+                Ok(crate::process::lifecycle::ScheduleDecision::Pid0(next)) => idle = next,
+                Err(_) => crate::arch::x86_64::halt(),
+            }
+        },
+    }
+}
+
+#[cfg(target_os = "none")]
 fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
     match crate::process::abi::LinuxSyscall::from_number(number) {
         // The bounded serial write has the same first three scalar arguments
@@ -323,6 +328,20 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         // actually selected, while every other call remains explicit until
         // its Linux semantics are implemented and tested.
         Some(crate::process::abi::LinuxSyscall::Write) => write_from_user(arguments),
+        Some(crate::process::abi::LinuxSyscall::Getpid) => {
+            crate::process::lifecycle::current_pid() as isize
+        }
+        Some(crate::process::abi::LinuxSyscall::Gettid) => {
+            crate::process::lifecycle::current_pid() as isize
+        }
+        Some(crate::process::abi::LinuxSyscall::Getppid) => {
+            let Some(handle) = crate::process::lifecycle::current_handle() else {
+                return -3;
+            };
+            crate::process::lifecycle::snapshot_exact(handle)
+                .map(|snapshot| snapshot.parent as isize)
+                .unwrap_or(-3)
+        }
         Some(_) => ERROR_NOT_IMPLEMENTED,
         None => ERROR_NOT_IMPLEMENTED,
     }
