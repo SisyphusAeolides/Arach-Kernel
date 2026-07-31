@@ -43,6 +43,12 @@ jobs:
           allowed = {
               "build.rs",
               "core/aether/src/resonance_split.rs",
+              "libraries/slope/src/executor.rs",
+              "libraries/slope/src/fabric.rs",
+              "libraries/slope/src/hypermedia.rs",
+              "libraries/slope/src/lib.rs",
+              "libraries/slope/src/memory/mod.rs",
+              "libraries/slope/src/signal.rs",
               "src/akashic_vfs.rs",
               "src/lib.rs",
               "src/linux_eventfd.rs",
@@ -64,6 +70,9 @@ jobs:
           git config user.name "SisyphusAeolides"
           git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
           git add build.rs core/aether/src/resonance_split.rs \
+            libraries/slope/src/executor.rs libraries/slope/src/fabric.rs \
+            libraries/slope/src/hypermedia.rs libraries/slope/src/lib.rs \
+            libraries/slope/src/memory/mod.rs libraries/slope/src/signal.rs \
             src/akashic_vfs.rs src/lib.rs src/linux_eventfd.rs \
             src/linux_file.rs src/syscalls.rs
           git commit -m "Add Linux file syscall bridge"
