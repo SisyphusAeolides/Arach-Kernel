@@ -14,6 +14,12 @@ legacy assumption that user images exist under Arach's own target directory.
 The bootstrap variable currently feeds a legacy internal slot named `crest`;
 the supplied artifact is the C0 probe, not the discarded Crest desktop.
 
+The script accepts `ARACH_PUSH_FEATURES`. Its default `os-bin` builds the
+minimal probe supervisor. A desktop bundle build must set
+`ARACH_PUSH_FEATURES=os-bin,cosmic-boot` only after measured COSMIC service
+artifacts have been assembled; the feature selects the complete ordered
+session chain and is not a substitute for those artifact measurements.
+
 The build gate records SHA-256 for every artifact. Qualification additionally
 requires a deterministic FAT/UEFI image, a bounded QEMU run, and a serial log
 containing all of the following evidence from the same bundle:

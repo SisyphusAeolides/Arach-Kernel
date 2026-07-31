@@ -7,6 +7,7 @@ granite_root="${ARACH_GRANITE_ROOT:?set ARACH_GRANITE_ROOT to the Granite checko
 cargo_bin="${CARGO:-cargo}"
 target="$root/x86_64-arach.json"
 build_root="${ARACH_C0_BUILD_ROOT:-$root/target/c0}"
+push_features="${ARACH_PUSH_FEATURES:-os-bin}"
 
 test -f "$push_root/Cargo.toml"
 test -f "$granite_root/Cargo.toml"
@@ -22,7 +23,7 @@ build_none() {
         -Z build-std-features=compiler-builtins-mem "$@"
 }
 
-build_none "$push_root/Cargo.toml" "$build_root/push" --features os-bin
+build_none "$push_root/Cargo.toml" "$build_root/push" --features "$push_features"
 build_none "$root/probes/c0/Cargo.toml" "$build_root/probe"
 
 push_image="$build_root/push/x86_64-arach/release/push"
