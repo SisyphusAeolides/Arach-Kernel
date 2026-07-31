@@ -42,6 +42,7 @@ members = [
 ]
 exclude = [
     "probes/c0",
+    "sources/push",
     "target/c0-sources/push",
     "target/c0-sources/granite",
 ]
