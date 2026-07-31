@@ -26,9 +26,9 @@ jobs:
           if grep -Fq 'pub mod linux_file;' src/lib.rs; then
             printf 'Linux file syscall integration is already published\n'
           else
-            grep -nE '^fn linux_(read|write|close|eventfd2|poll|timerfd)' src/syscalls.rs
             python3 scripts/fix-linux-file-patch.py
             python3 scripts/patch-linux-file-syscalls.py
+            python3 scripts/patch-workspace-clippy.py
           fi
       - run: cargo fmt --all
       - run: cargo fmt --all -- --check
@@ -41,6 +41,8 @@ jobs:
           import subprocess
 
           allowed = {
+              "build.rs",
+              "core/aether/src/resonance_split.rs",
               "src/akashic_vfs.rs",
               "src/lib.rs",
               "src/linux_eventfd.rs",
@@ -61,6 +63,8 @@ jobs:
           fi
           git config user.name "SisyphusAeolides"
           git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
-          git add src/akashic_vfs.rs src/lib.rs src/linux_eventfd.rs src/linux_file.rs src/syscalls.rs
+          git add build.rs core/aether/src/resonance_split.rs \
+            src/akashic_vfs.rs src/lib.rs src/linux_eventfd.rs \
+            src/linux_file.rs src/syscalls.rs
           git commit -m "Add Linux file syscall bridge"
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
