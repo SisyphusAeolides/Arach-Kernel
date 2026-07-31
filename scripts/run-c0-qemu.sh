@@ -9,11 +9,43 @@ fi
 image=$1
 log=${2:-${image}.serial.log}
 qemu=${QEMU:-qemu-system-x86_64}
-ovmf_code=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE.fd}
-ovmf_vars=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS.fd}
 [[ -f "$image" && ! -L "$image" ]] || { echo "C0 image is not a regular file" >&2; exit 1; }
 command -v "$qemu" >/dev/null || { echo "QEMU is required for C0 execution" >&2; exit 69; }
-[[ -f "$ovmf_code" && -f "$ovmf_vars" ]] || {
+
+first_existing() {
+    local candidate
+    for candidate in "$@"; do
+        if [[ -f "$candidate" && ! -L "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Fedora, Debian, and Ubuntu package the same firmware under different names.
+# An explicit override remains authoritative; otherwise select only a regular,
+# non-symlinked firmware file so the execution gate is reproducible and cannot
+# silently boot with a host-controlled link.
+ovmf_code=${OVMF_CODE:-}
+ovmf_vars=${OVMF_VARS:-}
+if [[ -z "$ovmf_code" ]]; then
+    ovmf_code=$(first_existing \
+        /usr/share/OVMF/OVMF_CODE_4M.fd \
+        /usr/share/OVMF/OVMF_CODE.fd \
+        /usr/share/edk2/ovmf/OVMF_CODE_4M.fd \
+        /usr/share/edk2/ovmf/OVMF_CODE.fd) || true
+fi
+if [[ -z "$ovmf_vars" ]]; then
+    ovmf_vars=$(first_existing \
+        /usr/share/OVMF/OVMF_VARS_4M.fd \
+        /usr/share/OVMF/OVMF_VARS.fd \
+        /usr/share/edk2/ovmf/OVMF_VARS_4M.fd \
+        /usr/share/edk2/ovmf/OVMF_VARS.fd) || true
+fi
+[[ -n "$ovmf_code" && -n "$ovmf_vars" \
+    && -f "$ovmf_code" && ! -L "$ovmf_code" \
+    && -f "$ovmf_vars" && ! -L "$ovmf_vars" ]] || {
     echo "OVMF_CODE and OVMF_VARS are required for C0 execution" >&2
     exit 69
 }

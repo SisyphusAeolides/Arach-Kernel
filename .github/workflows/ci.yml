@@ -48,7 +48,7 @@ jobs:
           repository: SisyphusAeolides/Granite
           ref: 13b152ea3a515e3fac7dbb992387703e99848d92
           path: target/c0-sources/granite
-      - run: sudo apt-get update && sudo apt-get install -y build-essential chezscheme dosfstools gfortran libgmp-dev mtools xz-utils curl
+      - run: sudo apt-get update && sudo apt-get install -y build-essential chezscheme dosfstools gfortran libgmp-dev mtools ovmf qemu-system-x86 xz-utils curl
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-20
@@ -72,6 +72,18 @@ jobs:
             "$PWD/target/c0/arach-c0.img"
           mdir -i "$PWD/target/c0/arach-c0.img" ::/EFI/BOOT
           mdir -i "$PWD/target/c0/arach-c0.img" ::/BOOT
+      - name: Execute C0 under QEMU/OVMF
+        run: |
+          scripts/run-c0-qemu.sh \
+            "$PWD/target/c0/arach-c0.img" \
+            "$PWD/target/c0/c0.serial.log"
+      - name: Upload C0 serial evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arach-c0-serial-${{ github.sha }}
+          path: target/c0/c0.serial.log
+          if-no-files-found: warn
       - run: git diff --check
 
   nvidia-source-contract:
