@@ -73,6 +73,15 @@ struct LinuxTimespec {
     tv_nsec: i64,
 }
 
+/// Linux `struct itimerspec`: two adjacent `struct timespec` values.
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinuxItimerspec {
+    it_interval: LinuxTimespec,
+    it_value: LinuxTimespec,
+}
+
 /// Linux's fixed-size `struct utsname` wire layout (six 65-byte fields).
 /// Values are intentionally compile-time, bounded identity data until the
 /// device tree and kernel-release providers are available to userspace.
@@ -324,6 +333,7 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
     // before publishing the zombie transition so an exiting service cannot
     // leak wake objects into a later PID generation.
     let _ = crate::linux_epoll::close_all(exiting.pid);
+    let _ = crate::linux_timerfd::close_all(exiting.pid);
     let _ = crate::linux_eventfd::close_all(exiting.pid);
     let decision = match crate::process::lifecycle::schedule_exit(exit_code) {
         Ok(decision) => decision,
@@ -405,6 +415,9 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Munmap) => linux_munmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Brk) => linux_brk(arguments),
         Some(crate::process::abi::LinuxSyscall::Eventfd2) => linux_eventfd2(arguments),
+        Some(crate::process::abi::LinuxSyscall::TimerfdCreate) => linux_timerfd_create(arguments),
+        Some(crate::process::abi::LinuxSyscall::TimerfdSettime) => linux_timerfd_settime(arguments),
+        Some(crate::process::abi::LinuxSyscall::TimerfdGettime) => linux_timerfd_gettime(arguments),
         Some(crate::process::abi::LinuxSyscall::EpollWait) => linux_epoll_wait(arguments),
         Some(crate::process::abi::LinuxSyscall::EpollPwait) => linux_epoll_pwait(arguments),
         Some(crate::process::abi::LinuxSyscall::EpollCreate1) => linux_epoll_create1(arguments),
@@ -432,6 +445,125 @@ fn linux_eventfd2(arguments: [u64; 6]) -> isize {
     }
 }
 
+#[cfg(any(target_os = "none", test))]
+fn timespec_to_nanoseconds(value: LinuxTimespec) -> Option<u64> {
+    if value.tv_sec < 0 || !(0..1_000_000_000).contains(&value.tv_nsec) {
+        return None;
+    }
+    let seconds = u64::try_from(value.tv_sec).ok()?;
+    let nanoseconds = value.tv_nsec as u64;
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanoseconds))
+}
+
+#[cfg(any(target_os = "none", test))]
+fn nanoseconds_to_timespec(value: u64) -> LinuxTimespec {
+    LinuxTimespec {
+        tv_sec: (value / 1_000_000_000) as i64,
+        tv_nsec: (value % 1_000_000_000) as i64,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn read_itimerspec(source: u64) -> Result<crate::linux_timerfd::TimerSpec, isize> {
+    let mut encoded = [0_u8; core::mem::size_of::<LinuxItimerspec>()];
+    if copy_from_user(source, &mut encoded).is_err() {
+        return Err(ERROR_BAD_ADDRESS);
+    }
+    // SAFETY: LinuxItimerspec is repr(C), Copy, and the complete byte array
+    // was initialized by the bounded user copy above.
+    let value = unsafe { core::ptr::read_unaligned(encoded.as_ptr().cast::<LinuxItimerspec>()) };
+    let interval_ns = timespec_to_nanoseconds(value.it_interval).ok_or(ERROR_INVALID_ARGUMENT)?;
+    let value_ns = timespec_to_nanoseconds(value.it_value).ok_or(ERROR_INVALID_ARGUMENT)?;
+    Ok(crate::linux_timerfd::TimerSpec {
+        value_ns,
+        interval_ns,
+    })
+}
+
+#[cfg(target_os = "none")]
+fn write_itimerspec(destination: u64, value: crate::linux_timerfd::TimerSpec) -> Result<(), isize> {
+    let encoded = LinuxItimerspec {
+        it_interval: nanoseconds_to_timespec(value.interval_ns),
+        it_value: nanoseconds_to_timespec(value.value_ns),
+    };
+    copy_value_to_user(destination, &encoded).map_err(|_| ERROR_BAD_ADDRESS)
+}
+
+#[cfg(target_os = "none")]
+fn linux_timerfd_create(arguments: [u64; 6]) -> isize {
+    let Ok(clockid) = u32::try_from(arguments[0]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(flags) = u32::try_from(arguments[1]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = crate::process::lifecycle::current_pid();
+    if owner == 0 {
+        return -13;
+    }
+    match crate::linux_timerfd::create(owner, clockid, flags) {
+        Ok(fd) => fd as isize,
+        Err(crate::linux_timerfd::TimerFdError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
+        Err(crate::linux_timerfd::TimerFdError::Capacity) => -28,
+        Err(_) => -5,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_timerfd_settime(arguments: [u64; 6]) -> isize {
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let Ok(flags) = u32::try_from(arguments[1]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let new_value = match read_itimerspec(arguments[2]) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let owner = crate::process::lifecycle::current_pid();
+    let now = crate::interrupts::monotonic_nanoseconds();
+    let old = match crate::linux_timerfd::settime(owner, fd, flags, new_value, now) {
+        Ok(value) => value,
+        Err(crate::linux_timerfd::TimerFdError::InvalidArgument) => return ERROR_INVALID_ARGUMENT,
+        Err(crate::linux_timerfd::TimerFdError::BadFileDescriptor) => {
+            return ERROR_BAD_FILE_DESCRIPTOR;
+        }
+        Err(_) => return -5,
+    };
+    if arguments[3] != 0 {
+        if let Err(error) = write_itimerspec(arguments[3], old) {
+            return error;
+        }
+    }
+    0
+}
+
+#[cfg(target_os = "none")]
+fn linux_timerfd_gettime(arguments: [u64; 6]) -> isize {
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let owner = crate::process::lifecycle::current_pid();
+    let value = match crate::linux_timerfd::gettime(
+        owner,
+        fd,
+        crate::interrupts::monotonic_nanoseconds(),
+    ) {
+        Ok(value) => value,
+        Err(crate::linux_timerfd::TimerFdError::BadFileDescriptor) => {
+            return ERROR_BAD_FILE_DESCRIPTOR;
+        }
+        Err(_) => return -5,
+    };
+    match write_itimerspec(arguments[1], value) {
+        Ok(()) => 0,
+        Err(error) => error,
+    }
+}
+
 #[cfg(target_os = "none")]
 fn linux_read(arguments: [u64; 6]) -> isize {
     let Ok(fd) = u32::try_from(arguments[0]) else {
@@ -444,18 +576,33 @@ fn linux_read(arguments: [u64; 6]) -> isize {
         return ERROR_INVALID_ARGUMENT;
     }
     let owner = crate::process::lifecycle::current_pid();
-    let value = match crate::linux_eventfd::read(owner, fd) {
-        Ok(value) => value,
-        Err(crate::linux_eventfd::EventFdError::WouldBlock) => return ERROR_TRY_AGAIN,
-        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => {
-            return ERROR_BAD_FILE_DESCRIPTOR;
+    match crate::linux_eventfd::read(owner, fd) {
+        Ok(value) => {
+            if copy_value_to_user(arguments[1], &value).is_err() {
+                ERROR_BAD_ADDRESS
+            } else {
+                core::mem::size_of::<u64>() as isize
+            }
         }
-        Err(_) => return -5,
-    };
-    if copy_value_to_user(arguments[1], &value).is_err() {
-        ERROR_BAD_ADDRESS
-    } else {
-        core::mem::size_of::<u64>() as isize
+        Err(crate::linux_eventfd::EventFdError::WouldBlock) => ERROR_TRY_AGAIN,
+        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => {
+            match crate::linux_timerfd::read(owner, fd, crate::interrupts::monotonic_nanoseconds())
+            {
+                Ok(value) => {
+                    if copy_value_to_user(arguments[1], &value).is_err() {
+                        ERROR_BAD_ADDRESS
+                    } else {
+                        core::mem::size_of::<u64>() as isize
+                    }
+                }
+                Err(crate::linux_timerfd::TimerFdError::WouldBlock) => ERROR_TRY_AGAIN,
+                Err(crate::linux_timerfd::TimerFdError::BadFileDescriptor) => {
+                    ERROR_BAD_FILE_DESCRIPTOR
+                }
+                Err(_) => -5,
+            }
+        }
+        Err(_) => -5,
     }
 }
 
@@ -496,9 +643,17 @@ fn linux_close(arguments: [u64; 6]) -> isize {
     match crate::linux_eventfd::close(owner, fd) {
         Ok(()) => 0,
         Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => {
-            match crate::linux_epoll::close(owner, fd) {
+            match crate::linux_timerfd::close(owner, fd) {
                 Ok(()) => 0,
-                Err(crate::linux_epoll::EpollError::BadFileDescriptor) => ERROR_BAD_FILE_DESCRIPTOR,
+                Err(crate::linux_timerfd::TimerFdError::BadFileDescriptor) => {
+                    match crate::linux_epoll::close(owner, fd) {
+                        Ok(()) => 0,
+                        Err(crate::linux_epoll::EpollError::BadFileDescriptor) => {
+                            ERROR_BAD_FILE_DESCRIPTOR
+                        }
+                        Err(_) => -5,
+                    }
+                }
                 Err(_) => -5,
             }
         }
@@ -515,6 +670,10 @@ fn linux_descriptor_revents(owner: u32, fd: i32, requested: u16) -> u16 {
         return LINUX_POLLNVAL;
     };
     let ready = if let Ok(ready) = crate::linux_eventfd::readiness(owner, fd) {
+        ready
+    } else if let Ok(ready) =
+        crate::linux_timerfd::readiness(owner, fd, crate::interrupts::monotonic_nanoseconds())
+    {
         ready
     } else if let Ok(ready) = crate::linux_epoll::readiness(owner, fd) {
         ready
@@ -1587,6 +1746,34 @@ mod tests {
     fn utsname_wire_layout_matches_linux() {
         assert_eq!(core::mem::size_of::<LinuxUtsName>(), 390);
         assert_eq!(core::mem::size_of::<LinuxTimespec>(), 16);
+    }
+
+    #[test]
+    fn timerfd_wire_layout_and_timespec_validation_are_bounded() {
+        assert_eq!(core::mem::size_of::<LinuxItimerspec>(), 32);
+        let encoded = nanoseconds_to_timespec(2_345_678_901);
+        assert_eq!(
+            encoded,
+            LinuxTimespec {
+                tv_sec: 2,
+                tv_nsec: 345_678_901
+            }
+        );
+        assert_eq!(timespec_to_nanoseconds(encoded), Some(2_345_678_901));
+        assert_eq!(
+            timespec_to_nanoseconds(LinuxTimespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            }),
+            None
+        );
+        assert_eq!(
+            timespec_to_nanoseconds(LinuxTimespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000_000,
+            }),
+            None
+        );
     }
 
     fn encoded_tss_descriptor(base: u64, limit: u32, present: bool, kind: u64) -> (u64, u64) {

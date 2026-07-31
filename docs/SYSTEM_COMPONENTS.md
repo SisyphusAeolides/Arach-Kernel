@@ -27,9 +27,13 @@ The current kernel bring-up provides the first bounded Linux wake object:
 process-owned `eventfd2` descriptors support counter and semaphore reads,
 eight-byte writes, close, ownership validation, and non-sleeping `EAGAIN` on
 an empty read. `poll(2)` and level/edge `epoll(7)` are implemented over those
-eventfds. Timerfd, ordinary files, and ordinary device descriptors remain
-separate qualification work; they must not be treated as implemented merely
-because their syscall numbers decode.
+eventfds. It also provides process-owned monotonic `timerfd_create`,
+`timerfd_settime`, `timerfd_gettime`, eight-byte expiration reads, close,
+ownership validation, and lazy periodic expiry; poll and level/edge epoll
+observe timer readiness through the same bounded descriptor tables. Ordinary
+files and ordinary device descriptors remain separate qualification work; a
+working timerfd must not be treated as proof that those broader surfaces are
+available.
 
 The gate runs upstream libinput behavioral tests plus COSMIC compositor tests.
 No companion process may grab a physical device in the parity path.

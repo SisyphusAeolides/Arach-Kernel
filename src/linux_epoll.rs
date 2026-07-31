@@ -1,12 +1,13 @@
-//! Bounded Linux `epoll(7)` readiness for the kernel-owned eventfd set.
+//! Bounded Linux `epoll(7)` readiness for the kernel-owned wake descriptors.
 //!
 //! This is intentionally a narrow first descriptor bridge.  It implements
-//! the userspace-visible epoll control/event ABI for eventfds, with level and
-//! edge-triggered watches, while refusing to masquerade as a general file or
-//! device descriptor backend.  The fixed tables keep every allocation and
-//! readiness scan bounded until the full descriptor layer exists.
+//! the userspace-visible epoll control/event ABI for eventfds and timerfds,
+//! with level and edge-triggered watches, while refusing to masquerade as a
+//! general file or device descriptor backend. The fixed tables keep every
+//! allocation and readiness scan bounded until the full descriptor layer
+//! exists.
 
-use crate::linux_eventfd::{self, EventFdError};
+use crate::linux_eventfd;
 use crate::sync::SpinLock;
 
 pub const EPOLL_CLOEXEC: u32 = 0x80000;
@@ -107,6 +108,35 @@ const fn fd_for_index(index: usize) -> u32 {
     EPOLL_BASE + index as u32
 }
 
+#[inline]
+fn monotonic_now_ns() -> u64 {
+    #[cfg(target_os = "none")]
+    {
+        crate::interrupts::monotonic_nanoseconds()
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // Host-side epoll tests use eventfds, whose readiness is independent
+        // of time. Timerfd tests exercise explicit timestamps directly in
+        // `linux_timerfd`; keeping the host wrapper deterministic avoids a
+        // std dependency in this no_std module.
+        0
+    }
+}
+
+fn target_readiness(owner: u32, fd: u32) -> Option<(u32, u64)> {
+    if let Ok(ready) = linux_eventfd::readiness(owner, fd) {
+        let generation = linux_eventfd::readiness_generation(owner, fd).unwrap_or(0);
+        return Some((ready, generation));
+    }
+    let now = monotonic_now_ns();
+    if let Ok(ready) = crate::linux_timerfd::readiness(owner, fd, now) {
+        let generation = crate::linux_timerfd::readiness_generation(owner, fd, now).unwrap_or(0);
+        return Some((ready, generation));
+    }
+    None
+}
+
 /// Allocate an epoll instance owned by `owner`.
 pub fn create(owner: u32, flags: u32) -> Result<u32, EpollError> {
     if owner == 0 || flags & !EPOLL_ALLOWED_FLAGS != 0 {
@@ -128,7 +158,7 @@ pub fn create(owner: u32, flags: u32) -> Result<u32, EpollError> {
     Ok(fd_for_index(index))
 }
 
-/// Add, modify, or remove one eventfd watch.  Validating the target before
+/// Add, modify, or remove one supported wake-descriptor watch. Validating the target before
 /// taking the epoll table lock keeps the lock order independent of eventfd
 /// operations and prevents a close/readiness race from becoming a deadlock.
 pub fn ctl(
@@ -139,7 +169,7 @@ pub fn ctl(
     events: u32,
     data: u64,
 ) -> Result<(), EpollError> {
-    let target_is_valid = linux_eventfd::readiness(owner, fd).is_ok();
+    let target_is_valid = target_readiness(owner, fd).is_some();
     if !target_is_valid || fd == epfd || events & !EPOLL_INTEREST_MASK != 0 {
         return Err(EpollError::InvalidArgument);
     }
@@ -202,7 +232,7 @@ pub fn wait(owner: u32, epfd: u32, output: &mut [ReadyEvent]) -> Result<usize, E
         return Err(EpollError::InvalidArgument);
     }
     let index = index_for_fd(epfd).ok_or(EpollError::BadFileDescriptor)?;
-    // Snapshot before querying eventfds. `ctl` validates an eventfd before
+    // Snapshot before querying targets. `ctl` validates a target before
     // taking this table's lock, so holding both locks in the opposite order
     // would permit a cross-CPU deadlock.
     let mut watches = {
@@ -219,14 +249,9 @@ pub fn wait(owner: u32, epfd: u32, output: &mut [ReadyEvent]) -> Result<usize, E
         if !watch.occupied() {
             continue;
         }
-        let (ready, generation, invalid) = match linux_eventfd::readiness(owner, watch.fd) {
-            Ok(ready) => (
-                ready,
-                linux_eventfd::readiness_generation(owner, watch.fd).unwrap_or(0),
-                false,
-            ),
-            Err(EventFdError::BadFileDescriptor) => (EPOLLERR | EPOLLHUP, 0, true),
-            Err(_) => (EPOLLERR, 0, true),
+        let (ready, generation, invalid) = match target_readiness(owner, watch.fd) {
+            Some((ready, generation)) => (ready, generation, false),
+            None => (EPOLLERR | EPOLLHUP, 0, true),
         };
         let interested = ready & (watch.events & !EPOLLET);
         let edge = watch.events & EPOLLET != 0;
@@ -287,8 +312,8 @@ pub fn readiness(owner: u32, epfd: u32) -> Result<u32, EpollError> {
     };
     for watch in &watches {
         if watch.occupied() {
-            let ready = linux_eventfd::readiness(owner, watch.fd).unwrap_or(EPOLLERR | EPOLLHUP);
-            let generation = linux_eventfd::readiness_generation(owner, watch.fd).unwrap_or(0);
+            let (ready, generation) =
+                target_readiness(owner, watch.fd).unwrap_or((EPOLLERR | EPOLLHUP, 0));
             let edge = watch.events & EPOLLET != 0;
             let edge_pending = !edge || !watch.edge_seen || watch.last_generation != generation;
             if ready & (watch.events & !EPOLLET) != 0 && edge_pending {

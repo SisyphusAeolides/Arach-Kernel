@@ -76,6 +76,7 @@ pub enum LinuxSyscall {
     Eventfd2,
     TimerfdCreate,
     TimerfdSettime,
+    TimerfdGettime,
     ClockGettime,
     ClockNanosleep,
     Futex,
@@ -157,6 +158,7 @@ impl LinuxSyscall {
             281 => Some(Self::EpollPwait),
             283 => Some(Self::TimerfdCreate),
             286 => Some(Self::TimerfdSettime),
+            287 => Some(Self::TimerfdGettime),
             288 => Some(Self::Accept4),
             290 => Some(Self::Eventfd2),
             291 => Some(Self::EpollCreate1),
@@ -199,6 +201,18 @@ mod tests {
             Some(LinuxSyscall::InotifyInit1)
         );
         assert_eq!(LinuxSyscall::from_number(290), Some(LinuxSyscall::Eventfd2));
+        assert_eq!(
+            LinuxSyscall::from_number(283),
+            Some(LinuxSyscall::TimerfdCreate)
+        );
+        assert_eq!(
+            LinuxSyscall::from_number(286),
+            Some(LinuxSyscall::TimerfdSettime)
+        );
+        assert_eq!(
+            LinuxSyscall::from_number(287),
+            Some(LinuxSyscall::TimerfdGettime)
+        );
         assert_eq!(LinuxSyscall::from_number(7), Some(LinuxSyscall::Poll));
         assert_eq!(
             LinuxSyscall::from_number(232),
