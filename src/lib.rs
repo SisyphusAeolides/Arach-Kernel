@@ -3,6 +3,7 @@ extern crate alloc;
 
 pub mod ads_boundary;
 pub mod aether;
+pub mod akashic_vfs;
 pub mod arch;
 pub mod argus_sentinel;
 pub mod argus_transport;

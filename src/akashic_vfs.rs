@@ -228,9 +228,7 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
         let node_index = match existing {
             Some(index) => {
                 let node = &self.nodes[index];
-                if open_flags & flags::CREATE_INTENT != 0
-                    && open_flags & flags::EXCLUSIVE != 0
-                {
+                if open_flags & flags::CREATE_INTENT != 0 && open_flags & flags::EXCLUSIVE != 0 {
                     return Err(VfsError::AlreadyExists);
                 }
                 match node.kind {
@@ -330,11 +328,7 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
         let handle_index = self.find_handle(owner, token)?;
         let (node_index, cursor, open_flags) = {
             let handle = self.handles[handle_index];
-            (
-                usize::from(handle.node),
-                handle.cursor,
-                handle.open_flags,
-            )
+            (usize::from(handle.node), handle.cursor, handle.open_flags)
         };
         if open_flags & flags::READ_INTENT == 0 {
             return Err(VfsError::PermissionDenied);
@@ -366,11 +360,7 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
         let handle_index = self.find_handle(owner, token)?;
         let (node_index, cursor, open_flags) = {
             let handle = self.handles[handle_index];
-            (
-                usize::from(handle.node),
-                handle.cursor,
-                handle.open_flags,
-            )
+            (usize::from(handle.node), handle.cursor, handle.open_flags)
         };
         if open_flags & flags::WRITE_INTENT == 0 {
             return Err(VfsError::PermissionDenied);
@@ -386,7 +376,9 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
             } else {
                 cursor
             };
-            let end = offset.checked_add(input.len()).ok_or(VfsError::FileTooLarge)?;
+            let end = offset
+                .checked_add(input.len())
+                .ok_or(VfsError::FileTooLarge)?;
             if end > FILE_BYTES {
                 return Err(VfsError::FileTooLarge);
             }
@@ -677,12 +669,7 @@ type KernelVfs = AkashicVfs<MAXIMUM_NODES, MAXIMUM_HANDLES, MAXIMUM_FILE_BYTES>;
 
 static KERNEL_VFS: SpinLock<KernelVfs> = SpinLock::new(KernelVfs::new());
 
-pub fn open(
-    owner: ProcessHandle,
-    path: &[u8],
-    open_flags: u32,
-    now: u64,
-) -> Result<u64, VfsError> {
+pub fn open(owner: ProcessHandle, path: &[u8], open_flags: u32, now: u64) -> Result<u64, VfsError> {
     KERNEL_VFS.lock().open(owner, path, open_flags, now)
 }
 
@@ -698,21 +685,11 @@ pub fn read(owner: ProcessHandle, token: u64, output: &mut [u8]) -> Result<usize
     KERNEL_VFS.lock().read(owner, token, output)
 }
 
-pub fn write(
-    owner: ProcessHandle,
-    token: u64,
-    input: &[u8],
-    now: u64,
-) -> Result<usize, VfsError> {
+pub fn write(owner: ProcessHandle, token: u64, input: &[u8], now: u64) -> Result<usize, VfsError> {
     KERNEL_VFS.lock().write(owner, token, input, now)
 }
 
-pub fn seek(
-    owner: ProcessHandle,
-    token: u64,
-    offset: i64,
-    whence: u32,
-) -> Result<u64, VfsError> {
+pub fn seek(owner: ProcessHandle, token: u64, offset: i64, whence: u32) -> Result<u64, VfsError> {
     KERNEL_VFS.lock().seek(owner, token, offset, whence)
 }
 
@@ -982,24 +959,14 @@ mod tests {
             Err(VfsError::Unsupported)
         );
         let handle = vfs
-            .open(
-                owner,
-                b"/x",
-                flags::WRITE_INTENT | flags::CREATE_INTENT,
-                2,
-            )
+            .open(owner, b"/x", flags::WRITE_INTENT | flags::CREATE_INTENT, 2)
             .unwrap();
         assert_eq!(
             vfs.write(owner, handle, b"12345", 3),
             Err(VfsError::FileTooLarge)
         );
         assert_eq!(
-            vfs.open(
-                owner,
-                b"/y",
-                flags::WRITE_INTENT | flags::CREATE_INTENT,
-                4,
-            ),
+            vfs.open(owner, b"/y", flags::WRITE_INTENT | flags::CREATE_INTENT, 4,),
             Err(VfsError::Capacity)
         );
     }
