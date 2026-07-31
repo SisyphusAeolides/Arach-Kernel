@@ -30,6 +30,7 @@ jobs:
             python3 scripts/patch-linux-file-syscalls.py
             python3 scripts/patch-workspace-clippy.py
             python3 scripts/patch-msrv-atomic.py
+            python3 scripts/patch-driver-abi-clippy.py
           fi
       - run: cargo fmt --all
       - run: cargo fmt --all -- --check
@@ -44,6 +45,7 @@ jobs:
           allowed = {
               "build.rs",
               "core/aether/src/resonance_split.rs",
+              "libraries/driver-abi/src/prometheus.rs",
               "libraries/slope/src/executor.rs",
               "libraries/slope/src/fabric.rs",
               "libraries/slope/src/hypermedia.rs",
@@ -71,6 +73,7 @@ jobs:
           git config user.name "SisyphusAeolides"
           git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
           git add build.rs core/aether/src/resonance_split.rs \
+            libraries/driver-abi/src/prometheus.rs \
             libraries/slope/src/executor.rs libraries/slope/src/fabric.rs \
             libraries/slope/src/hypermedia.rs libraries/slope/src/lib.rs \
             libraries/slope/src/memory/mod.rs libraries/slope/src/signal.rs \
