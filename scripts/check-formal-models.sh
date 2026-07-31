@@ -97,4 +97,7 @@ linux_contract_idris_sha256=$(digest "$root/formal/idris2/LinuxContract.idr")
 linux_contract_agda_sha256=$(digest "$root/formal/agda/LinuxContract.agda")
 LOCK
 
+cmp -- "$root/formal/verified.lock" "$root/target/formal/verified.lock" ||
+    fail "tracked formal attestation differs from the verified model set"
+
 printf 'formal check passed: Idris2 0.8.0, Agda 2.8.0\n'
