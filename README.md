@@ -106,6 +106,13 @@ scripts/test-linux-kbuild-sdk.sh
 ARACH_PUSH_ROOT=/path/to/Push \
 ARACH_GRANITE_ROOT=/path/to/Granite \
     scripts/build-c0-bundle.sh
+
+# Native COSMIC production bundle. The directory must contain all five
+# target-compatible ELF service images.
+ARACH_PUSH_ROOT=/path/to/Push \
+ARACH_GRANITE_ROOT=/path/to/Granite \
+ARACH_COSMIC_SERVICES_DIR=/path/to/cosmic-services \
+    scripts/build-desktop-bundle.sh
 ```
 
 The custom target is `x86_64-arach.json`. The `cargo kernel` alias now selects
@@ -124,6 +131,12 @@ settings, portals, applications, store, media, lock/suspend path, and clean
 logout—not just a compositor process. The first acceptance target will be a
 pinned COSMIC Epoch release running under QEMU with virtio graphics, input,
 storage, audio, and networking before qualification expands to real hardware.
+
+`scripts/build-desktop-bundle.sh` is fail-closed: it requires
+`dbus-broker`, `cosmic-comp`, `cosmic-greeter`, `cosmic-session`, and
+`xdg-desktop-portal-cosmic` as target-compatible ELF images, enables Push's
+`cosmic-boot` service graph, and measures the same five images in Arach and
+Granite. It never downloads or silently substitutes host COSMIC binaries.
 
 The kernel and module boundaries are governed by the
 [Linux kernel compatibility contract](docs/LINUX_KERNEL_CONTRACT.md). External
