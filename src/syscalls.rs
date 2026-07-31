@@ -173,117 +173,135 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
 
     let number = frame.dispatch.user.rax as usize;
     let arguments = frame.dispatch.user.syscall_arguments();
-    let scheduled = match number {
-        grimoire::SYS_YIELD => {
-            LAST_YIELD_HINT.store(arguments[0], Ordering::Release);
-            YIELD_HITS.fetch_add(1, Ordering::AcqRel);
-            let scheduled = if let Some(ticket) = preemption::take_at_safe_point() {
-                let mut saved = frame.dispatch.user;
-                saved.set_syscall_result(0);
-                match crate::process::lifecycle::schedule_preempt(saved, ticket.authority) {
-                    Ok(scheduled) => {
-                        report_timer_preemption_service(ticket);
-                        Ok(scheduled)
-                    }
-                    Err(LifecycleError::StalePreemptionAuthority) => {
-                        preemption::record_stale();
-                        crate::process::lifecycle::schedule_yield(saved)
-                    }
-                    Err(error) => Err(error),
-                }
-            } else {
-                crate::process::lifecycle::schedule_yield(frame.dispatch.user)
-            };
-            match scheduled {
-                Ok(scheduled) => scheduled,
-                Err(_) => crate::arch::x86_64::halt(),
-            }
+    // A Linux process has a distinct syscall-number personality. Until the
+    // corresponding Linux implementations are admitted, fail closed with
+    // ENOSYS rather than letting a Linux number reach the native Aether table
+    // (where, for example, Linux `pread64` would otherwise be interpreted as
+    // Arach `yield`).
+    let scheduled = if crate::process::lifecycle::current_execution_abi().is_linux() {
+        let mut saved = frame.dispatch.user;
+        saved.set_syscall_result(dispatch_linux_syscall(number, arguments));
+        match crate::process::lifecycle::resume_current(saved) {
+            Ok(scheduled) => scheduled,
+            Err(_) => crate::arch::x86_64::halt(),
         }
-        grimoire::SYS_EXIT => {
-            EXIT_REQUESTS.fetch_add(1, Ordering::AcqRel);
-            preemption::retire_superseded();
-            let exiting = match crate::process::lifecycle::current_handle() {
-                Some(handle) => handle,
-                None => crate::arch::x86_64::halt(),
-            };
-            let decision = match crate::process::lifecycle::schedule_exit(arguments[0] as isize) {
-                Ok(decision) => decision,
-                Err(_) => crate::arch::x86_64::halt(),
-            };
-            match crate::process::service_registry::take_exited_service(exiting) {
-                Ok(Some(image)) => {
-                    if crate::process::runtime::defer_reap(image).is_err() {
-                        crate::arch::x86_64::halt();
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => crate::arch::x86_64::halt(),
-            }
-            match decision {
-                crate::process::lifecycle::ScheduleDecision::User(scheduled) => scheduled,
-                crate::process::lifecycle::ScheduleDecision::Pid0(mut idle) => loop {
-                    // SAFETY: `schedule_exit` selected PID0 at a serialized
-                    // syscall boundary. The immutable kernel root remains
-                    // reachable through the retiring process hierarchy.
-                    if unsafe { crate::process::runtime::enter_kernel_idle_and_reap() }.is_err() {
-                        crate::arch::x86_64::halt();
-                    }
-                    // SAFETY: SYSCALL entered with interrupts masked and the
-                    // inherited kernel mapping retains this frame. STI's
-                    // one-instruction shadow makes HLT atomic with respect to
-                    // maskable wakeups; CLI restores the serialized return
-                    // boundary before lifecycle state is inspected.
-                    unsafe {
-                        core::arch::asm!("sti", "hlt", "cli", options(nostack));
-                    }
-                    match crate::process::lifecycle::schedule_from_pid0(idle) {
-                        Ok(crate::process::lifecycle::ScheduleDecision::User(scheduled)) => {
-                            break scheduled;
+    } else {
+        match number {
+            grimoire::SYS_YIELD => {
+                LAST_YIELD_HINT.store(arguments[0], Ordering::Release);
+                YIELD_HITS.fetch_add(1, Ordering::AcqRel);
+                let scheduled = if let Some(ticket) = preemption::take_at_safe_point() {
+                    let mut saved = frame.dispatch.user;
+                    saved.set_syscall_result(0);
+                    match crate::process::lifecycle::schedule_preempt(saved, ticket.authority) {
+                        Ok(scheduled) => {
+                            report_timer_preemption_service(ticket);
+                            Ok(scheduled)
                         }
-                        Ok(crate::process::lifecycle::ScheduleDecision::Pid0(next)) => idle = next,
-                        Err(_) => crate::arch::x86_64::halt(),
+                        Err(LifecycleError::StalePreemptionAuthority) => {
+                            preemption::record_stale();
+                            crate::process::lifecycle::schedule_yield(saved)
+                        }
+                        Err(error) => Err(error),
                     }
-                },
-            }
-        }
-        _ => {
-            let result = match number {
-                grimoire::SYS_WRITE => write_from_user(arguments),
-                grimoire::SYS_SPAWN => spawn_measured_service(arguments),
-                grimoire::SYS_WAIT => wait_for_child_nohang(arguments),
-                grimoire::SYS_AEGIS_STATUS => aegis_status_for_current_crest(arguments),
-                grimoire::SYS_DISP_QUERY => kairos_query_to_user(arguments),
-                grimoire::SYS_DISP_LEASE => kairos_abi_to_user(arguments),
-                grimoire::SYS_DISP_PRESENT => present_current_crest(arguments),
-                grimoire::SYS_INPUT_NEXT => next_pointer_for_current_crest(arguments),
-                grimoire::SYS_INPUT_KEY_NEXT => next_key_for_current_crest(arguments),
-                grimoire::SYS_NEXUS_TELEMETRY => nexus_telemetry_to_user(arguments),
-                grimoire::SYS_NEXUS_CONTROL => nexus_control_from_user(arguments),
-                grimoire::SYS_NEXUS_ENTANGLE
-                | grimoire::SYS_NEXUS_STATS
-                | grimoire::SYS_NEXUS_POLICY => dispatch_scalar_nexus(number, arguments),
-                _ => ERROR_NOT_IMPLEMENTED,
-            };
-            let mut saved = frame.dispatch.user;
-            saved.set_syscall_result(result);
-            let scheduled = if let Some(ticket) = preemption::take_at_safe_point() {
-                match crate::process::lifecycle::schedule_preempt(saved, ticket.authority) {
-                    Ok(scheduled) => {
-                        report_timer_preemption_service(ticket);
-                        Ok(scheduled)
-                    }
-                    Err(LifecycleError::StalePreemptionAuthority) => {
-                        preemption::record_stale();
-                        crate::process::lifecycle::resume_current(saved)
-                    }
-                    Err(error) => Err(error),
+                } else {
+                    crate::process::lifecycle::schedule_yield(frame.dispatch.user)
+                };
+                match scheduled {
+                    Ok(scheduled) => scheduled,
+                    Err(_) => crate::arch::x86_64::halt(),
                 }
-            } else {
-                crate::process::lifecycle::resume_current(saved)
-            };
-            match scheduled {
-                Ok(scheduled) => scheduled,
-                Err(_) => crate::arch::x86_64::halt(),
+            }
+            grimoire::SYS_EXIT => {
+                EXIT_REQUESTS.fetch_add(1, Ordering::AcqRel);
+                preemption::retire_superseded();
+                let exiting = match crate::process::lifecycle::current_handle() {
+                    Some(handle) => handle,
+                    None => crate::arch::x86_64::halt(),
+                };
+                let decision = match crate::process::lifecycle::schedule_exit(arguments[0] as isize)
+                {
+                    Ok(decision) => decision,
+                    Err(_) => crate::arch::x86_64::halt(),
+                };
+                match crate::process::service_registry::take_exited_service(exiting) {
+                    Ok(Some(image)) => {
+                        if crate::process::runtime::defer_reap(image).is_err() {
+                            crate::arch::x86_64::halt();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => crate::arch::x86_64::halt(),
+                }
+                match decision {
+                    crate::process::lifecycle::ScheduleDecision::User(scheduled) => scheduled,
+                    crate::process::lifecycle::ScheduleDecision::Pid0(mut idle) => loop {
+                        // SAFETY: `schedule_exit` selected PID0 at a serialized
+                        // syscall boundary. The immutable kernel root remains
+                        // reachable through the retiring process hierarchy.
+                        if unsafe { crate::process::runtime::enter_kernel_idle_and_reap() }.is_err()
+                        {
+                            crate::arch::x86_64::halt();
+                        }
+                        // SAFETY: SYSCALL entered with interrupts masked and the
+                        // inherited kernel mapping retains this frame. STI's
+                        // one-instruction shadow makes HLT atomic with respect to
+                        // maskable wakeups; CLI restores the serialized return
+                        // boundary before lifecycle state is inspected.
+                        unsafe {
+                            core::arch::asm!("sti", "hlt", "cli", options(nostack));
+                        }
+                        match crate::process::lifecycle::schedule_from_pid0(idle) {
+                            Ok(crate::process::lifecycle::ScheduleDecision::User(scheduled)) => {
+                                break scheduled;
+                            }
+                            Ok(crate::process::lifecycle::ScheduleDecision::Pid0(next)) => {
+                                idle = next
+                            }
+                            Err(_) => crate::arch::x86_64::halt(),
+                        }
+                    },
+                }
+            }
+            _ => {
+                let result = match number {
+                    grimoire::SYS_WRITE => write_from_user(arguments),
+                    grimoire::SYS_SPAWN => spawn_measured_service(arguments),
+                    grimoire::SYS_WAIT => wait_for_child_nohang(arguments),
+                    grimoire::SYS_AEGIS_STATUS => aegis_status_for_current_crest(arguments),
+                    grimoire::SYS_DISP_QUERY => kairos_query_to_user(arguments),
+                    grimoire::SYS_DISP_LEASE => kairos_abi_to_user(arguments),
+                    grimoire::SYS_DISP_PRESENT => present_current_crest(arguments),
+                    grimoire::SYS_INPUT_NEXT => next_pointer_for_current_crest(arguments),
+                    grimoire::SYS_INPUT_KEY_NEXT => next_key_for_current_crest(arguments),
+                    grimoire::SYS_NEXUS_TELEMETRY => nexus_telemetry_to_user(arguments),
+                    grimoire::SYS_NEXUS_CONTROL => nexus_control_from_user(arguments),
+                    grimoire::SYS_NEXUS_ENTANGLE
+                    | grimoire::SYS_NEXUS_STATS
+                    | grimoire::SYS_NEXUS_POLICY => dispatch_scalar_nexus(number, arguments),
+                    _ => ERROR_NOT_IMPLEMENTED,
+                };
+                let mut saved = frame.dispatch.user;
+                saved.set_syscall_result(result);
+                let scheduled = if let Some(ticket) = preemption::take_at_safe_point() {
+                    match crate::process::lifecycle::schedule_preempt(saved, ticket.authority) {
+                        Ok(scheduled) => {
+                            report_timer_preemption_service(ticket);
+                            Ok(scheduled)
+                        }
+                        Err(LifecycleError::StalePreemptionAuthority) => {
+                            preemption::record_stale();
+                            crate::process::lifecycle::resume_current(saved)
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    crate::process::lifecycle::resume_current(saved)
+                };
+                match scheduled {
+                    Ok(scheduled) => scheduled,
+                    Err(_) => crate::arch::x86_64::halt(),
+                }
             }
         }
     };
@@ -293,6 +311,20 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
     let _ = crate::nexus_deferred::run_deferred(1);
     if install_scheduled_return(frame, scheduled).is_err() {
         crate::arch::x86_64::halt();
+    }
+}
+
+#[cfg(target_os = "none")]
+fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
+    match crate::process::abi::LinuxSyscall::from_number(number) {
+        // The bounded serial write has the same first three scalar arguments
+        // on x86-64 Linux and Arach. Keeping this one implementation useful
+        // lets a statically linked probe report that the Linux personality is
+        // actually selected, while every other call remains explicit until
+        // its Linux semantics are implemented and tested.
+        Some(crate::process::abi::LinuxSyscall::Write) => write_from_user(arguments),
+        Some(_) => ERROR_NOT_IMPLEMENTED,
+        None => ERROR_NOT_IMPLEMENTED,
     }
 }
 

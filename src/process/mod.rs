@@ -1,3 +1,4 @@
+pub mod abi;
 pub mod context;
 pub mod image;
 pub mod install;

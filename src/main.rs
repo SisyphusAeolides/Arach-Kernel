@@ -3858,6 +3858,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         capability_root: crest_package.capability_root,
         service_class: CREST_SERVICE_CLASS,
         priority: 1,
+        abi: arach::process::abi::ExecutionAbi::ArachNative,
     };
     if let Err(error) = service_registry::install_crest(crest_launch, installed_crest.process) {
         let _ = writeln!(serial, "Arach: Crest launch registry failed: {error:?}");
@@ -3886,6 +3887,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
             capability_root: roots.capability_root,
             service_class: manifest.service_class,
             priority: 1,
+            abi: arach::process::abi::ExecutionAbi::ArachNative,
         };
         if let Err(error) = service_registry::install_service(launch, service.process) {
             let _ = writeln!(
@@ -3913,6 +3915,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         capability_root,
         service_class: 1,
         priority: u8::MAX,
+        abi: arach::process::abi::ExecutionAbi::ArachNative,
     };
     let pid1_handle = match lifecycle::register_init(pid1_launch) {
         Ok(handle) => handle,

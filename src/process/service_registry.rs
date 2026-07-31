@@ -254,6 +254,7 @@ mod tests {
             capability_root: 2,
             service_class,
             priority: 1,
+            abi: crate::process::abi::ExecutionAbi::ArachNative,
         }
     }
 

@@ -6,6 +6,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::abi::ExecutionAbi;
 use super::context::{
     AuthorizedUserReturn, DispatchContext, SavedUserContext, valid_kernel_stack_pointer,
     valid_page_table_root, valid_user_address,
@@ -43,6 +44,10 @@ pub struct ProcessLaunch {
     pub capability_root: u64,
     pub service_class: u16,
     pub priority: u8,
+    /// Immutable syscall personality selected by the measured image
+    /// admission path. Native Arach services must never be dispatched as
+    /// Linux processes (or vice versa).
+    pub abi: ExecutionAbi,
 }
 
 impl ProcessLaunch {
@@ -200,6 +205,7 @@ impl ProcessSlot {
             capability_root: 0,
             service_class: 0,
             priority: 0,
+            abi: ExecutionAbi::ArachNative,
         },
         context: SavedUserContext::EMPTY,
         exit_code: 0,
@@ -342,6 +348,16 @@ pub fn current_pid() -> u32 {
 
 pub fn current_handle() -> Option<ProcessHandle> {
     ProcessHandle::decode(CURRENT_EXECUTION.load(Ordering::Acquire))
+}
+
+/// Returns the ABI of the currently running process from the exact lifecycle
+/// slot. A missing or recycled handle fails closed to the native personality;
+/// callers that need a user return must still validate the lifecycle authority.
+pub fn current_execution_abi() -> ExecutionAbi {
+    current_handle()
+        .and_then(snapshot_exact)
+        .map(|snapshot| snapshot.launch.abi)
+        .unwrap_or(ExecutionAbi::ArachNative)
 }
 
 /// Returns a bounded, allocation-free execution snapshot suitable for IRQ
@@ -929,6 +945,7 @@ mod tests {
             capability_root: seed.max(1),
             service_class: seed as u16,
             priority: 10,
+            abi: ExecutionAbi::ArachNative,
         }
     }
 
@@ -1056,6 +1073,23 @@ mod tests {
         assert_eq!(current_pid(), NO_PID);
         assert_eq!(current_handle(), None);
         assert_eq!(snapshot(init.pid).unwrap().phase, ProcessPhase::Zombie);
+    }
+
+    #[test]
+    fn current_execution_abi_is_taken_from_the_exact_running_launch() {
+        let _serial = TEST_SERIALIZATION.lock();
+        reset_lifecycle();
+
+        let linux = ProcessLaunch {
+            abi: ExecutionAbi::LinuxX86_64,
+            ..launch(1)
+        };
+        let init = register_init(linux).unwrap();
+        mark_running(init).unwrap();
+        assert_eq!(current_execution_abi(), ExecutionAbi::LinuxX86_64);
+
+        reset_lifecycle();
+        assert_eq!(current_execution_abi(), ExecutionAbi::ArachNative);
     }
 
     #[test]

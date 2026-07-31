@@ -20,7 +20,7 @@ compatibility the critical path:
 | Gate | Kernel or system contract | Acceptance evidence |
 |---|---|---|
 | C0 | Reproducible Arach boot, allocator, interrupts, scheduler, Ring 3, syscall entry | QEMU serial transcript and deterministic image digest |
-| C1 | Static ELF processes, virtual memory, files, directories, clocks, signals, threads, TLS, futex | libc ABI probes and Linux Test Project subset |
+| C1 | Static ELF processes, virtual memory, files, directories, clocks, signals, threads, TLS, futex, and an explicit Linux x86-64 syscall personality | libc ABI probes and Linux Test Project subset; an unimplemented Linux call must return `ENOSYS` and must never enter Aether dispatch |
 | C2 | Dynamic ELF, shared objects, `mmap`, `poll`, `epoll`, `eventfd`, `timerfd`, `inotify`, Unix sockets | unmodified dynamic Rust and C test programs |
 | C3 | `/dev`, `/proc`, `/sys`, device numbers, uevents, permissions, seats | udev/libseat discovery tests |
 | C4 | evdev plus the libinput ioctl surface | libinput-rs running upstream libinput behavioral tests with uinput fixtures |
@@ -76,7 +76,9 @@ PipeWire, GStreamer, and many transitive dependencies; that would no longer be
 an unmodified COSMIC compatibility target.
 
 Slope remains useful as Arach's typed internal ABI and as the source for
-generated Linux-compatibility adapters. Linux compatibility must preserve
+generated Linux-compatibility adapters. A process launch now carries an
+immutable execution personality, so Linux syscall numbers cannot be confused
+with Aether numbers. Linux compatibility must preserve
 observable errno values, structure layouts, ioctl encodings, readiness rules,
 object lifetime, and concurrency semantics.
 
