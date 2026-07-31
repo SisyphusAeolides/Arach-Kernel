@@ -31,6 +31,7 @@ jobs:
             python3 scripts/patch-workspace-clippy.py
             python3 scripts/patch-msrv-atomic.py
             python3 scripts/patch-driver-abi-clippy.py
+            python3 scripts/patch-driver-test-clippy.py
           fi
       - run: cargo fmt --all
       - run: cargo fmt --all -- --check
