@@ -35,7 +35,31 @@ jobs:
           fi
       - run: cargo fmt --all
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Strict workspace clippy
+        run: |
+          set +e
+          mkdir -p target
+          cargo clippy --workspace --all-targets -- -D warnings >target/strict-clippy.log 2>&1
+          status=$?
+          if test "$status" -ne 0; then
+            python3 - <<'PY'
+          from pathlib import Path
+
+          lines = Path("target/strict-clippy.log").read_text(errors="replace").splitlines()
+          selected = []
+          for index, line in enumerate(lines):
+              if "error" in line.lower() or "-->" in line or "could not compile" in line:
+                  start = max(0, index - 1)
+                  end = min(len(lines), index + 5)
+                  selected.extend(lines[start:end])
+          compact = []
+          for line in selected:
+              if not compact or compact[-1] != line:
+                  compact.append(line)
+          print("\n".join(compact[-240:]))
+          PY
+          fi
+          exit "$status"
       - run: cargo test --workspace --all-targets
       - run: git diff --check
       - name: Verify production-only patch scope
