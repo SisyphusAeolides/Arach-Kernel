@@ -107,8 +107,8 @@ ARACH_PUSH_ROOT=/path/to/Push \
 ARACH_GRANITE_ROOT=/path/to/Granite \
     scripts/build-c0-bundle.sh
 
-# Native COSMIC production bundle. The directory must contain all five
-# target-compatible ELF service images.
+# Native COSMIC production bundle. The directory must contain all eight
+# target-compatible seat, audio, D-Bus, and desktop ELF service images.
 ARACH_PUSH_ROOT=/path/to/Push \
 ARACH_GRANITE_ROOT=/path/to/Granite \
 ARACH_COSMIC_SERVICES_DIR=/path/to/cosmic-services \
@@ -132,11 +132,13 @@ logout—not just a compositor process. The first acceptance target will be a
 pinned COSMIC Epoch release running under QEMU with virtio graphics, input,
 storage, audio, and networking before qualification expands to real hardware.
 
-`scripts/build-desktop-bundle.sh` is fail-closed: it requires
-`dbus-broker`, `cosmic-comp`, `cosmic-greeter`, `cosmic-session`, and
-`xdg-desktop-portal-cosmic` as target-compatible ELF images, enables Push's
-`cosmic-boot` service graph, and measures the same five images in Arach and
-Granite. It never downloads or silently substitutes host COSMIC binaries.
+`scripts/build-desktop-bundle.sh` is fail-closed: it requires `seatd`,
+`pipewire`, `wireplumber`, `dbus-broker`, `cosmic-comp`, `cosmic-greeter`,
+`cosmic-session`, and `xdg-desktop-portal-cosmic` as target-compatible ELF
+images. It enables Push's `cosmic-boot` service graph, measures the five
+native boot services in Arach and Granite, and retains the seat/audio images
+for publication into the target root. It never downloads or silently
+substitutes host COSMIC binaries.
 
 The kernel and module boundaries are governed by the
 [Linux kernel compatibility contract](docs/LINUX_KERNEL_CONTRACT.md). External

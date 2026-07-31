@@ -6,7 +6,7 @@ set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 push_root="${ARACH_PUSH_ROOT:?set ARACH_PUSH_ROOT to the Push checkout}"
 granite_root="${ARACH_GRANITE_ROOT:?set ARACH_GRANITE_ROOT to the Granite checkout}"
-cosmic_root="${ARACH_COSMIC_SERVICES_DIR:?set ARACH_COSMIC_SERVICES_DIR to five target-compatible COSMIC ELF images}"
+cosmic_root="${ARACH_COSMIC_SERVICES_DIR:?set ARACH_COSMIC_SERVICES_DIR to eight target-compatible COSMIC seat, audio, D-Bus, and desktop ELF images}"
 cargo_bin="${CARGO:-cargo}"
 target="$root/x86_64-arach.json"
 build_root="${ARACH_DESKTOP_BUILD_ROOT:-$root/target/desktop}"
@@ -22,6 +22,9 @@ test -d "$cosmic_root"
 }
 
 cosmic_artifacts=(
+    seatd
+    pipewire
+    wireplumber
     dbus-broker
     cosmic-comp
     cosmic-greeter

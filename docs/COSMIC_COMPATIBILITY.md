@@ -109,8 +109,11 @@ semantics are implemented and tested.
 Push stays in userspace. It can replace systemd as PID 1 only if it provides or
 hosts the contracts COSMIC actually observes: service supervision, user-session
 activation, environment import, D-Bus activation, seat/session ownership,
-power transitions, logging, and deterministic shutdown. Compatibility tests,
-not command-name similarity, decide when that work is complete.
+PipeWire/WirePlumber audio policy, power transitions, logging, and deterministic
+shutdown. The measured desktop chain now admits `seatd`, `dbus-broker`,
+`pipewire`, `wireplumber`, `cosmic-comp`, `cosmic-greeter`, `cosmic-session`,
+and `xdg-desktop-portal-cosmic` in dependency order. Compatibility tests, not
+command-name similarity, decide when that work is complete.
 
 ## Multi-language rules
 
