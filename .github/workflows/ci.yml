@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: SisyphusAeolides/Granite
-          ref: cc717de31e6946457e2bb43fe5fa188335c5ef51
+          ref: 2ceca668a0b03b8bfe301c9342e856bfc176e5e8
           path: target/c0-sources/granite
       - run: sudo apt-get update && sudo apt-get install -y build-essential chezscheme dosfstools gfortran libgmp-dev mtools xz-utils curl
       - uses: dtolnay/rust-toolchain@master
