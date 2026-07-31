@@ -3684,6 +3684,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
             halt();
         }
     };
+    interrupts::set_monotonic_tick_period(timer.period_milliseconds);
     interrupts::enable();
     for _ in 0..100_000_000 {
         if interrupts::apic_timer_hits() >= 2 {

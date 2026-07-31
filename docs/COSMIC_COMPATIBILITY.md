@@ -83,8 +83,11 @@ observable errno values, structure layouts, ioctl encodings, readiness rules,
 object lifetime, and concurrency semantics.
 
 The first Linux personality slice is now exercised by the measured C0 probe:
-`write`, `getpid`, `getppid`, `gettid`, `exit`, and `exit_group` are routed
-through the existing bounded user-copy and generation-safe lifecycle paths.
+`write`, `getpid`, `getppid`, `gettid`, `clock_gettime(CLOCK_MONOTONIC)`,
+`uname`, `exit`, and `exit_group` are routed through the existing bounded
+user-copy and generation-safe lifecycle paths. The monotonic clock is advanced
+by the calibrated periodic timer rather than exposing an unscaled TSC, and the
+initial single-root credential calls return the authenticated boot identity.
 Anonymous private `mmap`/exact-range `munmap` and the bounded `brk` heap
 allocate and reclaim real zeroed user pages with W^X checks; the probe writes
 and reads a returned page before unmapping it. File-backed mappings,

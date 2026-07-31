@@ -50,6 +50,34 @@ const MAXIMUM_CREST_PRESENT_BYTES: usize = 1024 * 1024;
 #[cfg(target_os = "none")]
 const COM1: u16 = 0x3f8;
 
+#[cfg(any(target_os = "none", test))]
+const UTS_FIELD_BYTES: usize = 65;
+
+/// Linux's fixed-size `struct timespec` wire layout.  Keeping this separate
+/// from any Rust time type makes the copy-to-user boundary explicit.
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinuxTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+/// Linux's fixed-size `struct utsname` wire layout (six 65-byte fields).
+/// Values are intentionally compile-time, bounded identity data until the
+/// device tree and kernel-release providers are available to userspace.
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinuxUtsName {
+    sysname: [u8; UTS_FIELD_BYTES],
+    nodename: [u8; UTS_FIELD_BYTES],
+    release: [u8; UTS_FIELD_BYTES],
+    version: [u8; UTS_FIELD_BYTES],
+    machine: [u8; UTS_FIELD_BYTES],
+    domainname: [u8; UTS_FIELD_BYTES],
+}
+
 static YIELD_HITS: AtomicUsize = AtomicUsize::new(0);
 static LAST_YIELD_HINT: AtomicU64 = AtomicU64::new(0);
 static WRITE_HITS: AtomicUsize = AtomicUsize::new(0);
@@ -344,6 +372,18 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
                 .map(|snapshot| snapshot.parent as isize)
                 .unwrap_or(-3)
         }
+        Some(crate::process::abi::LinuxSyscall::Uname) => linux_uname(arguments),
+        Some(crate::process::abi::LinuxSyscall::Getuid)
+        | Some(crate::process::abi::LinuxSyscall::Getgid)
+        | Some(crate::process::abi::LinuxSyscall::Geteuid)
+        | Some(crate::process::abi::LinuxSyscall::Getegid) => {
+            // Arach's initial boot image has one authenticated root identity.
+            // Returning that identity is useful to libc while account/PAM
+            // services are still being brought up; it is not a claim that
+            // multi-user credentials are implemented.
+            0
+        }
+        Some(crate::process::abi::LinuxSyscall::ClockGettime) => linux_clock_gettime(arguments),
         Some(crate::process::abi::LinuxSyscall::Mmap) => linux_mmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Munmap) => linux_munmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Brk) => linux_brk(arguments),
@@ -421,6 +461,65 @@ fn linux_brk(arguments: [u64; 6]) -> isize {
             .and_then(|address| isize::try_from(address).ok())
             .unwrap_or(ERROR_INVALID_ARGUMENT),
     }
+}
+
+#[cfg(target_os = "none")]
+fn linux_clock_gettime(arguments: [u64; 6]) -> isize {
+    const CLOCK_MONOTONIC: u64 = 1;
+    if arguments[0] != CLOCK_MONOTONIC {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let (seconds, nanoseconds) =
+        split_monotonic_nanoseconds(crate::interrupts::monotonic_nanoseconds());
+    let value = LinuxTimespec {
+        tv_sec: seconds,
+        tv_nsec: nanoseconds,
+    };
+    if copy_value_to_user(arguments[1], &value).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_uname(arguments: [u64; 6]) -> isize {
+    if arguments[1..].iter().any(|argument| *argument != 0) {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let mut value = LinuxUtsName {
+        sysname: [0; UTS_FIELD_BYTES],
+        nodename: [0; UTS_FIELD_BYTES],
+        release: [0; UTS_FIELD_BYTES],
+        version: [0; UTS_FIELD_BYTES],
+        machine: [0; UTS_FIELD_BYTES],
+        domainname: [0; UTS_FIELD_BYTES],
+    };
+    write_uts_field(&mut value.sysname, b"Arach");
+    write_uts_field(&mut value.nodename, b"arach");
+    write_uts_field(&mut value.release, b"0.1.0-arach");
+    write_uts_field(&mut value.version, b"Arach Kernel");
+    write_uts_field(&mut value.machine, b"x86_64");
+    write_uts_field(&mut value.domainname, b"(none)");
+    if copy_value_to_user(arguments[0], &value).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "none")]
+fn write_uts_field(field: &mut [u8; UTS_FIELD_BYTES], value: &[u8]) {
+    let length = core::cmp::min(value.len(), field.len().saturating_sub(1));
+    field[..length].copy_from_slice(&value[..length]);
+}
+
+#[cfg(any(target_os = "none", test))]
+const fn split_monotonic_nanoseconds(value: u64) -> (i64, i64) {
+    (
+        (value / 1_000_000_000) as i64,
+        (value % 1_000_000_000) as i64,
+    )
 }
 
 #[cfg(target_os = "none")]
@@ -800,7 +899,7 @@ const fn valid_user_control_address(address: u64) -> bool {
 
 #[cfg(target_os = "none")]
 fn write_from_user(arguments: [u64; 6]) -> isize {
-    if arguments[0] != 1 {
+    if arguments[0] != 1 && arguments[0] != 2 {
         return ERROR_BAD_FILE_DESCRIPTOR;
     }
     let Ok(length) = usize::try_from(arguments[2]) else {
@@ -1207,6 +1306,17 @@ mod tests {
             Ok(next.authorized_return())
         );
         assert_eq!(frame, next.authorized_return());
+    }
+
+    #[test]
+    fn monotonic_clock_split_preserves_seconds_and_subseconds() {
+        assert_eq!(split_monotonic_nanoseconds(2_345_678_901), (2, 345_678_901));
+    }
+
+    #[test]
+    fn utsname_wire_layout_matches_linux() {
+        assert_eq!(core::mem::size_of::<LinuxUtsName>(), 390);
+        assert_eq!(core::mem::size_of::<LinuxTimespec>(), 16);
     }
 
     fn encoded_tss_descriptor(base: u64, limit: u32, present: bool, kind: u64) -> (u64, u64) {

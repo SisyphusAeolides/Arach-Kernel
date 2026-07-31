@@ -12,14 +12,29 @@ const SYS_MMAP: usize = 9;
 const SYS_MUNMAP: usize = 11;
 const SYS_BRK: usize = 12;
 const SYS_GETPID: usize = 39;
+const SYS_UNAME: usize = 63;
+const SYS_GETUID: usize = 102;
+const SYS_GETGID: usize = 104;
 const SYS_GETPPID: usize = 110;
 const SYS_GETTID: usize = 186;
+const SYS_CLOCK_GETTIME: usize = 228;
 const SYS_EXIT_GROUP: usize = 231;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const MAP_PRIVATE: usize = 0x02;
 const MAP_ANONYMOUS: usize = 0x20;
+
+#[repr(C)]
+struct LinuxTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+#[repr(C)]
+struct LinuxUtsName {
+    fields: [[u8; 65]; 6],
+}
 
 #[inline(always)]
 unsafe fn linux_syscall1(number: usize, arg0: usize) -> isize {
@@ -121,7 +136,28 @@ pub extern "C" fn _start() -> ! {
     let pid = unsafe { linux_syscall1(SYS_GETPID, 0) };
     let tid = unsafe { linux_syscall1(SYS_GETTID, 0) };
     let ppid = unsafe { linux_syscall1(SYS_GETPPID, 0) };
-    if !passed(pid) || tid != pid || ppid != 1 {
+    let uid = unsafe { linux_syscall1(SYS_GETUID, 0) };
+    let gid = unsafe { linux_syscall1(SYS_GETGID, 0) };
+    if !passed(pid) || tid != pid || ppid != 1 || uid != 0 || gid != 0 {
+        fail();
+    }
+
+    // The kernel's monotonic clock is advanced from the calibrated periodic
+    // timer, and uname is a fixed-size Linux wire object rather than a Rust
+    // string crossing the boundary.
+    let mut clock = LinuxTimespec {
+        tv_sec: -1,
+        tv_nsec: -1,
+    };
+    let mut identity = LinuxUtsName { fields: [[0; 65]; 6] };
+    if unsafe {
+        linux_syscall3(SYS_CLOCK_GETTIME, 1, &mut clock as *mut _ as usize, 0)
+    } != 0
+        || clock.tv_sec < 0
+        || !(0..1_000_000_000).contains(&clock.tv_nsec)
+        || unsafe { linux_syscall3(SYS_UNAME, &mut identity as *mut _ as usize, 0, 0) } != 0
+        || !identity.fields[0].starts_with(b"Arach")
+    {
         fail();
     }
 

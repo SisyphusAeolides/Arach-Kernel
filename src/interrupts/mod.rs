@@ -10,7 +10,7 @@ pub mod synaptic;
 use core::fmt::Write;
 #[cfg(target_os = "none")]
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::halt;
 use crate::serial::SerialPort;
@@ -35,6 +35,11 @@ static BREAKPOINT_HITS: AtomicUsize = AtomicUsize::new(0);
 static USER_PROBE_HITS: AtomicUsize = AtomicUsize::new(0);
 static APIC_TEST_HITS: AtomicUsize = AtomicUsize::new(0);
 static APIC_TIMER_HITS: AtomicUsize = AtomicUsize::new(0);
+/// Monotonic time exported to the Linux personality.  The counter advances
+/// only from the calibrated periodic timer interrupt; it never uses a raw
+/// TSC value whose frequency or reset epoch userspace could not observe.
+static MONOTONIC_NANOS: AtomicU64 = AtomicU64::new(0);
+static MONOTONIC_TICK_NANOS: AtomicU64 = AtomicU64::new(10_000_000);
 static IST_PROBE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static IST_PROBE_HITS: AtomicUsize = AtomicUsize::new(0);
 
@@ -156,6 +161,21 @@ pub fn apic_timer_hits() -> usize {
     APIC_TIMER_HITS.load(Ordering::Relaxed)
 }
 
+/// Publishes the period of the timer that drives the scheduler.  This is
+/// called immediately after the APIC timer transitions to periodic mode so
+/// `clock_gettime(CLOCK_MONOTONIC)` and scheduler accounting share one epoch.
+pub fn set_monotonic_tick_period(period_milliseconds: u32) {
+    let nanos = u64::from(period_milliseconds).saturating_mul(1_000_000);
+    if nanos != 0 {
+        MONOTONIC_TICK_NANOS.store(nanos, Ordering::Release);
+    }
+}
+
+/// Returns the kernel monotonic clock in nanoseconds since the timer epoch.
+pub fn monotonic_nanoseconds() -> u64 {
+    MONOTONIC_NANOS.load(Ordering::Acquire)
+}
+
 /// Maps and initializes every I/O APIC described by ACPI.
 ///
 /// # Safety
@@ -265,6 +285,11 @@ extern "C" fn arach_interrupt_dispatch(frame: *mut InterruptFrame) -> usize {
         }
         49 => {
             APIC_TIMER_HITS.fetch_add(1, Ordering::Relaxed);
+
+            MONOTONIC_NANOS.fetch_add(
+                MONOTONIC_TICK_NANOS.load(Ordering::Acquire),
+                Ordering::Relaxed,
+            );
 
             let wall_tick = <crate::arch::Active as crate::arch::Architecture>::counter_sample();
 
