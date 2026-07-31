@@ -18,6 +18,28 @@ use crate::sync::SpinLock;
 use aether::grimoire;
 
 const ERROR_BAD_FILE_DESCRIPTOR: isize = -9;
+#[cfg(any(target_os = "none", test))]
+const ERROR_NO_ENTRY: isize = -2;
+#[cfg(any(target_os = "none", test))]
+const ERROR_IO: isize = -5;
+#[cfg(any(target_os = "none", test))]
+const ERROR_PERMISSION_DENIED: isize = -13;
+#[cfg(any(target_os = "none", test))]
+const ERROR_BUSY: isize = -16;
+#[cfg(any(target_os = "none", test))]
+const ERROR_ALREADY_EXISTS: isize = -17;
+#[cfg(any(target_os = "none", test))]
+const ERROR_NOT_DIRECTORY: isize = -20;
+#[cfg(any(target_os = "none", test))]
+const ERROR_IS_DIRECTORY: isize = -21;
+#[cfg(any(target_os = "none", test))]
+const ERROR_FILE_TOO_LARGE: isize = -27;
+#[cfg(any(target_os = "none", test))]
+const ERROR_NO_SPACE: isize = -28;
+#[cfg(any(target_os = "none", test))]
+const ERROR_DIRECTORY_NOT_EMPTY: isize = -39;
+#[cfg(any(target_os = "none", test))]
+const ERROR_NOT_SUPPORTED: isize = -95;
 #[cfg(target_os = "none")]
 const ERROR_TRY_AGAIN: isize = -11;
 #[cfg(target_os = "none")]
@@ -45,6 +67,8 @@ const ENTRY_HUGE: u64 = 1 << 7;
 #[cfg(target_os = "none")]
 const MAXIMUM_WRITE_BYTES: usize = 256;
 #[cfg(target_os = "none")]
+const MAXIMUM_AKASHIC_IO_BYTES: usize = 4096;
+#[cfg(target_os = "none")]
 const MAXIMUM_LINUX_POLL_FDS: usize = 64;
 #[cfg(target_os = "none")]
 const LINUX_POLLERR: u16 = 0x008;
@@ -62,6 +86,54 @@ const COM1: u16 = 0x3f8;
 
 #[cfg(any(target_os = "none", test))]
 const UTS_FIELD_BYTES: usize = 65;
+
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AkashicRawStat {
+    size_bytes: u64,
+    created_ticks: u64,
+    modified_ticks: u64,
+    flags: u32,
+    kind: u8,
+    reserved: [u8; 3],
+}
+
+#[cfg(any(target_os = "none", test))]
+impl From<crate::akashic_vfs::Stat> for AkashicRawStat {
+    fn from(value: crate::akashic_vfs::Stat) -> Self {
+        Self {
+            size_bytes: value.size_bytes,
+            created_ticks: value.created_ticks,
+            modified_ticks: value.modified_ticks,
+            flags: value.flags,
+            kind: value.kind as u8,
+            reserved: [0; 3],
+        }
+    }
+}
+
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AkashicRawDirent {
+    name: [u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES],
+    name_len: u8,
+    kind: u8,
+    reserved: [u8; 6],
+}
+
+#[cfg(any(target_os = "none", test))]
+impl From<crate::akashic_vfs::Dirent> for AkashicRawDirent {
+    fn from(value: crate::akashic_vfs::Dirent) -> Self {
+        Self {
+            name: value.name,
+            name_len: value.name_len,
+            kind: value.kind as u8,
+            reserved: [0; 6],
+        }
+    }
+}
 
 /// Linux's fixed-size `struct timespec` wire layout.  Keeping this separate
 /// from any Rust time type makes the copy-to-user boundary explicit.
@@ -106,6 +178,9 @@ static CREST_POINTER_DELIVERY_REPORTED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "none")]
 static CREST_PRESENT_STAGING: SpinLock<[u8; MAXIMUM_CREST_PRESENT_BYTES]> =
     SpinLock::new([0; MAXIMUM_CREST_PRESENT_BYTES]);
+#[cfg(target_os = "none")]
+static AKASHIC_IO_STAGING: SpinLock<[u8; MAXIMUM_AKASHIC_IO_BYTES]> =
+    SpinLock::new([0; MAXIMUM_AKASHIC_IO_BYTES]);
 
 /// The syscall entry frame combines the complete user register image with the
 /// generation and epoch authority selected by the lifecycle scheduler.
@@ -273,6 +348,16 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
             _ => {
                 let result = match number {
                     grimoire::SYS_WRITE => write_from_user(arguments),
+                    grimoire::SYS_AOPEN => akashic_open_from_user(arguments),
+                    grimoire::SYS_AREAD => akashic_read_to_user(arguments),
+                    grimoire::SYS_AWRITE => akashic_write_from_user(arguments),
+                    grimoire::SYS_ACLOSE => akashic_close(arguments),
+                    grimoire::SYS_ASEEK => akashic_seek(arguments),
+                    grimoire::SYS_AMKDIR => akashic_mkdir_from_user(arguments),
+                    grimoire::SYS_AUNLINK => akashic_unlink_from_user(arguments),
+                    grimoire::SYS_ARENAME => akashic_rename_from_user(arguments),
+                    grimoire::SYS_AREADDIR => akashic_readdir_to_user(arguments),
+                    grimoire::SYS_ASTAT => akashic_stat_to_user(arguments),
                     grimoire::SYS_SPAWN => spawn_measured_service(arguments),
                     grimoire::SYS_WAIT => wait_for_child_nohang(arguments),
                     grimoire::SYS_AEGIS_STATUS => aegis_status_for_current_crest(arguments),
@@ -329,6 +414,7 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         Some(handle) => handle,
         None => crate::arch::x86_64::halt(),
     };
+    let _ = crate::akashic_vfs::close_all(exiting);
     // Linux descriptors are process-owned. Reclaim the bounded eventfd set
     // before publishing the zombie transition so an exiting service cannot
     // leak wake objects into a later PID generation.
@@ -1404,6 +1490,272 @@ fn wait_for_child_nohang(arguments: [u64; 6]) -> isize {
     }
 }
 
+#[cfg(any(target_os = "none", test))]
+fn map_akashic_error(error: crate::akashic_vfs::VfsError) -> isize {
+    match error {
+        crate::akashic_vfs::VfsError::NotFound => ERROR_NO_ENTRY,
+        crate::akashic_vfs::VfsError::AlreadyExists => ERROR_ALREADY_EXISTS,
+        crate::akashic_vfs::VfsError::PermissionDenied => ERROR_PERMISSION_DENIED,
+        crate::akashic_vfs::VfsError::NotDirectory => ERROR_NOT_DIRECTORY,
+        crate::akashic_vfs::VfsError::NotFile => ERROR_IS_DIRECTORY,
+        crate::akashic_vfs::VfsError::DirectoryNotEmpty => ERROR_DIRECTORY_NOT_EMPTY,
+        crate::akashic_vfs::VfsError::InvalidPath | crate::akashic_vfs::VfsError::InvalidSeek => {
+            ERROR_INVALID_ARGUMENT
+        }
+        crate::akashic_vfs::VfsError::InvalidHandle => ERROR_BAD_FILE_DESCRIPTOR,
+        crate::akashic_vfs::VfsError::Capacity => ERROR_NO_SPACE,
+        crate::akashic_vfs::VfsError::FileTooLarge => ERROR_FILE_TOO_LARGE,
+        crate::akashic_vfs::VfsError::Busy => ERROR_BUSY,
+        crate::akashic_vfs::VfsError::Unsupported => ERROR_NOT_SUPPORTED,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn current_akashic_owner() -> Result<crate::process::lifecycle::ProcessHandle, isize> {
+    crate::process::lifecycle::current_handle().ok_or(ERROR_PERMISSION_DENIED)
+}
+
+#[cfg(target_os = "none")]
+fn copy_akashic_path<'a>(
+    pointer: u64,
+    length: u64,
+    staging: &'a mut [u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES],
+) -> Result<&'a [u8], isize> {
+    let length = usize::try_from(length).map_err(|_| ERROR_INVALID_ARGUMENT)?;
+    if length == 0 || length > staging.len() {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    copy_from_user(pointer, &mut staging[..length]).map_err(|_| ERROR_BAD_ADDRESS)?;
+    Ok(&staging[..length])
+}
+
+#[cfg(target_os = "none")]
+fn akashic_open_from_user(arguments: [u64; 6]) -> isize {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let Ok(open_flags) = u32::try_from(arguments[2]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let mut path = [0_u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES];
+    let path = match copy_akashic_path(arguments[0], arguments[1], &mut path) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    match crate::akashic_vfs::open(
+        owner,
+        path,
+        open_flags,
+        crate::interrupts::monotonic_nanoseconds(),
+    ) {
+        Ok(handle) => isize::try_from(handle).unwrap_or(ERROR_IO),
+        Err(error) => map_akashic_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn akashic_close(arguments: [u64; 6]) -> isize {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::akashic_vfs::close(owner, arguments[0]) {
+        Ok(()) => 0,
+        Err(error) => map_akashic_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn akashic_read_to_user(arguments: [u64; 6]) -> isize {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let requested = match usize::try_from(arguments[2]) {
+        Ok(requested) => requested,
+        Err(_) => return ERROR_INVALID_ARGUMENT,
+    };
+    let length = core::cmp::min(requested, MAXIMUM_AKASHIC_IO_BYTES);
+    if length == 0 {
+        return 0;
+    }
+    if validate_user_write_range(arguments[1], length).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    let mut staging = AKASHIC_IO_STAGING.lock();
+    match crate::akashic_vfs::read(owner, arguments[0], &mut staging[..length]) {
+        Ok(copied) => {
+            if copy_to_user(arguments[1], &staging[..copied]).is_err() {
+                ERROR_BAD_ADDRESS
+            } else {
+                copied as isize
+            }
+        }
+        Err(error) => map_akashic_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn akashic_write_from_user(arguments: [u64; 6]) -> isize {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let requested = match usize::try_from(arguments[2]) {
+        Ok(requested) => requested,
+        Err(_) => return ERROR_INVALID_ARGUMENT,
+    };
+    let length = core::cmp::min(requested, MAXIMUM_AKASHIC_IO_BYTES);
+    if length == 0 {
+        return 0;
+    }
+    let mut staging = AKASHIC_IO_STAGING.lock();
+    if copy_from_user(arguments[1], &mut staging[..length]).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    match crate::akashic_vfs::write(
+        owner,
+        arguments[0],
+        &staging[..length],
+        crate::interrupts::monotonic_nanoseconds(),
+    ) {
+        Ok(written) => written as isize,
+        Err(error) => map_akashic_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn akashic_seek(arguments: [u64; 6]) -> isize {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let Ok(whence) = u32::try_from(arguments[2]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    match crate::akashic_vfs::seek(owner, arguments[0], arguments[1] as i64, whence) {
+        Ok(position) => isize::try_from(position).unwrap_or(ERROR_INVALID_ARGUMENT),
+        Err(error) => map_akashic_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn akashic_stat_to_user(arguments: [u64; 6]) -> isize {
+    if validate_user_write_range(arguments[2], core::mem::size_of::<AkashicRawStat>()).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    let mut path = [0_u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES];
+    let path = match copy_akashic_path(arguments[0], arguments[1], &mut path) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    let stat = match crate::akashic_vfs::stat(path) {
+        Ok(stat) => AkashicRawStat::from(stat),
+        Err(error) => return map_akashic_error(error),
+    };
+    match copy_value_to_user(arguments[2], &stat) {
+        Ok(()) => 0,
+        Err(_) => ERROR_BAD_ADDRESS,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn akashic_mkdir_from_user(arguments: [u64; 6]) -> isize {
+    let mut path = [0_u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES];
+    let path = match copy_akashic_path(arguments[0], arguments[1], &mut path) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    match crate::akashic_vfs::mkdir(path, crate::interrupts::monotonic_nanoseconds()) {
+        Ok(()) => 0,
+        Err(error) => map_akashic_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn akashic_unlink_from_user(arguments: [u64; 6]) -> isize {
+    let mut path = [0_u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES];
+    let path = match copy_akashic_path(arguments[0], arguments[1], &mut path) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    match crate::akashic_vfs::unlink(path) {
+        Ok(()) => 0,
+        Err(error) => map_akashic_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn akashic_rename_from_user(arguments: [u64; 6]) -> isize {
+    let mut from = [0_u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES];
+    let mut to = [0_u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES];
+    let from = match copy_akashic_path(arguments[0], arguments[1], &mut from) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    let to = match copy_akashic_path(arguments[2], arguments[3], &mut to) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    match crate::akashic_vfs::rename(from, to, crate::interrupts::monotonic_nanoseconds()) {
+        Ok(()) => 0,
+        Err(error) => map_akashic_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn akashic_readdir_to_user(arguments: [u64; 6]) -> isize {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    if validate_user_write_range(arguments[1], core::mem::size_of::<AkashicRawDirent>()).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    let entry = match crate::akashic_vfs::readdir(owner, arguments[0]) {
+        Ok(Some(entry)) => AkashicRawDirent::from(entry),
+        Ok(None) => return 0,
+        Err(error) => return map_akashic_error(error),
+    };
+    match copy_value_to_user(arguments[1], &entry) {
+        Ok(()) => 1,
+        Err(_) => ERROR_BAD_ADDRESS,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn validate_user_write_range(target: u64, length: usize) -> Result<(), UserCopyError> {
+    if length == 0 {
+        return Ok(());
+    }
+    let end = target
+        .checked_add(length as u64)
+        .ok_or(UserCopyError::InvalidRange)?;
+    if target < USER_ADDRESS_MINIMUM || end > USER_ADDRESS_LIMIT {
+        return Err(UserCopyError::InvalidRange);
+    }
+    // SAFETY: SYSCALL entered from the process whose retained hierarchy owns
+    // the active root for the complete non-preemptible validation pass.
+    let root = unsafe { active_page_table_root() };
+    let mut checked = 0;
+    while checked < length {
+        let user_address = target + checked as u64;
+        let physical = translate_user_address_for_write(root, user_address, read_active_entry)?;
+        let page_remaining = PAGE_SIZE - (user_address as usize & (PAGE_SIZE - 1));
+        let span = core::cmp::min(page_remaining, length - checked);
+        if physical
+            .checked_add(span as u64)
+            .ok_or(UserCopyError::UnmappedPhysicalMemory)?
+            > EARLY_MAPPED_PHYSICAL_LIMIT
+        {
+            return Err(UserCopyError::UnmappedPhysicalMemory);
+        }
+        checked += span;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "none")]
 fn copy_from_user(source: u64, target: &mut [u8]) -> Result<(), UserCopyError> {
     if target.is_empty() {
@@ -1705,6 +2057,31 @@ mod tests {
     use super::*;
     use crate::process::context::{DispatchContext, SavedUserContext};
     use crate::process::lifecycle::ProcessHandle;
+
+    #[test]
+    fn akashic_wire_layout_matches_slope() {
+        assert_eq!(core::mem::size_of::<AkashicRawStat>(), 32);
+        assert_eq!(
+            core::mem::size_of::<AkashicRawDirent>(),
+            crate::akashic_vfs::MAXIMUM_PATH_BYTES + 8
+        );
+    }
+
+    #[test]
+    fn akashic_errors_have_stable_errno_mapping() {
+        use crate::akashic_vfs::VfsError;
+
+        assert_eq!(map_akashic_error(VfsError::NotFound), -2);
+        assert_eq!(map_akashic_error(VfsError::InvalidHandle), -9);
+        assert_eq!(map_akashic_error(VfsError::PermissionDenied), -13);
+        assert_eq!(map_akashic_error(VfsError::AlreadyExists), -17);
+        assert_eq!(map_akashic_error(VfsError::NotDirectory), -20);
+        assert_eq!(map_akashic_error(VfsError::NotFile), -21);
+        assert_eq!(map_akashic_error(VfsError::FileTooLarge), -27);
+        assert_eq!(map_akashic_error(VfsError::Capacity), -28);
+        assert_eq!(map_akashic_error(VfsError::DirectoryNotEmpty), -39);
+        assert_eq!(map_akashic_error(VfsError::Unsupported), -95);
+    }
 
     #[test]
     fn scheduled_context_overwrites_the_complete_syscall_return_frame() {
