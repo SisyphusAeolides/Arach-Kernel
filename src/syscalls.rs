@@ -210,7 +210,7 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
                 Ok(decision) => decision,
                 Err(_) => crate::arch::x86_64::halt(),
             };
-            match crate::process::service_registry::take_exited_crest(exiting) {
+            match crate::process::service_registry::take_exited_service(exiting) {
                 Ok(Some(image)) => {
                     if crate::process::runtime::defer_reap(image).is_err() {
                         crate::arch::x86_64::halt();
