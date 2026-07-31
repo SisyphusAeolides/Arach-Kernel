@@ -4,13 +4,13 @@
 extern crate alloc;
 
 use ::blacklab::oureboros::{ArtifactManifest, FractalClass, TargetArchitecture, verify_artifact};
-use alloc::vec::Vec;
 use abyss::allocator::BumpAllocator;
 use abyss::frame::BitmapFrameAllocator;
 use abyss::memory::MemoryRegionKind;
 use abyss::paging::PhysicalAddress;
 use abyss::reservation::{Reservation, ReservationKind, ReservationTable};
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use arach::arch::x86_64::{active_page_table_root, enable_execute_disable, halt, privilege};
 use arach::boot::acpi::{discover_dmar, discover_madt};
 use arach::boot::multiboot2::{BootInformation, BootModule};
