@@ -120,6 +120,23 @@ pub fn linux_munmap_current(
         .map_err(ProcessRuntimeError::Backend)
 }
 
+/// Services Linux `brk` against the exact generation-bound address space of
+/// the currently running process.  The backend returns the new exact break
+/// on success; the syscall layer can query with `requested == 0` to implement
+/// Linux's "return the old break on failure" rule.
+#[cfg(target_os = "none")]
+pub fn linux_brk_current(requested: u64) -> Result<u64, ProcessRuntimeError> {
+    let snapshot = crate::process::lifecycle::current_handle()
+        .and_then(crate::process::lifecycle::snapshot_exact)
+        .ok_or(ProcessRuntimeError::Unavailable)?;
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    runtime
+        .backend
+        .linux_brk_for_root(snapshot.launch.address_space_root, requested)
+        .map_err(ProcessRuntimeError::Backend)
+}
+
 /// Switches the idle scheduler path back to the immutable kernel root, then
 /// drains any image retired by the syscall that selected PID0.
 ///

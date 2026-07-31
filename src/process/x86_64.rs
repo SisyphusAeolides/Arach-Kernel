@@ -40,6 +40,11 @@ pub const INITIAL_USER_STACK_POINTER: u64 =
 /// canonical user limit; the allocator still checks every existing mapping.
 pub const LINUX_MMAP_BASE: u64 = 0x0000_4000_0000;
 pub const LINUX_MMAP_MAXIMUM_BYTES: usize = 16 * 1024 * 1024;
+/// Initial program break for the Linux personality.  Keeping the heap below
+/// the mmap arena gives libc a stable, non-overlapping brk region while still
+/// leaving the fixed image/stack addresses untouched.
+pub const LINUX_BRK_BASE: u64 = 0x0000_2000_0000;
+pub const LINUX_BRK_MAXIMUM_BYTES: usize = 16 * 1024 * 1024;
 
 /// Physical-memory operations required by the process page-table builder.
 ///
@@ -279,6 +284,9 @@ struct MappingRecord {
     /// Runtime anonymous mappings may be removed by Linux `munmap`.  Static
     /// ELF and bootstrap mappings remain owned for the process lifetime.
     releasable: bool,
+    /// The process heap is a runtime VMA with `brk` growth semantics rather
+    /// than an ordinary `mmap` range.  It is never accepted by `munmap`.
+    heap: bool,
     generation: u32,
     virtual_address: u64,
     memory_size: usize,
@@ -292,6 +300,7 @@ impl MappingRecord {
         occupied: false,
         sealed: false,
         releasable: false,
+        heap: false,
         generation: 0,
         virtual_address: 0,
         memory_size: 0,
@@ -339,6 +348,7 @@ struct FrameBackedSlot {
     owned_frames: [PhysicalAddress; MAXIMUM_OWNED_FRAMES],
     owned_frame_count: usize,
     initial_stack_pages: usize,
+    heap_break: u64,
     process_info: ProcessImageInfo,
 }
 
@@ -356,6 +366,7 @@ impl FrameBackedSlot {
         owned_frames: [PhysicalAddress::new(0); MAXIMUM_OWNED_FRAMES],
         owned_frame_count: 0,
         initial_stack_pages: 0,
+        heap_break: LINUX_BRK_BASE,
         process_info: ProcessImageInfo {
             entry_point: 0,
             segment_count: 0,
@@ -702,6 +713,7 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             occupied: true,
             sealed: true,
             releasable: true,
+            heap: false,
             generation: self.slots[slot_index].generation,
             virtual_address: base,
             memory_size: length,
@@ -810,6 +822,219 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             .map(|(index, slot)| ProcessImageHandle::new(index as u16, slot.generation))
             .ok_or(FrameBackedError::InvalidHandle)?;
         self.linux_munmap(&process, virtual_address, length)
+    }
+
+    /// Implements the bounded Linux `brk` contract for a committed process.
+    ///
+    /// The returned value is the exact (possibly non-page-aligned) break. The
+    /// backing VMA is page-granular and is extended or trimmed only at page
+    /// boundaries.  Newly exposed pages come from the same zeroing allocator
+    /// as `mmap`, are user writable and NX, and are retained in the
+    /// generation-bound slot so a stale process handle cannot change another
+    /// process's heap.
+    pub fn linux_brk(
+        &mut self,
+        process: &ProcessImageHandle,
+        requested: u64,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        let slot_index = self.process_slot(process)?;
+        if self.active_slot.is_some() {
+            return Err(FrameBackedError::InvalidState);
+        }
+
+        let current = self.slots[slot_index].heap_break;
+        if requested == 0 {
+            return Ok(current);
+        }
+        if requested < LINUX_BRK_BASE || requested >= 0x0000_8000_0000_0000 {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        let requested_bytes = requested
+            .checked_sub(LINUX_BRK_BASE)
+            .ok_or(FrameBackedError::InvalidRange)?;
+        if requested_bytes > LINUX_BRK_MAXIMUM_BYTES as u64 {
+            return Err(FrameBackedError::CapacityExceeded);
+        }
+        let desired_pages = if requested_bytes == 0 {
+            0
+        } else {
+            usize::try_from(
+                requested_bytes
+                    .checked_add(PAGE_SIZE as u64 - 1)
+                    .ok_or(FrameBackedError::InvalidRange)?
+                    / PAGE_SIZE as u64,
+            )
+            .map_err(|_| FrameBackedError::CapacityExceeded)?
+        };
+
+        let mapping_index = self.slots[slot_index].mappings.iter().position(|mapping| {
+            mapping.occupied
+                && mapping.heap
+                && mapping.generation == self.slots[slot_index].generation
+        });
+        let current_pages = mapping_index
+            .map(|index| usize::from(self.slots[slot_index].mappings[index].page_count))
+            .unwrap_or(0);
+
+        if desired_pages == current_pages {
+            self.slots[slot_index].heap_break = requested;
+            return Ok(requested);
+        }
+
+        if desired_pages < current_pages {
+            let index = mapping_index.ok_or(FrameBackedError::CorruptHierarchy)?;
+            let mapping = self.slots[slot_index].mappings[index];
+            let first_page = usize::from(mapping.first_page);
+            for page in desired_pages..current_pages {
+                let page_index = first_page + page;
+                let page_record = self.slots[slot_index].pages[page_index];
+                if page_record.virtual_address == 0 {
+                    return Err(FrameBackedError::CorruptHierarchy);
+                }
+                let (table, leaf) = self.leaf_slot(slot_index, page_record.virtual_address)?;
+                self.memory
+                    .write_entry(table, leaf, 0)
+                    .map_err(FrameBackedError::Memory)?;
+                self.release_owned_frame(slot_index, page_record.frame)?;
+                self.slots[slot_index].pages[page_index] = PageRecord::EMPTY;
+            }
+            self.slots[slot_index].mappings[index].page_count =
+                u16::try_from(desired_pages).map_err(|_| FrameBackedError::CapacityExceeded)?;
+            self.slots[slot_index].mappings[index].memory_size = desired_pages
+                .checked_mul(PAGE_SIZE)
+                .ok_or(FrameBackedError::InvalidRange)?;
+            self.slots[slot_index].process_info.owned_frames =
+                self.slots[slot_index].owned_frame_count;
+            self.slots[slot_index].heap_break = requested;
+            return Ok(requested);
+        }
+
+        let additional_pages = desired_pages - current_pages;
+        if self.slots[slot_index]
+            .owned_frame_count
+            .checked_add(additional_pages)
+            .is_none_or(|count| count > self.slots[slot_index].owned_frames.len())
+        {
+            return Err(FrameBackedError::CapacityExceeded);
+        }
+
+        let (index, first_page) = if let Some(index) = mapping_index {
+            let mapping = self.slots[slot_index].mappings[index];
+            let first_page = usize::from(mapping.first_page);
+            let end = first_page
+                .checked_add(current_pages)
+                .and_then(|end| end.checked_add(additional_pages))
+                .ok_or(FrameBackedError::CapacityExceeded)?;
+            if end > self.slots[slot_index].pages.len()
+                || !self.slots[slot_index].pages[first_page + current_pages..end]
+                    .iter()
+                    .all(|page| page.virtual_address == 0)
+            {
+                return Err(FrameBackedError::CapacityExceeded);
+            }
+            (index, first_page)
+        } else {
+            let index = (0..self.slots[slot_index].mapping_count)
+                .find(|index| !self.slots[slot_index].mappings[*index].occupied)
+                .unwrap_or(self.slots[slot_index].mapping_count);
+            if index >= self.slots[slot_index].mappings.len() {
+                return Err(FrameBackedError::CapacityExceeded);
+            }
+            let first_page = self
+                .free_page_run(slot_index, desired_pages)
+                .ok_or(FrameBackedError::CapacityExceeded)?;
+            (index, first_page)
+        };
+
+        let page_start = first_page + current_pages;
+        let mut allocated = 0usize;
+        for page in current_pages..desired_pages {
+            let virtual_address = LINUX_BRK_BASE
+                .checked_add((page * PAGE_SIZE) as u64)
+                .ok_or(FrameBackedError::InvalidRange)?;
+            let (table, leaf) = match self.ensure_leaf_slot(slot_index, virtual_address) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.rollback_linux_mapping_pages(slot_index, page_start, allocated)?;
+                    return Err(error);
+                }
+            };
+            let frame = match self.allocate_owned(slot_index) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.rollback_linux_mapping_pages(slot_index, page_start, allocated)?;
+                    return Err(error);
+                }
+            };
+            let entry =
+                frame.as_u64() | ENTRY_PRESENT | ENTRY_USER | ENTRY_WRITABLE | ENTRY_NO_EXECUTE;
+            if let Err(error) = self.memory.write_entry(table, leaf, entry) {
+                self.release_owned_frame(slot_index, frame)?;
+                self.rollback_linux_mapping_pages(slot_index, page_start, allocated)?;
+                return Err(FrameBackedError::Memory(error));
+            }
+            self.slots[slot_index].pages[first_page + page] = PageRecord {
+                frame,
+                virtual_address,
+            };
+            allocated += 1;
+        }
+
+        if mapping_index.is_none() {
+            self.slots[slot_index].mappings[index] = MappingRecord {
+                occupied: true,
+                sealed: true,
+                releasable: false,
+                heap: true,
+                generation: self.slots[slot_index].generation,
+                virtual_address: LINUX_BRK_BASE,
+                memory_size: desired_pages
+                    .checked_mul(PAGE_SIZE)
+                    .ok_or(FrameBackedError::InvalidRange)?,
+                first_page: u16::try_from(first_page)
+                    .map_err(|_| FrameBackedError::CapacityExceeded)?,
+                page_count: u16::try_from(desired_pages)
+                    .map_err(|_| FrameBackedError::CapacityExceeded)?,
+                permissions: MappingPermissions {
+                    readable: true,
+                    writable: true,
+                    executable: false,
+                },
+            };
+            self.slots[slot_index].mapping_count =
+                self.slots[slot_index].mapping_count.max(index + 1);
+        } else {
+            self.slots[slot_index].mappings[index].page_count =
+                u16::try_from(desired_pages).map_err(|_| FrameBackedError::CapacityExceeded)?;
+            self.slots[slot_index].mappings[index].memory_size = desired_pages
+                .checked_mul(PAGE_SIZE)
+                .ok_or(FrameBackedError::InvalidRange)?;
+        }
+        self.slots[slot_index].page_count = self.slots[slot_index]
+            .page_count
+            .max(first_page + desired_pages);
+        self.slots[slot_index].process_info.owned_frames = self.slots[slot_index].owned_frame_count;
+        self.slots[slot_index].heap_break = requested;
+        Ok(requested)
+    }
+
+    pub fn linux_brk_for_root(
+        &mut self,
+        address_space_root: u64,
+        requested: u64,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        let process = self
+            .slots
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| {
+                slot.phase == SpacePhase::Committed
+                    && slot.generation != 0
+                    && slot.process_info.address_space_root == Some(address_space_root)
+            })
+            .map(|(index, slot)| ProcessImageHandle::new(index as u16, slot.generation))
+            .ok_or(FrameBackedError::InvalidHandle)?;
+        self.linux_brk(&process, requested)
     }
 
     /// Materializes the documented `[argc][argv][envp]` entry block in the
@@ -1022,7 +1247,12 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
                 return Err(FrameBackedError::CapacityExceeded);
             }
 
-            let mut next = None;
+            // Keep the complete bounded brk arena reserved even when the
+            // current break has been trimmed back to its base.  Without this
+            // guard an explicit mmap hint could occupy the dormant heap and
+            // make a later libc brk growth fail nondeterministically.
+            let mut next = ranges_overlap(candidate, end, LINUX_BRK_BASE, LINUX_BRK_MAXIMUM_BYTES)
+                .then_some(LINUX_BRK_BASE + LINUX_BRK_MAXIMUM_BYTES as u64);
             for mapping in &self.slots[slot_index].mappings {
                 if mapping.occupied
                     && ranges_overlap(candidate, end, mapping.virtual_address, mapping.memory_size)
@@ -1145,6 +1375,7 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         self.slots[slot_index].pages.fill(PageRecord::EMPTY);
         self.slots[slot_index].page_count = 0;
         self.slots[slot_index].initial_stack_pages = 0;
+        self.slots[slot_index].heap_break = LINUX_BRK_BASE;
         self.slots[slot_index].process_info = ProcessImageInfo {
             entry_point: 0,
             segment_count: 0,
@@ -1384,6 +1615,7 @@ impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressS
             occupied: true,
             sealed: false,
             releasable: false,
+            heap: false,
             generation: self.slots[slot_index].generation,
             virtual_address,
             memory_size,
@@ -2101,6 +2333,122 @@ mod tests {
             ),
             Err(FrameBackedError::InvalidRange)
         );
+    }
+
+    #[test]
+    fn linux_brk_grows_with_zeroed_writable_pages_and_shrinks() {
+        let mut memory = Box::new(TestMemory::<176>::new());
+        memory
+            .write_entry(
+                PhysicalAddress::new(0),
+                256,
+                0x1234_5000 | ENTRY_PRESENT | ENTRY_WRITABLE,
+            )
+            .unwrap();
+        let authority = unsafe { Authority::assume_root() };
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let catalog = catalog();
+        let mut bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let image = prepare_user_image(
+            catalog.materialize(1, &mut bytes).unwrap(),
+            &authority.grant::<UserlandImageControl>(),
+        )
+        .unwrap();
+        let installed = install_user_image(image, &mut backend, &install_control).unwrap();
+
+        assert_eq!(backend.linux_brk(&installed.process, 0), Ok(LINUX_BRK_BASE));
+        let before = backend
+            .process_info(&installed.process)
+            .unwrap()
+            .owned_frames;
+        let requested = LINUX_BRK_BASE + PAGE_SIZE as u64 + 7;
+        assert_eq!(
+            backend.linux_brk(&installed.process, requested),
+            Ok(requested)
+        );
+        let after_growth = backend
+            .process_info(&installed.process)
+            .unwrap()
+            .owned_frames;
+        assert!(after_growth >= before + 2);
+
+        let root = PhysicalAddress::new(
+            backend
+                .process_info(&installed.process)
+                .unwrap()
+                .address_space_root
+                .unwrap(),
+        );
+        let indices = page_indices::<TestMemoryError>(LINUX_BRK_BASE).unwrap();
+        let p3 = backend.memory().read_entry(root, indices[0]).unwrap() & PAGE_ADDRESS_MASK;
+        let p2 = backend
+            .memory()
+            .read_entry(PhysicalAddress::new(p3), indices[1])
+            .unwrap()
+            & PAGE_ADDRESS_MASK;
+        let p1 = backend
+            .memory()
+            .read_entry(PhysicalAddress::new(p2), indices[2])
+            .unwrap()
+            & PAGE_ADDRESS_MASK;
+        let leaf = backend
+            .memory()
+            .read_entry(PhysicalAddress::new(p1), indices[3])
+            .unwrap();
+        assert_eq!(
+            leaf & (ENTRY_PRESENT | ENTRY_USER | ENTRY_WRITABLE),
+            ENTRY_PRESENT | ENTRY_USER | ENTRY_WRITABLE
+        );
+        assert_ne!(leaf & ENTRY_NO_EXECUTE, 0);
+        assert_eq!(
+            backend.memory().bytes_zero(
+                PhysicalAddress::new(leaf & PAGE_ADDRESS_MASK),
+                0,
+                PAGE_SIZE
+            ),
+            Ok(true)
+        );
+
+        let one_page = LINUX_BRK_BASE + 1;
+        assert_eq!(
+            backend.linux_brk(&installed.process, one_page),
+            Ok(one_page)
+        );
+        let after_shrink = backend
+            .process_info(&installed.process)
+            .unwrap()
+            .owned_frames;
+        assert_eq!(after_shrink, after_growth - 1);
+        assert_eq!(
+            backend.linux_brk(&installed.process, LINUX_BRK_BASE),
+            Ok(LINUX_BRK_BASE)
+        );
+        assert_eq!(
+            backend
+                .process_info(&installed.process)
+                .unwrap()
+                .owned_frames,
+            after_shrink - 1
+        );
+        let mmap = backend
+            .linux_mmap_anonymous(
+                &installed.process,
+                LINUX_BRK_BASE,
+                PAGE_SIZE,
+                MappingPermissions {
+                    readable: true,
+                    writable: true,
+                    executable: false,
+                },
+            )
+            .unwrap();
+        assert!(mmap >= LINUX_BRK_BASE + LINUX_BRK_MAXIMUM_BYTES as u64);
+        backend
+            .linux_munmap(&installed.process, mmap, PAGE_SIZE)
+            .unwrap();
+        assert_eq!(backend.linux_brk(&installed.process, 0), Ok(LINUX_BRK_BASE));
     }
 
     #[test]

@@ -346,6 +346,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         }
         Some(crate::process::abi::LinuxSyscall::Mmap) => linux_mmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Munmap) => linux_munmap(arguments),
+        Some(crate::process::abi::LinuxSyscall::Brk) => linux_brk(arguments),
         Some(_) => ERROR_NOT_IMPLEMENTED,
         None => ERROR_NOT_IMPLEMENTED,
     }
@@ -405,6 +406,20 @@ fn linux_munmap(arguments: [u64; 6]) -> isize {
     ) {
         Ok(()) => 0,
         Err(_) => ERROR_INVALID_ARGUMENT,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_brk(arguments: [u64; 6]) -> isize {
+    // Linux returns the new break on success and the previous break on
+    // failure.  A zero argument is the read-current-break form.
+    let requested = arguments[0];
+    match crate::process::runtime::linux_brk_current(requested) {
+        Ok(address) => isize::try_from(address).unwrap_or(-75),
+        Err(_) => crate::process::runtime::linux_brk_current(0)
+            .ok()
+            .and_then(|address| isize::try_from(address).ok())
+            .unwrap_or(ERROR_INVALID_ARGUMENT),
     }
 }
 

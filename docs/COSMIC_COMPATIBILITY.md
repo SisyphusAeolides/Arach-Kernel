@@ -85,10 +85,11 @@ object lifetime, and concurrency semantics.
 The first Linux personality slice is deliberately small but live: `write`,
 `getpid`, `getppid`, `gettid`, `exit`, and `exit_group` are routed through the
 existing bounded user-copy and generation-safe lifecycle paths. Anonymous
-private `mmap`/exact-range `munmap` now allocate and reclaim real zeroed user
-pages with W^X checks; file-backed mappings, `brk`, `mprotect`, and the dynamic
-linker remain gated. Every other decoded Linux syscall returns `ENOSYS` until
-its complete memory, signal, file, or IPC semantics are implemented and tested.
+private `mmap`/exact-range `munmap` and the bounded `brk` heap now allocate and
+reclaim real zeroed user pages with W^X checks; file-backed mappings,
+`mprotect`, and the dynamic linker remain gated. Every other decoded Linux
+syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
+semantics are implemented and tested.
 
 ## Push PID 1 boundary
 
