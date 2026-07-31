@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "aether"
 version = "0.1.0"
-source = "git+https://github.com/SisyphusAeolides/Arach-Kernel.git?rev=a0975ecca412a77be364ceb992b3a6b46dddc6cd#a0975ecca412a77be364ceb992b3a6b46dddc6cd"
+source = "git+https://github.com/SisyphusAeolides/Arach-Kernel.git?rev=22596d5d8917b0be0f06497f346b5113de526cd1#22596d5d8917b0be0f06497f346b5113de526cd1"
 
 [[package]]
 name = "arach-c0-probe"
@@ -17,12 +17,12 @@ dependencies = [
 [[package]]
 name = "kairos"
 version = "0.1.0"
-source = "git+https://github.com/SisyphusAeolides/Arach-Kernel.git?rev=a0975ecca412a77be364ceb992b3a6b46dddc6cd#a0975ecca412a77be364ceb992b3a6b46dddc6cd"
+source = "git+https://github.com/SisyphusAeolides/Arach-Kernel.git?rev=22596d5d8917b0be0f06497f346b5113de526cd1#22596d5d8917b0be0f06497f346b5113de526cd1"
 
 [[package]]
 name = "slope"
 version = "0.1.0"
-source = "git+https://github.com/SisyphusAeolides/Slope.git?rev=839b6ad9e56619eaf2eb2de382c6505fef1ba7f3#839b6ad9e56619eaf2eb2de382c6505fef1ba7f3"
+source = "git+https://github.com/SisyphusAeolides/Slope.git?rev=28ca34ba1a66e9ca94d236ed804152f9ca6425a7#28ca34ba1a66e9ca94d236ed804152f9ca6425a7"
 dependencies = [
  "aether",
  "kairos",
