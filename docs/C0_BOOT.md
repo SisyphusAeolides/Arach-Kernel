@@ -27,14 +27,16 @@ containing all of the following evidence from the same bundle:
 - Granite admitted the measured bundle;
 - Arach initialized interrupts, scheduling, ring 3, and syscall entry;
 - Push reached PID 1;
-- `ARACH_C0_RING3_SYSCALL_PASS` was emitted by the measured probe.
+- `ARACH_C0_RING3_SYSCALL_PASS` was emitted by the measured probe;
+- `ARACH_C1_LINUX_SYSCALL_PASS` was emitted after the Linux personality
+  exercised identity, anonymous memory, `brk`, and clean process exit.
 
 The execution gate is implemented in the Arach validation workflow: CI installs
 QEMU/OVMF, runs this helper against the freshly assembled image, and uploads
 the serial transcript. Revision `b396d3a7fc6538eacc60058d7067bebe9de43537`
-is the current qualified release and passed the complete gate, including the
-measured `ARACH_C0_RING3_SYSCALL_PASS` marker. Future releases must keep this
-workflow green for their exact revision;
+is the last qualified release before the Linux-personality probe was added.
+The next release must pass the complete workflow, including both measured
+markers. Future releases must keep this workflow green for their exact revision;
 a host build or a missing local QEMU installation never counts as qualification.
 
 The image and execution helpers are now available:

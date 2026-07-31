@@ -10,7 +10,6 @@ publish = false
 build = "build.rs"
 
 [dependencies]
-slope = { git = "https://github.com/SisyphusAeolides/Slope.git", rev = "b3decb53e71bb3c5d5fc55047451bcf9cef7eff9" }
 
 [[bin]]
 name = "arach-c0-probe"

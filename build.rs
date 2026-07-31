@@ -232,6 +232,10 @@ fn main() {
             "cargo:rustc-env=SISYPHUS_CREST_PROVENANCE_ROOT={}",
             bootstrap_package.provenance_root
         );
+        println!(
+            "cargo:rustc-env=SISYPHUS_CREST_EXECUTION_ABI={}",
+            bootstrap_package.execution_abi
+        );
 
         emit_cosmic_service_artifacts();
     }
@@ -489,10 +493,17 @@ struct BootProcessPackage {
     version_index: u16,
     service_class: u16,
     provenance_root: u64,
+    execution_abi: u8,
 }
 
 fn selected_bootstrap_package(workspace: &Path) -> BootProcessPackage {
     println!("cargo:rerun-if-env-changed=ARACH_BOOTSTRAP_IMAGE");
+    println!("cargo:rerun-if-env-changed=ARACH_BOOTSTRAP_ABI");
+    let execution_abi = match env::var("ARACH_BOOTSTRAP_ABI").as_deref() {
+        Ok("linux") => 1,
+        Ok("native") | Err(_) => 0,
+        Ok(value) => panic!("ARACH_BOOTSTRAP_ABI must be `native` or `linux`, got {value}"),
+    };
     if let Some(candidate) = env::var_os("ARACH_BOOTSTRAP_IMAGE") {
         let artifact = fs::canonicalize(PathBuf::from(candidate)).unwrap_or_else(|error| {
             panic!("failed to resolve ARACH_BOOTSTRAP_IMAGE: {error}");
@@ -509,6 +520,7 @@ fn selected_bootstrap_package(workspace: &Path) -> BootProcessPackage {
             bytes,
             version_index: 1,
             service_class: 2,
+            execution_abi,
         };
     }
     println!("cargo:rerun-if-env-changed=SISYPHUS_CREST_PACKAGE");
@@ -533,6 +545,7 @@ fn selected_bootstrap_package(workspace: &Path) -> BootProcessPackage {
                 measured_source(&cargo_lock),
                 measured_source(&toolchain),
             ]),
+            execution_abi,
         };
     };
 
@@ -608,6 +621,7 @@ fn selected_bootstrap_package(workspace: &Path) -> BootProcessPackage {
             measured_source(&resolution_lock),
             measured_source(&source_lock),
         ]),
+        execution_abi,
     }
 }
 

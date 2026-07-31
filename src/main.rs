@@ -322,6 +322,15 @@ const CREST_PACKAGE_SERVICE_CLASS: u16 = 0;
 const CREST_PROVENANCE_ROOT: u64 = parse_decimal(env!("SISYPHUS_CREST_PROVENANCE_ROOT")) as u64;
 #[cfg(not(target_os = "none"))]
 const CREST_PROVENANCE_ROOT: u64 = 0;
+#[cfg(target_os = "none")]
+const CREST_EXECUTION_ABI: arach::process::abi::ExecutionAbi =
+    match parse_decimal(env!("SISYPHUS_CREST_EXECUTION_ABI")) {
+        1 => arach::process::abi::ExecutionAbi::LinuxX86_64,
+        _ => arach::process::abi::ExecutionAbi::ArachNative,
+    };
+#[cfg(not(target_os = "none"))]
+const CREST_EXECUTION_ABI: arach::process::abi::ExecutionAbi =
+    arach::process::abi::ExecutionAbi::ArachNative;
 
 #[global_allocator]
 static KERNEL_HEAP: BumpAllocator = BumpAllocator::empty();
@@ -3858,7 +3867,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         capability_root: crest_package.capability_root,
         service_class: CREST_SERVICE_CLASS,
         priority: 1,
-        abi: arach::process::abi::ExecutionAbi::ArachNative,
+        abi: CREST_EXECUTION_ABI,
     };
     if let Err(error) = service_registry::install_crest(crest_launch, installed_crest.process) {
         let _ = writeln!(serial, "Arach: Crest launch registry failed: {error:?}");

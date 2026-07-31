@@ -82,11 +82,12 @@ with Aether numbers. Linux compatibility must preserve
 observable errno values, structure layouts, ioctl encodings, readiness rules,
 object lifetime, and concurrency semantics.
 
-The first Linux personality slice is deliberately small but live: `write`,
-`getpid`, `getppid`, `gettid`, `exit`, and `exit_group` are routed through the
-existing bounded user-copy and generation-safe lifecycle paths. Anonymous
-private `mmap`/exact-range `munmap` and the bounded `brk` heap now allocate and
-reclaim real zeroed user pages with W^X checks; file-backed mappings,
+The first Linux personality slice is now exercised by the measured C0 probe:
+`write`, `getpid`, `getppid`, `gettid`, `exit`, and `exit_group` are routed
+through the existing bounded user-copy and generation-safe lifecycle paths.
+Anonymous private `mmap`/exact-range `munmap` and the bounded `brk` heap
+allocate and reclaim real zeroed user pages with W^X checks; the probe writes
+and reads a returned page before unmapping it. File-backed mappings,
 `mprotect`, and the dynamic linker remain gated. Every other decoded Linux
 syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.

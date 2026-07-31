@@ -34,6 +34,7 @@ test -s "$probe_image"
 "$root/scripts/bootstrap-formal-toolchains.sh"
 ARACH_PUSH_IMAGE="$push_image" \
 ARACH_BOOTSTRAP_IMAGE="$probe_image" \
+ARACH_BOOTSTRAP_ABI="${ARACH_BOOTSTRAP_ABI:-linux}" \
 CARGO_TARGET_DIR="$build_root/kernel" \
     "$cargo_bin" build --locked --release -p arach --bin arach \
         --no-default-features --features kernel-bin,reference-driver,fortran-control \
