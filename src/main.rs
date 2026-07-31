@@ -4,6 +4,7 @@
 extern crate alloc;
 
 use ::blacklab::oureboros::{ArtifactManifest, FractalClass, TargetArchitecture, verify_artifact};
+use alloc::vec::Vec;
 use abyss::allocator::BumpAllocator;
 use abyss::frame::BitmapFrameAllocator;
 use abyss::memory::MemoryRegionKind;
@@ -12,12 +13,12 @@ use abyss::reservation::{Reservation, ReservationKind, ReservationTable};
 use alloc::boxed::Box;
 use arach::arch::x86_64::{active_page_table_root, enable_execute_disable, halt, privilege};
 use arach::boot::acpi::{discover_dmar, discover_madt};
-use arach::boot::multiboot2::BootInformation;
+use arach::boot::multiboot2::{BootInformation, BootModule};
 use arach::capability::{
-    ArtifactSynthesisControl, Authority, DeviceMemoryControl, DmaControl, FabricControl,
-    FaultPolicyControl, LearningControl, MachineProfileControl, MemorySharingControl,
-    PciConfigurationControl, PhysicalMemoryControl, PolicyControl, ProcessInstallControl,
-    ResonanceControl, UserlandImageControl,
+    ArtifactSynthesisControl, Authority, Capability, DeviceMemoryControl, DmaControl,
+    FabricControl, FaultPolicyControl, LearningControl, MachineProfileControl,
+    MemorySharingControl, PciConfigurationControl, PhysicalMemoryControl, PolicyControl,
+    ProcessInstallControl, ResonanceControl, UserlandImageControl,
 };
 use arach::cpu::topology::{self, ExecutionClass, TopologyPolicy};
 use arach::drivers::device_census::{
@@ -69,7 +70,7 @@ use arach::mmio::{
     direct_map_address, kernel_mmio, kernel_virtual_to_physical,
 };
 use arach::process::image::prepare_user_image;
-use arach::process::install::{UserAddressSpaceBackend, install_user_image};
+use arach::process::install::{ProcessImageHandle, UserAddressSpaceBackend, install_user_image};
 use arach::process::lifecycle::{self, ProcessLaunch};
 use arach::process::package_manifest::{
     NATIVE_PACKAGE_ABI_VERSION, NativePackageManifest, package_name_hash,
@@ -108,6 +109,157 @@ const MINIMUM_HEAP_SIZE: u64 = 64 * 1024;
 const MAXIMUM_HEAP_SIZE: u64 = 4 * 1024 * 1024;
 const E1000_DRIVER_ID: u64 = 0x4531_3030_305f_4e45;
 const MAXIMUM_E1000_CONTROLLERS: usize = 1;
+
+/// Native COSMIC service artifacts are optional while the C0 probe remains
+/// the default boot profile. The build script emits a complete metadata set
+/// only when all five target-compatible service images are supplied.
+#[cfg(target_os = "none")]
+const COSMIC_BOOT_ENABLED: bool = parse_decimal(env!("ARACH_COSMIC_BOOT_ENABLED")) != 0;
+#[cfg(not(target_os = "none"))]
+const COSMIC_BOOT_ENABLED: bool = false;
+
+const COSMIC_SERVICE_STACK_PAGES: usize = 512;
+
+#[cfg(target_os = "none")]
+const COSMIC_DBUS_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_DBUS_SHA256"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_DBUS_SHA256: [u8; 32] = [0; 32];
+#[cfg(target_os = "none")]
+const COSMIC_DBUS_BYTES: usize = parse_decimal(env!("ARACH_COSMIC_DBUS_BYTES"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_DBUS_BYTES: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_DBUS_ENTRY_FILE_OFFSET: usize =
+    parse_decimal(env!("ARACH_COSMIC_DBUS_ENTRY_FILE_OFFSET"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_DBUS_ENTRY_FILE_OFFSET: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_DBUS_VERSION: u16 = parse_decimal(env!("ARACH_COSMIC_DBUS_VERSION")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_DBUS_VERSION: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_DBUS_SERVICE_CLASS: u16 =
+    parse_decimal(env!("ARACH_COSMIC_DBUS_SERVICE_CLASS")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_DBUS_SERVICE_CLASS: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_DBUS_PROVENANCE_ROOT: u64 =
+    parse_decimal(env!("ARACH_COSMIC_DBUS_PROVENANCE_ROOT")) as u64;
+#[cfg(not(target_os = "none"))]
+const COSMIC_DBUS_PROVENANCE_ROOT: u64 = 0;
+
+#[cfg(target_os = "none")]
+const COSMIC_COMPOSITOR_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_COMPOSITOR_SHA256"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_COMPOSITOR_SHA256: [u8; 32] = [0; 32];
+#[cfg(target_os = "none")]
+const COSMIC_COMPOSITOR_BYTES: usize = parse_decimal(env!("ARACH_COSMIC_COMPOSITOR_BYTES"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_COMPOSITOR_BYTES: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_COMPOSITOR_ENTRY_FILE_OFFSET: usize =
+    parse_decimal(env!("ARACH_COSMIC_COMPOSITOR_ENTRY_FILE_OFFSET"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_COMPOSITOR_ENTRY_FILE_OFFSET: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_COMPOSITOR_VERSION: u16 =
+    parse_decimal(env!("ARACH_COSMIC_COMPOSITOR_VERSION")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_COMPOSITOR_VERSION: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_COMPOSITOR_SERVICE_CLASS: u16 =
+    parse_decimal(env!("ARACH_COSMIC_COMPOSITOR_SERVICE_CLASS")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_COMPOSITOR_SERVICE_CLASS: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_COMPOSITOR_PROVENANCE_ROOT: u64 =
+    parse_decimal(env!("ARACH_COSMIC_COMPOSITOR_PROVENANCE_ROOT")) as u64;
+#[cfg(not(target_os = "none"))]
+const COSMIC_COMPOSITOR_PROVENANCE_ROOT: u64 = 0;
+
+#[cfg(target_os = "none")]
+const COSMIC_GREETER_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_GREETER_SHA256"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_GREETER_SHA256: [u8; 32] = [0; 32];
+#[cfg(target_os = "none")]
+const COSMIC_GREETER_BYTES: usize = parse_decimal(env!("ARACH_COSMIC_GREETER_BYTES"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_GREETER_BYTES: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_GREETER_ENTRY_FILE_OFFSET: usize =
+    parse_decimal(env!("ARACH_COSMIC_GREETER_ENTRY_FILE_OFFSET"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_GREETER_ENTRY_FILE_OFFSET: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_GREETER_VERSION: u16 = parse_decimal(env!("ARACH_COSMIC_GREETER_VERSION")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_GREETER_VERSION: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_GREETER_SERVICE_CLASS: u16 =
+    parse_decimal(env!("ARACH_COSMIC_GREETER_SERVICE_CLASS")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_GREETER_SERVICE_CLASS: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_GREETER_PROVENANCE_ROOT: u64 =
+    parse_decimal(env!("ARACH_COSMIC_GREETER_PROVENANCE_ROOT")) as u64;
+#[cfg(not(target_os = "none"))]
+const COSMIC_GREETER_PROVENANCE_ROOT: u64 = 0;
+
+#[cfg(target_os = "none")]
+const COSMIC_SESSION_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_SESSION_SHA256"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_SESSION_SHA256: [u8; 32] = [0; 32];
+#[cfg(target_os = "none")]
+const COSMIC_SESSION_BYTES: usize = parse_decimal(env!("ARACH_COSMIC_SESSION_BYTES"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_SESSION_BYTES: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_SESSION_ENTRY_FILE_OFFSET: usize =
+    parse_decimal(env!("ARACH_COSMIC_SESSION_ENTRY_FILE_OFFSET"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_SESSION_ENTRY_FILE_OFFSET: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_SESSION_VERSION: u16 = parse_decimal(env!("ARACH_COSMIC_SESSION_VERSION")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_SESSION_VERSION: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_SESSION_SERVICE_CLASS: u16 =
+    parse_decimal(env!("ARACH_COSMIC_SESSION_SERVICE_CLASS")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_SESSION_SERVICE_CLASS: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_SESSION_PROVENANCE_ROOT: u64 =
+    parse_decimal(env!("ARACH_COSMIC_SESSION_PROVENANCE_ROOT")) as u64;
+#[cfg(not(target_os = "none"))]
+const COSMIC_SESSION_PROVENANCE_ROOT: u64 = 0;
+
+#[cfg(target_os = "none")]
+const COSMIC_PORTAL_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_PORTAL_SHA256"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_PORTAL_SHA256: [u8; 32] = [0; 32];
+#[cfg(target_os = "none")]
+const COSMIC_PORTAL_BYTES: usize = parse_decimal(env!("ARACH_COSMIC_PORTAL_BYTES"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_PORTAL_BYTES: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_PORTAL_ENTRY_FILE_OFFSET: usize =
+    parse_decimal(env!("ARACH_COSMIC_PORTAL_ENTRY_FILE_OFFSET"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_PORTAL_ENTRY_FILE_OFFSET: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_PORTAL_VERSION: u16 = parse_decimal(env!("ARACH_COSMIC_PORTAL_VERSION")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_PORTAL_VERSION: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_PORTAL_SERVICE_CLASS: u16 =
+    parse_decimal(env!("ARACH_COSMIC_PORTAL_SERVICE_CLASS")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_PORTAL_SERVICE_CLASS: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_PORTAL_PROVENANCE_ROOT: u64 =
+    parse_decimal(env!("ARACH_COSMIC_PORTAL_PROVENANCE_ROOT")) as u64;
+#[cfg(not(target_os = "none"))]
+const COSMIC_PORTAL_PROVENANCE_ROOT: u64 = 0;
 
 #[repr(C, align(16))]
 struct E1000DmaStorage {
@@ -194,6 +346,233 @@ impl LogService for BootDriverLogger<'_> {
         serial.write_bytes(message);
         serial.write_bytes(b"\n");
         sisyphus_driver_abi::STATUS_OK
+    }
+}
+
+/// One native service image after measurement, address-space installation,
+/// stack materialization, and CR3 activation validation. The process handle
+/// remains owned by bootstrap until it is published to the measured service
+/// registry at the formal-authority boundary.
+#[cfg(target_os = "none")]
+struct InstalledMeasuredService {
+    manifest: NativePackageManifest,
+    process: ProcessImageHandle,
+    entry_point: u64,
+    user_stack_pointer: u64,
+    address_space_root: u64,
+}
+
+/// A Multiboot2 module selected by the optional native COSMIC boot profile.
+/// The descriptor contains only build-bound identity; the bytes are looked up
+/// through the retained direct map immediately before measurement.
+#[cfg(target_os = "none")]
+#[derive(Clone, Copy)]
+struct CosmicBootArtifact {
+    module: BootModule,
+    label: &'static str,
+    package_name: &'static [u8],
+    expected_bytes: usize,
+    entry_file_offset: usize,
+    expected_sha256: [u8; 32],
+    version: u16,
+    service_class: u16,
+    provenance_root: u64,
+}
+
+#[cfg(target_os = "none")]
+fn load_cosmic_boot_artifact(
+    serial: &mut SerialPort,
+    boot: BootInformation,
+    name: &'static [u8],
+    label: &'static str,
+    package_name: &'static [u8],
+    expected_bytes: usize,
+    entry_file_offset: usize,
+    expected_sha256: [u8; 32],
+    version: u16,
+    service_class: u16,
+    provenance_root: u64,
+) -> CosmicBootArtifact {
+    let module = match boot.module(name) {
+        Ok(module) => module,
+        Err(error) => {
+            let _ = writeln!(serial, "Arach: {label} COSMIC module error: {error:?}");
+            halt();
+        }
+    };
+    if module.length() as usize != expected_bytes
+        || module.length() == 0
+        || module.length() > 16 * 1024 * 1024
+        || module.end.as_u64() > EARLY_MAPPED_PHYSICAL_LIMIT
+    {
+        let _ = writeln!(
+            serial,
+            "Arach: {label} COSMIC module size or range mismatch"
+        );
+        halt();
+    }
+    if direct_map_address(module.start.as_u64()).is_none() {
+        let _ = writeln!(
+            serial,
+            "Arach: {label} COSMIC module is outside the direct map"
+        );
+        halt();
+    }
+    CosmicBootArtifact {
+        module,
+        label,
+        package_name,
+        expected_bytes,
+        entry_file_offset,
+        expected_sha256,
+        version,
+        service_class,
+        provenance_root,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn cosmic_module_bytes<'a>(serial: &mut SerialPort, artifact: CosmicBootArtifact) -> &'a [u8] {
+    let Some(virtual_address) = direct_map_address(artifact.module.start.as_u64()) else {
+        let _ = writeln!(
+            serial,
+            "Arach: {} COSMIC module lost its direct-map address",
+            artifact.label
+        );
+        halt();
+    };
+    // SAFETY: load_cosmic_boot_artifact checked this complete immutable range
+    // against the retained direct map and the build-bound byte count.
+    unsafe { core::slice::from_raw_parts(virtual_address as *const u8, artifact.expected_bytes) }
+}
+
+/// Installs one immutable, build-bound service image. This is intentionally a
+/// fail-closed helper: a native COSMIC service cannot reach the registry until
+/// its ELF digest, package identity, page permissions, stack metadata, and
+/// temporary CR3 activation have all been checked.
+#[cfg(target_os = "none")]
+fn install_measured_service(
+    serial: &mut SerialPort,
+    label: &str,
+    bytes: &[u8],
+    expected_sha256: [u8; 32],
+    manifest: NativePackageManifest,
+    backend: &mut runtime::KernelProcessBackend,
+    userland_image: &Capability<'_, UserlandImageControl>,
+    process_install: &Capability<'_, ProcessInstallControl>,
+    stack_pages: usize,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> InstalledMeasuredService {
+    if bytes.len() != manifest.artifact_bytes {
+        let _ = writeln!(
+            serial,
+            "Arach: {label} package bytes={} expected={}",
+            bytes.len(),
+            manifest.artifact_bytes
+        );
+        halt();
+    }
+    if let Err(error) = manifest.validate_artifact(
+        manifest.artifact_bytes,
+        manifest.entry_file_offset,
+        expected_sha256,
+    ) {
+        let _ = writeln!(
+            serial,
+            "Arach: {label} package manifest rejected: {error:?}"
+        );
+        halt();
+    }
+    let artifact = match verify_artifact(
+        ArtifactManifest {
+            inode_id: manifest.service_class as u32,
+            class: FractalClass::Executable,
+            architecture: TargetArchitecture::X86_64,
+            entry_offset: manifest.entry_file_offset,
+            expected_sha256,
+        },
+        bytes,
+    ) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            let _ = writeln!(serial, "Arach: {label} measurement failed: {error:?}");
+            halt();
+        }
+    };
+    let image = match prepare_user_image(artifact, userland_image) {
+        Ok(image) => image,
+        Err(error) => {
+            let _ = writeln!(serial, "Arach: {label} load plan rejected: {error:?}");
+            halt();
+        }
+    };
+    let installed = match install_user_image(image, backend, process_install) {
+        Ok(image) => image,
+        Err(error) => {
+            let _ = writeln!(serial, "Arach: {label} installation failed: {error:?}");
+            halt();
+        }
+    };
+    if installed.measurement.bytes_written != manifest.artifact_bytes
+        || installed.measurement.entry_offset != manifest.entry_file_offset
+        || installed.measurement.sha256 != manifest.artifact_sha256
+    {
+        let _ = writeln!(serial, "Arach: {label} identity diverged after install");
+        halt();
+    }
+    if let Err(error) =
+        backend.install_initial_stack_pages(&installed.process, stack_pages, process_install)
+    {
+        let _ = writeln!(
+            serial,
+            "Arach: {label} stack installation failed: {error:?}"
+        );
+        halt();
+    }
+    let user_stack_pointer = match backend.prepare_initial_stack(&installed.process, argv, envp) {
+        Ok(stack) => stack,
+        Err(error) => {
+            let _ = writeln!(
+                serial,
+                "Arach: {label} argv/envp preparation failed: {error:?}"
+            );
+            halt();
+        }
+    };
+    // SAFETY: bootstrap is serialized, and this image is not yet visible to
+    // lifecycle scheduling or Ring 3. The backend restores the kernel root.
+    if let Err(error) = unsafe { backend.validate_activation(&installed.process, process_install) }
+    {
+        let _ = writeln!(serial, "Arach: {label} CR3 activation failed: {error:?}");
+        halt();
+    }
+    let Some(info) = backend.process_info(&installed.process) else {
+        let _ = writeln!(serial, "Arach: retained {label} handle became stale");
+        halt();
+    };
+    let Some(address_space_root) = info.address_space_root else {
+        let _ = writeln!(serial, "Arach: retained {label} has no page-table root");
+        halt();
+    };
+    if info.initial_stack_pointer != Some(user_stack_pointer)
+        || info.entry_point != installed.entry_point
+        || info.segment_count == 0
+    {
+        let _ = writeln!(serial, "Arach: retained {label} metadata is inconsistent");
+        halt();
+    }
+    let _ = writeln!(
+        serial,
+        "Arach: {label} measured image root={address_space_root:#x}, frames={}, segments={}, launch=sealed",
+        info.owned_frames, info.segment_count,
+    );
+    InstalledMeasuredService {
+        manifest,
+        process: installed.process,
+        entry_point: installed.entry_point,
+        user_stack_pointer,
+        address_space_root,
     }
 }
 
@@ -507,6 +886,85 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         crest_module.end.as_u64(),
     );
 
+    // COSMIC is an atomic service bundle. If the opt-in native profile is
+    // enabled, accepting only a subset would leave Push with an apparently
+    // valid but unusable desktop graph, so every service is required here.
+    #[cfg(target_os = "none")]
+    let mut cosmic_modules = Vec::new();
+    #[cfg(target_os = "none")]
+    if COSMIC_BOOT_ENABLED {
+        cosmic_modules.push(load_cosmic_boot_artifact(
+            &mut serial,
+            boot,
+            b"dbus-broker",
+            "dbus-broker",
+            b"dbus-broker",
+            COSMIC_DBUS_BYTES,
+            COSMIC_DBUS_ENTRY_FILE_OFFSET,
+            COSMIC_DBUS_SHA256,
+            COSMIC_DBUS_VERSION,
+            COSMIC_DBUS_SERVICE_CLASS,
+            COSMIC_DBUS_PROVENANCE_ROOT,
+        ));
+        cosmic_modules.push(load_cosmic_boot_artifact(
+            &mut serial,
+            boot,
+            b"cosmic-comp",
+            "cosmic compositor",
+            b"cosmic-comp",
+            COSMIC_COMPOSITOR_BYTES,
+            COSMIC_COMPOSITOR_ENTRY_FILE_OFFSET,
+            COSMIC_COMPOSITOR_SHA256,
+            COSMIC_COMPOSITOR_VERSION,
+            COSMIC_COMPOSITOR_SERVICE_CLASS,
+            COSMIC_COMPOSITOR_PROVENANCE_ROOT,
+        ));
+        cosmic_modules.push(load_cosmic_boot_artifact(
+            &mut serial,
+            boot,
+            b"cosmic-greeter",
+            "cosmic greeter",
+            b"cosmic-greeter",
+            COSMIC_GREETER_BYTES,
+            COSMIC_GREETER_ENTRY_FILE_OFFSET,
+            COSMIC_GREETER_SHA256,
+            COSMIC_GREETER_VERSION,
+            COSMIC_GREETER_SERVICE_CLASS,
+            COSMIC_GREETER_PROVENANCE_ROOT,
+        ));
+        cosmic_modules.push(load_cosmic_boot_artifact(
+            &mut serial,
+            boot,
+            b"cosmic-session",
+            "cosmic session",
+            b"cosmic-session",
+            COSMIC_SESSION_BYTES,
+            COSMIC_SESSION_ENTRY_FILE_OFFSET,
+            COSMIC_SESSION_SHA256,
+            COSMIC_SESSION_VERSION,
+            COSMIC_SESSION_SERVICE_CLASS,
+            COSMIC_SESSION_PROVENANCE_ROOT,
+        ));
+        cosmic_modules.push(load_cosmic_boot_artifact(
+            &mut serial,
+            boot,
+            b"xdg-desktop-portal-cosmic",
+            "COSMIC desktop portal",
+            b"xdg-desktop-portal-cosmic",
+            COSMIC_PORTAL_BYTES,
+            COSMIC_PORTAL_ENTRY_FILE_OFFSET,
+            COSMIC_PORTAL_SHA256,
+            COSMIC_PORTAL_VERSION,
+            COSMIC_PORTAL_SERVICE_CLASS,
+            COSMIC_PORTAL_PROVENANCE_ROOT,
+        ));
+        let _ = writeln!(
+            serial,
+            "Arach: native COSMIC bundle selected: {} measured service modules",
+            cosmic_modules.len()
+        );
+    }
+
     // GSP firmware remains a boot artifact, never host-executable code.  The
     // all-or-nothing lookup below prevents a partial bundle from looking like
     // a supported accelerator and rechecks every byte against Arach's
@@ -633,10 +1091,14 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         usable_bytes / 1024
     );
 
-    let protected_end = (kernel_physical_end as u64)
+    let mut protected_end = (kernel_physical_end as u64)
         .max((multiboot_physical_address + boot.total_size()) as u64)
         .max(push_module.end.as_u64())
         .max(crest_module.end.as_u64());
+    #[cfg(target_os = "none")]
+    for artifact in &cosmic_modules {
+        protected_end = protected_end.max(artifact.module.end.as_u64());
+    }
     let Some(heap_region) =
         memory_map.usable_range(protected_end, IDENTITY_MAP_END, MINIMUM_HEAP_SIZE)
     else {
@@ -693,7 +1155,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     let storage: &'static mut [u64] =
         unsafe { core::slice::from_raw_parts_mut(storage_pointer.cast::<u64>(), storage_words) };
 
-    let mut reservations = ReservationTable::<8>::new();
+    let mut reservations = ReservationTable::<16>::new();
     let required_reservations = [
         Reservation::new(
             PhysicalAddress::new(0),
@@ -734,6 +1196,22 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     for reservation in required_reservations {
         if let Err(error) = reservations.push(reservation) {
             let _ = writeln!(serial, "Abyss: reservation table failed: {error:?}");
+            halt();
+        }
+    }
+
+    #[cfg(target_os = "none")]
+    for artifact in &cosmic_modules {
+        if let Err(error) = reservations.push(Reservation::new(
+            artifact.module.start,
+            artifact.module.end,
+            ReservationKind::BootModule,
+        )) {
+            let _ = writeln!(
+                serial,
+                "Abyss: {} COSMIC reservation failed: {error:?}",
+                artifact.label
+            );
             halt();
         }
     }
@@ -1356,6 +1834,46 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         "Arach: Crest measured image root={crest_root:#x}, frames={}, segments={}, launch=sealed",
         crest_info.owned_frames, crest_info.segment_count,
     );
+
+    #[cfg(target_os = "none")]
+    let mut installed_cosmic_services = Vec::new();
+    #[cfg(target_os = "none")]
+    for artifact in cosmic_modules.iter().copied() {
+        let bytes = cosmic_module_bytes(&mut serial, artifact);
+        let manifest = NativePackageManifest {
+            schema_version: 1,
+            name_hash: package_name_hash(artifact.package_name),
+            version: artifact.version,
+            abi_version: NATIVE_PACKAGE_ABI_VERSION,
+            service_class: artifact.service_class,
+            artifact_bytes: artifact.expected_bytes,
+            entry_file_offset: artifact.entry_file_offset,
+            artifact_sha256: artifact.expected_sha256,
+            provenance_root: artifact.provenance_root,
+        };
+        let argv = [artifact.package_name];
+        let envp = [&b"SISYPHUS_ABI=1"[..]];
+        installed_cosmic_services.push(install_measured_service(
+            &mut serial,
+            artifact.label,
+            bytes,
+            artifact.expected_sha256,
+            manifest,
+            &mut process_backend,
+            &userland_image,
+            &process_install,
+            COSMIC_SERVICE_STACK_PAGES,
+            &argv,
+            &envp,
+        ));
+    }
+    #[cfg(target_os = "none")]
+    if COSMIC_BOOT_ENABLED {
+        let _ = writeln!(
+            serial,
+            "Arach: native COSMIC services installed but not yet published; formal authority remains the gate"
+        );
+    }
     let _ = writeln!(
         serial,
         "Arach: Black Lab time={} ns, heat={}, predictions={}, epoch={}, generation={}, faults={}, artifact={} bytes, PID1 plan entry={:#x}, install=frame-backed:{}",
@@ -3344,6 +3862,47 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     if let Err(error) = service_registry::install_crest(crest_launch, installed_crest.process) {
         let _ = writeln!(serial, "Arach: Crest launch registry failed: {error:?}");
         halt();
+    }
+    #[cfg(target_os = "none")]
+    for service in installed_cosmic_services {
+        let manifest = service.manifest;
+        let roots = match manifest.bind_formal_authority(formal_attestation.authority_root) {
+            Ok(roots) => roots,
+            Err(error) => {
+                let _ = writeln!(
+                    serial,
+                    "Arach: COSMIC service class {} authority rejected: {error:?}",
+                    manifest.service_class
+                );
+                halt();
+            }
+        };
+        let launch = ProcessLaunch {
+            address_space_root: service.address_space_root,
+            entry_point: service.entry_point,
+            user_stack_pointer: service.user_stack_pointer,
+            kernel_stack_pointer: privilege_info.kernel_stack_top as u64,
+            image_measurement_root: roots.image_measurement_root,
+            capability_root: roots.capability_root,
+            service_class: manifest.service_class,
+            priority: 1,
+        };
+        if let Err(error) = service_registry::install_service(launch, service.process) {
+            let _ = writeln!(
+                serial,
+                "Arach: COSMIC service class {} registry admission failed: {error:?}",
+                manifest.service_class
+            );
+            halt();
+        }
+        let _ = writeln!(
+            serial,
+            "Arach: COSMIC service class {} v{} ABI={} provenance={:#x} registry=sealed",
+            manifest.service_class,
+            manifest.version,
+            manifest.abi_version,
+            manifest.provenance_root,
+        );
     }
     let pid1_launch = ProcessLaunch {
         address_space_root: pid1_root,

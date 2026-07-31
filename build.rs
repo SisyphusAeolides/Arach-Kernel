@@ -232,6 +232,8 @@ fn main() {
             "cargo:rustc-env=SISYPHUS_CREST_PROVENANCE_ROOT={}",
             bootstrap_package.provenance_root
         );
+
+        emit_cosmic_service_artifacts();
     }
 
     let build_reference_driver = env::var_os("CARGO_FEATURE_REFERENCE_DRIVER").is_some();
@@ -305,6 +307,89 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", out_dir.display());
         println!("cargo:rustc-link-lib=static=arach_fortran");
     }
+}
+
+/// Emit build-bound metadata for the optional native COSMIC service bundle.
+///
+/// The ordinary C0 build does not set `ARACH_COSMIC_SERVICES_DIR`, so every
+/// service remains absent and the kernel keeps its existing Push/Crest boot
+/// contract. A production native COSMIC build points this variable at five
+/// target-compatible ELF images; all five are measured as one atomic set and
+/// are required by the kernel if the bundle is enabled.
+fn emit_cosmic_service_artifacts() {
+    const SERVICES: [(&str, &str, u16); 5] = [
+        ("DBUS", "dbus-broker", 4),
+        ("COMPOSITOR", "cosmic-comp", 5),
+        ("GREETER", "cosmic-greeter", 6),
+        ("SESSION", "cosmic-session", 7),
+        ("PORTAL", "xdg-desktop-portal-cosmic", 8),
+    ];
+
+    println!("cargo:rerun-if-env-changed=ARACH_COSMIC_SERVICES_DIR");
+    let directory = env::var_os("ARACH_COSMIC_SERVICES_DIR").map(PathBuf::from);
+    let Some(directory) = directory else {
+        println!("cargo:rustc-env=ARACH_COSMIC_BOOT_ENABLED=0");
+        for (label, _, _) in SERVICES {
+            emit_cosmic_defaults(label);
+        }
+        return;
+    };
+    assert!(
+        directory.is_dir(),
+        "ARACH_COSMIC_SERVICES_DIR is not a directory: {}",
+        directory.display()
+    );
+    println!("cargo:rustc-env=ARACH_COSMIC_BOOT_ENABLED=1");
+
+    for (label, name, service_class) in SERVICES {
+        let path = directory.join(name);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read native COSMIC service {} (class {}): {error}",
+                path.display(),
+                service_class
+            )
+        });
+        assert!(
+            !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024,
+            "native COSMIC service {} must be between 1 byte and 16 MiB",
+            path.display()
+        );
+        let digest = sha256(&bytes);
+        emit_digest(&format!("COSMIC_{label}"), digest);
+        println!("cargo:rustc-env=ARACH_COSMIC_{label}_BYTES={}", bytes.len());
+        println!(
+            "cargo:rustc-env=ARACH_COSMIC_{label}_ENTRY_FILE_OFFSET={}",
+            elf_entry_file_offset(&bytes)
+        );
+        println!("cargo:rustc-env=ARACH_COSMIC_{label}_VERSION=1");
+        println!("cargo:rustc-env=ARACH_COSMIC_{label}_SERVICE_CLASS={service_class}");
+        println!(
+            "cargo:rustc-env=ARACH_COSMIC_{label}_PROVENANCE_ROOT={}",
+            provenance_root(&[digest])
+        );
+    }
+    // Keep the source directory itself in Cargo's dependency graph. The
+    // individual files are also listed above so replacement of one service
+    // invalidates the exact kernel artifact that admits it.
+    println!("cargo:rerun-if-changed={}", directory.display());
+}
+
+fn emit_digest(prefix: &str, digest: [u8; 32]) {
+    println!(
+        "cargo:rustc-env=ARACH_{prefix}_SHA256={}",
+        encode_sha256(digest)
+    );
+}
+
+fn emit_cosmic_defaults(label: &str) {
+    emit_digest(&format!("COSMIC_{label}"), [0; 32]);
+    println!("cargo:rustc-env=ARACH_COSMIC_{label}_BYTES=0");
+    println!("cargo:rustc-env=ARACH_COSMIC_{label}_ENTRY_FILE_OFFSET=0");
+    println!("cargo:rustc-env=ARACH_COSMIC_{label}_VERSION=0");
+    println!("cargo:rustc-env=ARACH_COSMIC_{label}_SERVICE_CLASS=0");
+    println!("cargo:rustc-env=ARACH_COSMIC_{label}_PROVENANCE_ROOT=0");
 }
 
 fn add_position_flags(command: &mut Command) {
