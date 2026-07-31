@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: SisyphusAeolides/Push
-          ref: 60b79defe84626d456a90551276f24a0f0bb3597
+          ref: 209cea8d8dd596961f55fbfe14ea8e233475405d
           path: target/c0-sources/push
       - uses: actions/checkout@v4
         with:
