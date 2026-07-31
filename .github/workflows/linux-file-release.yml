@@ -26,6 +26,7 @@ jobs:
           if grep -Fq 'pub mod linux_file;' src/lib.rs; then
             printf 'Linux file syscall integration is already published\n'
           else
+            grep -nE '^fn linux_(read|write|close|eventfd2|poll|timerfd)' src/syscalls.rs
             python3 scripts/fix-linux-file-patch.py
             python3 scripts/patch-linux-file-syscalls.py
           fi
