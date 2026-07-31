@@ -317,12 +317,15 @@ fn main() {
 ///
 /// The ordinary C0 build does not set `ARACH_COSMIC_SERVICES_DIR`, so every
 /// service remains absent and the kernel keeps its existing Push/Crest boot
-/// contract. A production native COSMIC build points this variable at five
-/// target-compatible ELF images; all five are measured as one atomic set and
+/// contract. A production native COSMIC build points this variable at eight
+/// target-compatible ELF images; all eight are measured as one atomic set and
 /// are required by the kernel if the bundle is enabled.
 fn emit_cosmic_service_artifacts() {
-    const SERVICES: [(&str, &str, u16); 5] = [
+    const SERVICES: [(&str, &str, u16); 8] = [
+        ("SEATD", "seatd", 9),
         ("DBUS", "dbus-broker", 4),
+        ("PIPEWIRE", "pipewire", 10),
+        ("WIREPLUMBER", "wireplumber", 11),
         ("COMPOSITOR", "cosmic-comp", 5),
         ("GREETER", "cosmic-greeter", 6),
         ("SESSION", "cosmic-session", 7),

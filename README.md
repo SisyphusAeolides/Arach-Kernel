@@ -135,7 +135,7 @@ storage, audio, and networking before qualification expands to real hardware.
 `scripts/build-desktop-bundle.sh` is fail-closed: it requires `seatd`,
 `pipewire`, `wireplumber`, `dbus-broker`, `cosmic-comp`, `cosmic-greeter`,
 `cosmic-session`, and `xdg-desktop-portal-cosmic` as target-compatible ELF
-images. It enables Push's `cosmic-boot` service graph, measures the five
+images. It enables Push's `cosmic-boot` service graph, measures all eight
 native boot services in Arach and Granite, and retains the seat/audio images
 for publication into the target root. It never downloads or silently
 substitutes host COSMIC binaries.

@@ -112,13 +112,41 @@ const MAXIMUM_E1000_CONTROLLERS: usize = 1;
 
 /// Native COSMIC service artifacts are optional while the C0 probe remains
 /// the default boot profile. The build script emits a complete metadata set
-/// only when all five target-compatible service images are supplied.
+/// only when all eight target-compatible service images are supplied.
 #[cfg(target_os = "none")]
 const COSMIC_BOOT_ENABLED: bool = parse_decimal(env!("ARACH_COSMIC_BOOT_ENABLED")) != 0;
 #[cfg(not(target_os = "none"))]
 const COSMIC_BOOT_ENABLED: bool = false;
 
 const COSMIC_SERVICE_STACK_PAGES: usize = 512;
+
+#[cfg(target_os = "none")]
+const COSMIC_SEATD_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_SEATD_SHA256"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_SEATD_SHA256: [u8; 32] = [0; 32];
+#[cfg(target_os = "none")]
+const COSMIC_SEATD_BYTES: usize = parse_decimal(env!("ARACH_COSMIC_SEATD_BYTES"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_SEATD_BYTES: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_SEATD_ENTRY_FILE_OFFSET: usize =
+    parse_decimal(env!("ARACH_COSMIC_SEATD_ENTRY_FILE_OFFSET"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_SEATD_ENTRY_FILE_OFFSET: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_SEATD_VERSION: u16 = parse_decimal(env!("ARACH_COSMIC_SEATD_VERSION")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_SEATD_VERSION: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_SEATD_SERVICE_CLASS: u16 =
+    parse_decimal(env!("ARACH_COSMIC_SEATD_SERVICE_CLASS")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_SEATD_SERVICE_CLASS: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_SEATD_PROVENANCE_ROOT: u64 =
+    parse_decimal(env!("ARACH_COSMIC_SEATD_PROVENANCE_ROOT")) as u64;
+#[cfg(not(target_os = "none"))]
+const COSMIC_SEATD_PROVENANCE_ROOT: u64 = 0;
 
 #[cfg(target_os = "none")]
 const COSMIC_DBUS_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_DBUS_SHA256"));
@@ -147,6 +175,63 @@ const COSMIC_DBUS_PROVENANCE_ROOT: u64 =
     parse_decimal(env!("ARACH_COSMIC_DBUS_PROVENANCE_ROOT")) as u64;
 #[cfg(not(target_os = "none"))]
 const COSMIC_DBUS_PROVENANCE_ROOT: u64 = 0;
+
+#[cfg(target_os = "none")]
+const COSMIC_PIPEWIRE_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_PIPEWIRE_SHA256"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_PIPEWIRE_SHA256: [u8; 32] = [0; 32];
+#[cfg(target_os = "none")]
+const COSMIC_PIPEWIRE_BYTES: usize = parse_decimal(env!("ARACH_COSMIC_PIPEWIRE_BYTES"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_PIPEWIRE_BYTES: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_PIPEWIRE_ENTRY_FILE_OFFSET: usize =
+    parse_decimal(env!("ARACH_COSMIC_PIPEWIRE_ENTRY_FILE_OFFSET"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_PIPEWIRE_ENTRY_FILE_OFFSET: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_PIPEWIRE_VERSION: u16 = parse_decimal(env!("ARACH_COSMIC_PIPEWIRE_VERSION")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_PIPEWIRE_VERSION: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_PIPEWIRE_SERVICE_CLASS: u16 =
+    parse_decimal(env!("ARACH_COSMIC_PIPEWIRE_SERVICE_CLASS")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_PIPEWIRE_SERVICE_CLASS: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_PIPEWIRE_PROVENANCE_ROOT: u64 =
+    parse_decimal(env!("ARACH_COSMIC_PIPEWIRE_PROVENANCE_ROOT")) as u64;
+#[cfg(not(target_os = "none"))]
+const COSMIC_PIPEWIRE_PROVENANCE_ROOT: u64 = 0;
+
+#[cfg(target_os = "none")]
+const COSMIC_WIREPLUMBER_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_WIREPLUMBER_SHA256"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_WIREPLUMBER_SHA256: [u8; 32] = [0; 32];
+#[cfg(target_os = "none")]
+const COSMIC_WIREPLUMBER_BYTES: usize = parse_decimal(env!("ARACH_COSMIC_WIREPLUMBER_BYTES"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_WIREPLUMBER_BYTES: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_WIREPLUMBER_ENTRY_FILE_OFFSET: usize =
+    parse_decimal(env!("ARACH_COSMIC_WIREPLUMBER_ENTRY_FILE_OFFSET"));
+#[cfg(not(target_os = "none"))]
+const COSMIC_WIREPLUMBER_ENTRY_FILE_OFFSET: usize = 0;
+#[cfg(target_os = "none")]
+const COSMIC_WIREPLUMBER_VERSION: u16 =
+    parse_decimal(env!("ARACH_COSMIC_WIREPLUMBER_VERSION")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_WIREPLUMBER_VERSION: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_WIREPLUMBER_SERVICE_CLASS: u16 =
+    parse_decimal(env!("ARACH_COSMIC_WIREPLUMBER_SERVICE_CLASS")) as u16;
+#[cfg(not(target_os = "none"))]
+const COSMIC_WIREPLUMBER_SERVICE_CLASS: u16 = 0;
+#[cfg(target_os = "none")]
+const COSMIC_WIREPLUMBER_PROVENANCE_ROOT: u64 =
+    parse_decimal(env!("ARACH_COSMIC_WIREPLUMBER_PROVENANCE_ROOT")) as u64;
+#[cfg(not(target_os = "none"))]
+const COSMIC_WIREPLUMBER_PROVENANCE_ROOT: u64 = 0;
 
 #[cfg(target_os = "none")]
 const COSMIC_COMPOSITOR_SHA256: [u8; 32] = parse_sha256(env!("ARACH_COSMIC_COMPOSITOR_SHA256"));
@@ -905,6 +990,19 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         cosmic_modules.push(load_cosmic_boot_artifact(
             &mut serial,
             boot,
+            b"seatd",
+            "seatd",
+            b"seatd",
+            COSMIC_SEATD_BYTES,
+            COSMIC_SEATD_ENTRY_FILE_OFFSET,
+            COSMIC_SEATD_SHA256,
+            COSMIC_SEATD_VERSION,
+            COSMIC_SEATD_SERVICE_CLASS,
+            COSMIC_SEATD_PROVENANCE_ROOT,
+        ));
+        cosmic_modules.push(load_cosmic_boot_artifact(
+            &mut serial,
+            boot,
             b"dbus-broker",
             "dbus-broker",
             b"dbus-broker",
@@ -914,6 +1012,32 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
             COSMIC_DBUS_VERSION,
             COSMIC_DBUS_SERVICE_CLASS,
             COSMIC_DBUS_PROVENANCE_ROOT,
+        ));
+        cosmic_modules.push(load_cosmic_boot_artifact(
+            &mut serial,
+            boot,
+            b"pipewire",
+            "pipewire",
+            b"pipewire",
+            COSMIC_PIPEWIRE_BYTES,
+            COSMIC_PIPEWIRE_ENTRY_FILE_OFFSET,
+            COSMIC_PIPEWIRE_SHA256,
+            COSMIC_PIPEWIRE_VERSION,
+            COSMIC_PIPEWIRE_SERVICE_CLASS,
+            COSMIC_PIPEWIRE_PROVENANCE_ROOT,
+        ));
+        cosmic_modules.push(load_cosmic_boot_artifact(
+            &mut serial,
+            boot,
+            b"wireplumber",
+            "wireplumber",
+            b"wireplumber",
+            COSMIC_WIREPLUMBER_BYTES,
+            COSMIC_WIREPLUMBER_ENTRY_FILE_OFFSET,
+            COSMIC_WIREPLUMBER_SHA256,
+            COSMIC_WIREPLUMBER_VERSION,
+            COSMIC_WIREPLUMBER_SERVICE_CLASS,
+            COSMIC_WIREPLUMBER_PROVENANCE_ROOT,
         ));
         cosmic_modules.push(load_cosmic_boot_artifact(
             &mut serial,

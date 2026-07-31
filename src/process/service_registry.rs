@@ -28,6 +28,9 @@ pub const COSMIC_COMPOSITOR_SERVICE_CLASS: u16 = 5;
 pub const COSMIC_GREETER_SERVICE_CLASS: u16 = 6;
 pub const COSMIC_SESSION_SERVICE_CLASS: u16 = 7;
 pub const XDG_PORTAL_SERVICE_CLASS: u16 = 8;
+pub const SEATD_SERVICE_CLASS: u16 = 9;
+pub const PIPEWIRE_SERVICE_CLASS: u16 = 10;
+pub const WIREPLUMBER_SERVICE_CLASS: u16 = 11;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceRegistryError {
@@ -262,7 +265,10 @@ mod tests {
     fn admits_each_bounded_cosmic_service_class_once() {
         let mut registry = ServiceImageRegistry::EMPTY;
         for class in [
+            SEATD_SERVICE_CLASS,
             DBUS_BROKER_SERVICE_CLASS,
+            PIPEWIRE_SERVICE_CLASS,
+            WIREPLUMBER_SERVICE_CLASS,
             COSMIC_COMPOSITOR_SERVICE_CLASS,
             COSMIC_GREETER_SERVICE_CLASS,
             COSMIC_SESSION_SERVICE_CLASS,
