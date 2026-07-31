@@ -58,6 +58,9 @@ trap cleanup EXIT
 cp -- "$ovmf_vars" "$vars"
 
 timeout_seconds=${ARACH_C0_TIMEOUT_SECONDS:-30}
+# Do not let a previous serial transcript satisfy the marker check if QEMU
+# exits before this invocation reaches the measured userspace probe.
+: >"$log"
 set +e
 timeout --kill-after=5s "${timeout_seconds}s" "$qemu" \
     -machine q35 \
