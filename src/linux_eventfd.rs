@@ -22,7 +22,7 @@ pub const READY_ERR: u32 = 0x008;
 pub const READY_HUP: u32 = 0x010;
 
 const MAXIMUM_EVENTFDS: usize = 64;
-const EVENTFD_BASE: u32 = 3;
+const EVENTFD_BASE: u32 = 0x100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventFdError {

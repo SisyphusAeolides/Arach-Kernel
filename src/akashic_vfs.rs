@@ -251,9 +251,6 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
                 if open_flags & flags::CREATE_INTENT == 0 {
                     return Err(VfsError::NotFound);
                 }
-                if open_flags & flags::WRITE_INTENT == 0 {
-                    return Err(VfsError::PermissionDenied);
-                }
                 self.require_parent_directory(path)?;
                 self.nodes
                     .iter()
@@ -427,6 +424,13 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
         validate_path(path)?;
         let index = self.find_node(path).ok_or(VfsError::NotFound)?;
         Ok(self.nodes[index].stat())
+    }
+
+    pub fn stat_handle(&mut self, owner: ProcessHandle, token: u64) -> Result<Stat, VfsError> {
+        self.ensure_initialized()?;
+        let handle_index = self.find_handle(owner, token)?;
+        let node_index = usize::from(self.handles[handle_index].node);
+        Ok(self.nodes[node_index].stat())
     }
 
     pub fn mkdir(&mut self, path: &[u8], now: u64) -> Result<(), VfsError> {
@@ -695,6 +699,10 @@ pub fn seek(owner: ProcessHandle, token: u64, offset: i64, whence: u32) -> Resul
 
 pub fn stat(path: &[u8]) -> Result<Stat, VfsError> {
     KERNEL_VFS.lock().stat(path)
+}
+
+pub fn stat_handle(owner: ProcessHandle, token: u64) -> Result<Stat, VfsError> {
+    KERNEL_VFS.lock().stat_handle(owner, token)
 }
 
 pub fn mkdir(path: &[u8], now: u64) -> Result<(), VfsError> {
