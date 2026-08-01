@@ -45,6 +45,7 @@ jobs:
             printf 'Linux thread exit integration is already published\n'
           else
             python3 scripts/patch-linux-thread-exit.py
+            git checkout -- scripts/patch-linux-thread-exit.py
           fi
       - run: cargo fmt --all
       - run: cargo fmt --all -- --check
