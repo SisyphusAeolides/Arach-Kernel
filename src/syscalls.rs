@@ -166,6 +166,167 @@ struct LinuxItimerspec {
     it_value: LinuxTimespec,
 }
 
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LinuxSignalStack {
+    sp: u64,
+    flags: i32,
+    padding: u32,
+    size: u64,
+}
+
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LinuxSignalContext {
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rdi: u64,
+    rsi: u64,
+    rbp: u64,
+    rbx: u64,
+    rdx: u64,
+    rax: u64,
+    rcx: u64,
+    rsp: u64,
+    rip: u64,
+    flags: u64,
+    cs: u16,
+    gs: u16,
+    fs: u16,
+    ss: u16,
+    err: u64,
+    trapno: u64,
+    oldmask: u64,
+    cr2: u64,
+    fpstate: u64,
+    reserved: [u64; 8],
+}
+
+#[cfg(any(target_os = "none", test))]
+impl LinuxSignalContext {
+    fn from_saved(saved: crate::process::context::SavedUserContext, mask: u64) -> Self {
+        Self {
+            r8: saved.r8,
+            r9: saved.r9,
+            r10: saved.r10,
+            r11: saved.r11,
+            r12: saved.r12,
+            r13: saved.r13,
+            r14: saved.r14,
+            r15: saved.r15,
+            rdi: saved.rdi,
+            rsi: saved.rsi,
+            rbp: saved.rbp,
+            rbx: saved.rbx,
+            rdx: saved.rdx,
+            rax: saved.rax,
+            rcx: saved.rcx,
+            rsp: saved.stack_pointer,
+            rip: saved.instruction_pointer,
+            flags: saved.flags,
+            cs: crate::arch::x86_64::privilege::USER_CODE_SELECTOR,
+            gs: 0,
+            fs: 0,
+            ss: crate::arch::x86_64::privilege::USER_DATA_SELECTOR,
+            err: 0,
+            trapno: 0,
+            oldmask: mask,
+            cr2: 0,
+            fpstate: 0,
+            reserved: [0; 8],
+        }
+    }
+
+    fn saved(self) -> Result<crate::process::context::SavedUserContext, ContextError> {
+        if self.cs != crate::arch::x86_64::privilege::USER_CODE_SELECTOR
+            || self.ss != crate::arch::x86_64::privilege::USER_DATA_SELECTOR
+            || self.fpstate != 0
+        {
+            return Err(ContextError::InvalidDispatchAuthority);
+        }
+        let saved = crate::process::context::SavedUserContext {
+            r15: self.r15,
+            r14: self.r14,
+            r13: self.r13,
+            r12: self.r12,
+            r11: self.r11,
+            r10: self.r10,
+            r9: self.r9,
+            r8: self.r8,
+            rbp: self.rbp,
+            rdi: self.rdi,
+            rsi: self.rsi,
+            rdx: self.rdx,
+            rcx: self.rcx,
+            rbx: self.rbx,
+            rax: self.rax,
+            instruction_pointer: self.rip,
+            flags: self.flags,
+            stack_pointer: self.rsp,
+        };
+        saved.validate()?;
+        Ok(saved)
+    }
+}
+
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LinuxSignalUcontext {
+    flags: u64,
+    link: u64,
+    stack: LinuxSignalStack,
+    machine: LinuxSignalContext,
+    signal_mask: u64,
+}
+
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinuxSignalInfo {
+    signal: i32,
+    errno: i32,
+    code: i32,
+    padding: i32,
+    payload: [u8; 112],
+}
+
+#[cfg(any(target_os = "none", test))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinuxRtSignalFrame {
+    restorer: u64,
+    context: LinuxSignalUcontext,
+    info: LinuxSignalInfo,
+}
+
+#[cfg(any(target_os = "none", test))]
+const LINUX_RT_SIGNAL_FRAME_BYTES: usize = core::mem::size_of::<LinuxRtSignalFrame>();
+#[cfg(any(target_os = "none", test))]
+const LINUX_RT_SIGNAL_CONTEXT_OFFSET: u64 =
+    core::mem::offset_of!(LinuxRtSignalFrame, context) as u64;
+#[cfg(any(target_os = "none", test))]
+const LINUX_RT_SIGNAL_INFO_OFFSET: u64 = core::mem::offset_of!(LinuxRtSignalFrame, info) as u64;
+
+#[cfg(any(target_os = "none", test))]
+const _: () = assert!(core::mem::size_of::<LinuxSignalContext>() == 256);
+#[cfg(any(target_os = "none", test))]
+const _: () = assert!(core::mem::size_of::<LinuxSignalUcontext>() == 304);
+#[cfg(any(target_os = "none", test))]
+const _: () = assert!(LINUX_RT_SIGNAL_FRAME_BYTES == 440);
+#[cfg(any(target_os = "none", test))]
+const _: () = assert!(LINUX_RT_SIGNAL_CONTEXT_OFFSET == 8);
+#[cfg(any(target_os = "none", test))]
+const _: () = assert!(LINUX_RT_SIGNAL_INFO_OFFSET == 312);
+
 /// Linux's fixed-size `struct utsname` wire layout (six 65-byte fields).
 /// Values are intentionally compile-time, bounded identity data until the
 /// device tree and kernel-release providers are available to userspace.
@@ -362,13 +523,13 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
             Some(crate::process::abi::LinuxSyscall::Futex) => {
                 schedule_linux_futex_return(frame.dispatch.user, arguments)
             }
+            Some(crate::process::abi::LinuxSyscall::RtSigreturn) => {
+                schedule_linux_sigreturn(frame.dispatch.user)
+            }
             _ => {
                 let mut saved = frame.dispatch.user;
                 saved.set_syscall_result(dispatch_linux_syscall(number, arguments));
-                match crate::process::lifecycle::resume_current(saved) {
-                    Ok(scheduled) => scheduled,
-                    Err(_) => crate::arch::x86_64::halt(),
-                }
+                resume_linux_with_pending_signal(saved)
             }
         }
     } else {
@@ -470,6 +631,11 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
     };
     let _ = crate::linux_futex::cancel_wait(exiting);
     recover_exiting_robust_list(exiting);
+    let group = crate::process::lifecycle::current_thread_group_handle();
+    let clear_group = crate::process::lifecycle::current_is_thread_group_leader()
+        .then_some(group)
+        .flatten();
+    crate::linux_signal::clear_thread(exiting, clear_group);
     if let Some(clear_child_tid) = crate::linux_thread::take_clear_child_tid(exiting) {
         if copy_value_to_user(clear_child_tid, &0_u32).is_ok() {
             let _ = crate::linux_futex::wake_current(clear_child_tid, 1);
@@ -558,6 +724,10 @@ fn schedule_linux_clone_return(
         return resume_linux_result(saved, ERROR_BAD_ADDRESS);
     }
 
+    let parent = match crate::process::lifecycle::current_handle() {
+        Some(parent) => parent,
+        None => return resume_linux_result(saved, ERROR_PERMISSION_DENIED),
+    };
     let (child, parent_return) =
         match crate::process::lifecycle::clone_current_thread(saved, child_stack, child_fs_base) {
             Ok(result) => result,
@@ -568,6 +738,9 @@ fn schedule_linux_clone_return(
         };
 
     let mut publication_failed = false;
+    if crate::linux_signal::inherit_mask(parent, child).is_err() {
+        publication_failed = true;
+    }
     if flags & CLONE_CHILD_CLEARTID != 0
         && crate::linux_thread::set_tid_address(child, arguments[3]).is_err()
     {
@@ -586,6 +759,7 @@ fn schedule_linux_clone_return(
         publication_failed = true;
     }
     if publication_failed {
+        crate::linux_signal::clear_thread(child, None);
         let _ = crate::linux_thread::take_clear_child_tid(child);
         if crate::process::lifecycle::discard_runnable_thread(child).is_err() {
             crate::arch::x86_64::halt();
@@ -636,6 +810,129 @@ fn resume_linux_result(
         Ok(scheduled) => scheduled,
         Err(_) => crate::arch::x86_64::halt(),
     }
+}
+
+#[cfg(target_os = "none")]
+fn signal_frame_base(stack_pointer: u64) -> Option<u64> {
+    stack_pointer
+        .checked_sub(LINUX_RT_SIGNAL_FRAME_BYTES as u64)
+        .map(|address| address & !0xf)
+        .and_then(|address| address.checked_sub(8))
+}
+
+#[cfg(target_os = "none")]
+fn resume_linux_with_pending_signal(
+    saved: crate::process::context::SavedUserContext,
+) -> crate::process::lifecycle::ScheduledProcess {
+    let owner = match crate::process::lifecycle::current_handle() {
+        Some(owner) => owner,
+        None => crate::arch::x86_64::halt(),
+    };
+    let group = match crate::process::lifecycle::current_thread_group_handle() {
+        Some(group) => group,
+        None => crate::arch::x86_64::halt(),
+    };
+    if !crate::linux_signal::delivery_pending(owner) {
+        return match crate::process::lifecycle::resume_current(saved) {
+            Ok(scheduled) => scheduled,
+            Err(_) => crate::arch::x86_64::halt(),
+        };
+    }
+    let Some(frame_base) = signal_frame_base(saved.stack_pointer) else {
+        return schedule_exit_return(128 + 11);
+    };
+    match crate::linux_signal::begin_delivery(owner, group, frame_base) {
+        Ok(crate::linux_signal::Delivery::None) => {
+            match crate::process::lifecycle::resume_current(saved) {
+                Ok(scheduled) => scheduled,
+                Err(_) => crate::arch::x86_64::halt(),
+            }
+        }
+        Ok(crate::linux_signal::Delivery::Terminate(signal)) => {
+            schedule_exit_return(128 + signal as isize)
+        }
+        Ok(crate::linux_signal::Delivery::Handler {
+            signal,
+            action,
+            previous_mask,
+        }) => {
+            let frame = LinuxRtSignalFrame {
+                restorer: action.restorer,
+                context: LinuxSignalUcontext {
+                    flags: 0x6,
+                    link: 0,
+                    stack: LinuxSignalStack::default(),
+                    machine: LinuxSignalContext::from_saved(saved, previous_mask),
+                    signal_mask: previous_mask,
+                },
+                info: LinuxSignalInfo {
+                    signal: signal as i32,
+                    errno: 0,
+                    code: -6,
+                    padding: 0,
+                    payload: [0; 112],
+                },
+            };
+            if copy_value_to_user(frame_base, &frame).is_err() {
+                let _ = crate::linux_signal::finish_sigreturn(owner, frame_base, previous_mask);
+                return schedule_exit_return(128 + 11);
+            }
+            let mut handler = saved;
+            handler.instruction_pointer = action.handler;
+            handler.stack_pointer = frame_base;
+            handler.rdi = signal as u64;
+            if action.flags & crate::linux_signal::SA_SIGINFO != 0 {
+                handler.rsi = frame_base + LINUX_RT_SIGNAL_INFO_OFFSET;
+                handler.rdx = frame_base + LINUX_RT_SIGNAL_CONTEXT_OFFSET;
+            } else {
+                handler.rsi = 0;
+                handler.rdx = 0;
+            }
+            handler.rax = 0;
+            handler.rcx = action.handler;
+            handler.r11 = handler.flags;
+            match crate::process::lifecycle::resume_current(handler) {
+                Ok(scheduled) => scheduled,
+                Err(_) => crate::arch::x86_64::halt(),
+            }
+        }
+        Err(_) => schedule_exit_return(128 + 11),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn schedule_linux_sigreturn(
+    saved: crate::process::context::SavedUserContext,
+) -> crate::process::lifecycle::ScheduledProcess {
+    let owner = match crate::process::lifecycle::current_handle() {
+        Some(owner) => owner,
+        None => crate::arch::x86_64::halt(),
+    };
+    let Some(frame_base) = saved
+        .stack_pointer
+        .checked_sub(core::mem::size_of::<u64>() as u64)
+    else {
+        return schedule_exit_return(128 + 11);
+    };
+    if crate::linux_signal::active_frame(owner) != Some(frame_base) {
+        return schedule_exit_return(128 + 11);
+    }
+    let mut encoded = [0_u8; LINUX_RT_SIGNAL_FRAME_BYTES];
+    if copy_from_user(frame_base, &mut encoded).is_err() {
+        return schedule_exit_return(128 + 11);
+    }
+    // SAFETY: LinuxRtSignalFrame is repr(C), Copy, and the bounded user copy
+    // initialized every byte before this unaligned read.
+    let frame = unsafe { core::ptr::read_unaligned(encoded.as_ptr().cast::<LinuxRtSignalFrame>()) };
+    let restored = match frame.context.machine.saved() {
+        Ok(restored) => restored,
+        Err(_) => return schedule_exit_return(128 + 11),
+    };
+    if crate::linux_signal::finish_sigreturn(owner, frame_base, frame.context.signal_mask).is_err()
+    {
+        return schedule_exit_return(128 + 11);
+    }
+    resume_linux_with_pending_signal(restored)
 }
 
 #[cfg(target_os = "none")]
@@ -731,6 +1028,10 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
             crate::process::lifecycle::current_pid() as isize
         }
         Some(crate::process::abi::LinuxSyscall::SetTidAddress) => linux_set_tid_address(arguments),
+        Some(crate::process::abi::LinuxSyscall::RtSigaction) => linux_rt_sigaction(arguments),
+        Some(crate::process::abi::LinuxSyscall::RtSigprocmask) => linux_rt_sigprocmask(arguments),
+        Some(crate::process::abi::LinuxSyscall::Kill) => linux_kill(arguments),
+        Some(crate::process::abi::LinuxSyscall::Tgkill) => linux_tgkill(arguments),
         Some(crate::process::abi::LinuxSyscall::SetRobustList) => linux_set_robust_list(arguments),
         Some(crate::process::abi::LinuxSyscall::GetRobustList) => linux_get_robust_list(arguments),
         Some(crate::process::abi::LinuxSyscall::Getppid) => {
@@ -811,6 +1112,146 @@ fn linux_set_tid_address(arguments: [u64; 6]) -> isize {
         Err(crate::linux_thread::ThreadIdentityError::InvalidOwner) => ERROR_PERMISSION_DENIED,
         Err(crate::linux_thread::ThreadIdentityError::InvalidAddress) => ERROR_INVALID_ARGUMENT,
         Err(crate::linux_thread::ThreadIdentityError::Capacity) => ERROR_TRY_AGAIN,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn read_signal_action(address: u64) -> Result<crate::linux_signal::SignalAction, UserCopyError> {
+    let mut encoded = [0_u8; core::mem::size_of::<crate::linux_signal::SignalAction>()];
+    copy_from_user(address, &mut encoded)?;
+    // SAFETY: SignalAction is repr(C), Copy, has four initialized u64 fields,
+    // and the bounded copy initialized the complete byte array.
+    Ok(unsafe {
+        core::ptr::read_unaligned(encoded.as_ptr().cast::<crate::linux_signal::SignalAction>())
+    })
+}
+
+#[cfg(target_os = "none")]
+fn linux_rt_sigaction(arguments: [u64; 6]) -> isize {
+    if arguments[3] != core::mem::size_of::<u64>() as u64 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let Ok(signal) = u32::try_from(arguments[0]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if arguments[2] != 0
+        && validate_user_write_range(
+            arguments[2],
+            core::mem::size_of::<crate::linux_signal::SignalAction>(),
+        )
+        .is_err()
+    {
+        return ERROR_BAD_ADDRESS;
+    }
+    let replacement = if arguments[1] == 0 {
+        None
+    } else {
+        match read_signal_action(arguments[1]) {
+            Ok(action) => Some(action),
+            Err(_) => return ERROR_BAD_ADDRESS,
+        }
+    };
+    let group = match crate::process::lifecycle::current_thread_group_handle() {
+        Some(group) => group,
+        None => return ERROR_PERMISSION_DENIED,
+    };
+    let previous = match crate::linux_signal::set_action(group, signal, replacement) {
+        Ok(previous) => previous,
+        Err(crate::linux_signal::SignalError::Capacity) => return ERROR_TRY_AGAIN,
+        Err(_) => return ERROR_INVALID_ARGUMENT,
+    };
+    if arguments[2] != 0 && copy_value_to_user(arguments[2], &previous).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_rt_sigprocmask(arguments: [u64; 6]) -> isize {
+    if arguments[3] != core::mem::size_of::<u64>() as u64 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    if arguments[2] != 0
+        && validate_user_write_range(arguments[2], core::mem::size_of::<u64>()).is_err()
+    {
+        return ERROR_BAD_ADDRESS;
+    }
+    let replacement = if arguments[1] == 0 {
+        None
+    } else {
+        let mut encoded = [0_u8; core::mem::size_of::<u64>()];
+        if copy_from_user(arguments[1], &mut encoded).is_err() {
+            return ERROR_BAD_ADDRESS;
+        }
+        Some(u64::from_ne_bytes(encoded))
+    };
+    let owner = match crate::process::lifecycle::current_handle() {
+        Some(owner) => owner,
+        None => return ERROR_PERMISSION_DENIED,
+    };
+    let Ok(operation) = u32::try_from(arguments[0]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let previous = match crate::linux_signal::update_mask(owner, operation, replacement) {
+        Ok(previous) => previous,
+        Err(crate::linux_signal::SignalError::Capacity) => return ERROR_TRY_AGAIN,
+        Err(_) => return ERROR_INVALID_ARGUMENT,
+    };
+    if arguments[2] != 0 && copy_value_to_user(arguments[2], &previous).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_kill(arguments: [u64; 6]) -> isize {
+    let Ok(pid) = u32::try_from(arguments[0]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(signal) = u32::try_from(arguments[1]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if pid != crate::process::lifecycle::current_thread_group() {
+        return -3;
+    }
+    queue_current_linux_signal(signal)
+}
+
+#[cfg(target_os = "none")]
+fn linux_tgkill(arguments: [u64; 6]) -> isize {
+    let Ok(group) = u32::try_from(arguments[0]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(tid) = u32::try_from(arguments[1]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(signal) = u32::try_from(arguments[2]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if group != crate::process::lifecycle::current_thread_group()
+        || tid != crate::process::lifecycle::current_pid()
+    {
+        return -3;
+    }
+    queue_current_linux_signal(signal)
+}
+
+#[cfg(target_os = "none")]
+fn queue_current_linux_signal(signal: u32) -> isize {
+    if signal == 0 {
+        return 0;
+    }
+    let owner = match crate::process::lifecycle::current_handle() {
+        Some(owner) => owner,
+        None => return ERROR_PERMISSION_DENIED,
+    };
+    match crate::linux_signal::queue(owner, signal) {
+        Ok(()) => 0,
+        Err(crate::linux_signal::SignalError::Capacity) => ERROR_TRY_AGAIN,
+        Err(crate::linux_signal::SignalError::Unsupported) => ERROR_NOT_IMPLEMENTED,
+        Err(_) => ERROR_INVALID_ARGUMENT,
     }
 }
 
@@ -2803,6 +3244,24 @@ mod tests {
         assert_eq!(core::mem::size_of::<LinuxUtsName>(), 390);
         assert_eq!(core::mem::size_of::<LinuxTimespec>(), 16);
         assert_eq!(core::mem::size_of::<LinuxStat>(), 144);
+    }
+
+    #[test]
+    fn signal_frame_layout_and_integer_context_round_trip_match_linux() {
+        let mut saved = SavedUserContext::initial(0x4000, 0x9000);
+        saved.r15 = 15;
+        saved.r10 = 10;
+        saved.rdi = 7;
+        saved.rbx = 3;
+        saved.rax = 99;
+        let machine = LinuxSignalContext::from_saved(saved, 0x55);
+        assert_eq!(machine.saved(), Ok(saved));
+        assert_eq!(machine.oldmask, 0x55);
+        assert_eq!(core::mem::size_of::<LinuxSignalContext>(), 256);
+        assert_eq!(core::mem::size_of::<LinuxSignalUcontext>(), 304);
+        assert_eq!(core::mem::size_of::<LinuxRtSignalFrame>(), 440);
+        assert_eq!(LINUX_RT_SIGNAL_CONTEXT_OFFSET, 8);
+        assert_eq!(LINUX_RT_SIGNAL_INFO_OFFSET, 312);
     }
 
     #[test]

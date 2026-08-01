@@ -39,6 +39,7 @@ pub enum LinuxSyscall {
     RtSigaction,
     RtSigprocmask,
     RtSigreturn,
+    Kill,
     Ioctl,
     Dup,
     Dup2,
@@ -95,6 +96,7 @@ pub enum LinuxSyscall {
     Prlimit64,
     Gettid,
     ExitGroup,
+    Tgkill,
     Rseq,
 }
 
@@ -117,6 +119,7 @@ impl LinuxSyscall {
             13 => Some(Self::RtSigaction),
             14 => Some(Self::RtSigprocmask),
             15 => Some(Self::RtSigreturn),
+            62 => Some(Self::Kill),
             16 => Some(Self::Ioctl),
             32 => Some(Self::Dup),
             33 => Some(Self::Dup2),
@@ -151,6 +154,7 @@ impl LinuxSyscall {
             228 => Some(Self::ClockGettime),
             230 => Some(Self::ClockNanosleep),
             231 => Some(Self::ExitGroup),
+            234 => Some(Self::Tgkill),
             232 => Some(Self::EpollWait),
             233 => Some(Self::EpollCtl),
             257 => Some(Self::OpenAt),
@@ -203,6 +207,8 @@ mod tests {
             Some(LinuxSyscall::ArchPrctl)
         );
         assert_eq!(LinuxSyscall::from_number(202), Some(LinuxSyscall::Futex));
+        assert_eq!(LinuxSyscall::from_number(62), Some(LinuxSyscall::Kill));
+        assert_eq!(LinuxSyscall::from_number(234), Some(LinuxSyscall::Tgkill));
         assert_eq!(
             LinuxSyscall::from_number(273),
             Some(LinuxSyscall::SetRobustList)

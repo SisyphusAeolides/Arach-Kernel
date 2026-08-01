@@ -37,7 +37,7 @@ Arach Kernel is under active development. The pinned Granite/Arach/Push C0
 bundle now executes under QEMU/OVMF in CI, enters a measured ring-3 Linux
 personality, and emits serial evidence from the real syscall, lifecycle, and
 page-table paths. The currently packaged kernel source is
-`1b60dace685c058ab5dbf10f582b897203c17cc2`.
+`a1e893667c9a31d068490fe017ae8b8be38a3af3`.
 
 The Linux personality currently covers:
 
@@ -57,6 +57,9 @@ The Linux personality currently covers:
 - generation-bound `set_robust_list`/current-thread `get_robust_list`, a
   2,048-link exit bound, atomic `OWNER_DIED` publication, and measured wake of
   a private robust-futex waiter;
+- generation-bound thread-group signal dispositions and per-thread masks,
+  coalesced pending state, self-targeted `kill`/`tgkill`, and measured x86-64
+  `SA_SIGINFO` frame delivery and exact-frame `rt_sigreturn` restoration;
 - generation- and epoch-bound x86-64 FS-base TLS with Linux `arch_prctl`
   `ARCH_SET_FS`/`ARCH_GET_FS`, clone inheritance or `CLONE_SETTLS`, and hardware
   readback before every user return.
@@ -67,12 +70,14 @@ one collision-free unified descriptor namespace. The bounded clone admission
 accepts the shared VM/FS/files/sighand/thread/sysvsem profile plus TLS and TID
 publication flags; fork-like clone modes, leader exit with live peers, and
 multi-member `exit_group` fail closed. PI and process-shared robust futexes,
-signal delivery, and signal return remain future compatibility slices.
+cross-process and asynchronous signal delivery, real-time signal queues,
+alternate signal stacks, FPU/xstate restoration, stop/continue semantics, and
+interrupted-syscall restart remain future compatibility slices.
 
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
-| Linux userspace compatibility | Identity, memory, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, a shared-address-space clone profile, measured private robust-futex owner-death recovery and clear-child-tid wake, and per-thread FS-base TLS are implemented and tested | Add signal delivery, complete thread-group exit semantics, a unified descriptor namespace, and persistent storage |
+| Linux userspace compatibility | Identity, memory, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, a shared-address-space clone profile, measured private robust-futex recovery and clear-child-tid wake, measured synchronous self-signal delivery/return, and per-thread FS-base TLS are implemented and tested | Expand signal targets and asynchronous delivery, complete thread-group exit semantics, unify descriptors, and add persistent storage |
 | System bootstrap | The pinned Granite/Arach/Push C0 bundle executes under QEMU/OVMF and emits measured ring-3 syscall evidence | Promote the measured bootstrap into a native Push service graph and qualified COSMIC login/session path |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -82,8 +87,9 @@ signal delivery, and signal return remain future compatibility slices.
 The current critical path is:
 
 1. Keep the measured C0 QEMU/OVMF path green.
-2. Add signal delivery/return, then expand thread-group exit semantics without
-   weakening generation isolation or per-thread TLS ownership.
+2. Expand measured signal delivery beyond synchronous self-targeting, then
+   complete thread-group exit semantics without weakening generation isolation
+   or per-thread TLS ownership.
 3. Unify Linux descriptor ownership and add persistent block-backed storage.
 4. Connect qualified modules and the native Push service graph to a complete
    COSMIC session.

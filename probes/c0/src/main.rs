@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 const PASS: &[u8] = b"ARACH_C0_RING3_SYSCALL_PASS\n";
 const THREAD_PASS: &[u8] = b"ARACH_C1_THREAD_FUTEX_PASS\n";
 const ROBUST_PASS: &[u8] = b"ARACH_C1_ROBUST_FUTEX_PASS\n";
+const SIGNAL_PASS: &[u8] = b"ARACH_C1_SIGNAL_RETURN_PASS\n";
 const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
 const PANIC: &[u8] = b"ARACH_C0_RING3_PANIC\n";
 
@@ -16,6 +17,9 @@ const SYS_CLOSE: usize = 3;
 const SYS_MMAP: usize = 9;
 const SYS_MUNMAP: usize = 11;
 const SYS_BRK: usize = 12;
+const SYS_RT_SIGACTION: usize = 13;
+const SYS_RT_SIGPROCMASK: usize = 14;
+const SYS_RT_SIGRETURN: usize = 15;
 const SYS_GETPID: usize = 39;
 const SYS_CLONE: usize = 56;
 const SYS_EXIT: usize = 60;
@@ -28,6 +32,7 @@ const SYS_GETTID: usize = 186;
 const SYS_FUTEX: usize = 202;
 const SYS_SET_ROBUST_LIST: usize = 273;
 const SYS_GET_ROBUST_LIST: usize = 274;
+const SYS_TGKILL: usize = 234;
 const SYS_CLOCK_GETTIME: usize = 228;
 const SYS_EXIT_GROUP: usize = 231;
 const SYS_EVENTFD2: usize = 290;
@@ -44,6 +49,11 @@ const FUTEX_WAIT_PRIVATE: usize = 128;
 const FUTEX_WAKE_PRIVATE: usize = 129;
 const FUTEX_WAITERS: u32 = 0x8000_0000;
 const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+const SIGUSR1: u32 = 10;
+const SIG_BLOCK: usize = 0;
+const SIG_UNBLOCK: usize = 1;
+const SA_SIGINFO: usize = 0x0000_0004;
+const SA_RESTORER: usize = 0x0400_0000;
 const ARCH_SET_FS: usize = 0x1002;
 const ARCH_GET_FS: usize = 0x1003;
 
@@ -82,6 +92,7 @@ static THREAD_OBSERVED_TID: AtomicU32 = AtomicU32::new(0);
 static THREAD_OBSERVED_PID: AtomicU32 = AtomicU32::new(0);
 static THREAD_EVENT_FD: AtomicU32 = AtomicU32::new(0);
 static THREAD_DESCRIPTOR_WRITE: AtomicU32 = AtomicU32::new(0);
+static SIGNAL_HITS: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C)]
 struct RobustListHead {
@@ -130,6 +141,19 @@ arach_clone_thread:
     exit_syscall = const SYS_EXIT,
 );
 
+core::arch::global_asm!(
+    r#"
+    .global arach_signal_restorer
+    .type arach_signal_restorer,@function
+arach_signal_restorer:
+    mov eax, {sigreturn_syscall}
+    syscall
+    ud2
+    .size arach_signal_restorer, .-arach_signal_restorer
+"#,
+    sigreturn_syscall = const SYS_RT_SIGRETURN,
+);
+
 unsafe extern "C" {
     fn arach_clone_thread(
         flags: usize,
@@ -139,6 +163,45 @@ unsafe extern "C" {
         tls: usize,
         child_entry: extern "C" fn() -> isize,
     ) -> isize;
+    fn arach_signal_restorer();
+}
+
+#[repr(C)]
+struct LinuxSignalAction {
+    handler: usize,
+    flags: usize,
+    restorer: usize,
+    mask: u64,
+}
+
+#[repr(C)]
+struct LinuxSignalInfoPrefix {
+    signal: i32,
+    errno: i32,
+    code: i32,
+    padding: i32,
+}
+
+#[repr(C)]
+struct LinuxSignalContextPrefix {
+    flags: usize,
+}
+
+extern "C" fn signal_handler(
+    signal: usize,
+    info: *const LinuxSignalInfoPrefix,
+    context: *const LinuxSignalContextPrefix,
+) {
+    if signal != SIGUSR1 as usize || info.is_null() || context.is_null() {
+        return;
+    }
+    // SAFETY: SA_SIGINFO delivery supplies pointers into the live kernel-built
+    // rt_sigframe for the complete duration of this handler.
+    let valid = unsafe { (*info).signal == SIGUSR1 as i32 && (*info).code == -6 }
+        && unsafe { (*context).flags == 0x6 };
+    if valid {
+        SIGNAL_HITS.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 extern "C" fn thread_entry() -> isize {
@@ -674,6 +737,83 @@ pub extern "C" fn _start() -> ! {
         )
     };
     if wrote != THREAD_PASS.len() as isize {
+        fail();
+    }
+
+    // Install a three-argument SA_SIGINFO handler with an explicit x86-64
+    // restorer. SIGUSR1 is first queued while blocked, then delivered as part
+    // of the unblock syscall return. Returning from the handler must execute
+    // rt_sigreturn and resume this exact instruction stream.
+    SIGNAL_HITS.store(0, Ordering::Release);
+    let action = LinuxSignalAction {
+        handler: signal_handler as *const () as usize,
+        flags: SA_SIGINFO | SA_RESTORER,
+        restorer: arach_signal_restorer as *const () as usize,
+        mask: 0,
+    };
+    let mut previous_action = LinuxSignalAction {
+        handler: usize::MAX,
+        flags: usize::MAX,
+        restorer: usize::MAX,
+        mask: u64::MAX,
+    };
+    if unsafe {
+        linux_syscall4(
+            SYS_RT_SIGACTION,
+            SIGUSR1 as usize,
+            &action as *const _ as usize,
+            &mut previous_action as *mut _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    } != 0
+        || previous_action.handler != 0
+        || previous_action.flags != 0
+        || previous_action.restorer != 0
+        || previous_action.mask != 0
+    {
+        fail();
+    }
+    let signal_mask = 1_u64 << (SIGUSR1 - 1);
+    let mut previous_mask = u64::MAX;
+    if unsafe {
+        linux_syscall4(
+            SYS_RT_SIGPROCMASK,
+            SIG_BLOCK,
+            &signal_mask as *const _ as usize,
+            &mut previous_mask as *mut _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    } != 0
+        || previous_mask != 0
+        || unsafe { linux_syscall3(SYS_TGKILL, pid as usize, tid as usize, SIGUSR1 as usize) } != 0
+        || SIGNAL_HITS.load(Ordering::Acquire) != 0
+    {
+        fail();
+    }
+    previous_mask = 0;
+    if unsafe {
+        linux_syscall4(
+            SYS_RT_SIGPROCMASK,
+            SIG_UNBLOCK,
+            &signal_mask as *const _ as usize,
+            &mut previous_mask as *mut _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    } != 0
+        || previous_mask != signal_mask
+        || SIGNAL_HITS.load(Ordering::Acquire) != 1
+    {
+        fail();
+    }
+    let wrote = unsafe {
+        linux_syscall3(
+            SYS_WRITE,
+            1,
+            SIGNAL_PASS.as_ptr() as usize,
+            SIGNAL_PASS.len(),
+        )
+    };
+    if wrote != SIGNAL_PASS.len() as isize {
         fail();
     }
 

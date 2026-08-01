@@ -114,8 +114,18 @@ one clears its generation-bound child-TID word and wakes the leader; the other
 registers a Linux x86-64 robust list, exits while owning a private futex, and
 causes the kernel to atomically publish `OWNER_DIED` and wake the leader. The
 walker is generation-bound and limited to 2,048 links. Fork-like clone modes,
-PI and process-shared robust futexes, signal delivery, leader exit with live
-peers, and multi-member `exit_group` remain fail-closed gates.
+PI and process-shared robust futexes, leader exit with live peers, and
+multi-member `exit_group` remain fail-closed gates.
+
+The first bounded signal slice keeps dispositions generation-bound to the
+thread group and masks, pending bits, and active return-frame authority bound
+to the exact TID generation. The measured probe blocks `SIGUSR1`, queues it to
+itself with `tgkill`, unmasks it, validates the delivered x86-64 `SA_SIGINFO`
+frame, and resumes through `rt_sigreturn`. Delivery is currently synchronous at
+syscall return, pending standard signals are bit-coalesced, and only self
+`kill`/`tgkill` targets are admitted. Cross-process and asynchronous delivery,
+real-time queues, alternate stacks, FPU/xstate restoration, stop/continue
+semantics, and interrupted-syscall restart remain fail-closed gates.
 
 ## Push PID 1 boundary
 

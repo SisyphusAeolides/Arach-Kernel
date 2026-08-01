@@ -13,6 +13,7 @@ data Gate : Set where
   sharedAddressSpaceClone sharedDescriptorTable distinctThreadIdentity perThreadTls : Gate
   privateFutexBlock clearChildTidWake : Gate
   robustListRegistration ownerDeathPublication robustFutexWake : Gate
+  signalDisposition signalMaskAndPending rtSignalFrame rtSignalReturn : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -65,6 +66,15 @@ record RobustExitCertificate : Set where
     ownerDeathPublicationEvidence : Measurement ownerDeathPublication
     robustFutexWakeEvidence : Measurement robustFutexWake
 
+record SignalReturnCertificate : Set where
+  constructor signalReturnCertificate
+  field
+    robustExit : RobustExitCertificate
+    signalDispositionEvidence : Measurement signalDisposition
+    signalMaskAndPendingEvidence : Measurement signalMaskAndPending
+    rtSignalFrameEvidence : Measurement rtSignalFrame
+    rtSignalReturnEvidence : Measurement rtSignalReturn
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -80,3 +90,8 @@ wakeRequiresSharedAddressSpace certificate =
 -- blocking, and clear-child-tid wake evidence.
 robustExitRequiresThreadWake : RobustExitCertificate -> ThreadWakeCertificate
 robustExitRequiresThreadWake certificate = RobustExitCertificate.threadWake certificate
+
+-- Signal return qualification structurally retains robust thread-exit
+-- qualification.
+signalReturnRequiresRobustExit : SignalReturnCertificate -> RobustExitCertificate
+signalReturnRequiresRobustExit certificate = SignalReturnCertificate.robustExit certificate

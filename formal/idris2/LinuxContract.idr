@@ -31,6 +31,10 @@ data Gate
   | RobustListRegistration
   | OwnerDeathPublication
   | RobustFutexWake
+  | SignalDisposition
+  | SignalMaskAndPending
+  | RtSignalFrame
+  | RtSignalReturn
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -92,6 +96,19 @@ record RobustExitCertificate where
   ownerDeathPublication : Measurement OwnerDeathPublication
   robustFutexWake : Measurement RobustFutexWake
 
+||| Runtime evidence for the first bounded x86-64 signal round trip. The
+||| certificate retains robust thread-exit evidence and cannot omit signal
+||| disposition, mask/pending behavior, frame construction, or validated
+||| rt_sigreturn.
+public export
+record SignalReturnCertificate where
+  constructor MkSignalReturnCertificate
+  robustExit : RobustExitCertificate
+  signalDisposition : Measurement SignalDisposition
+  signalMaskAndPending : Measurement SignalMaskAndPending
+  rtSignalFrame : Measurement RtSignalFrame
+  rtSignalReturn : Measurement RtSignalReturn
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -109,3 +126,8 @@ wakeRequiresSharedAddressSpace certificate = certificate.sharedAddressSpaceClone
 public export
 robustExitRequiresThreadWake : RobustExitCertificate -> ThreadWakeCertificate
 robustExitRequiresThreadWake certificate = certificate.threadWake
+
+||| Signal delivery remains structurally downstream of qualified thread exit.
+public export
+signalReturnRequiresRobustExit : SignalReturnCertificate -> RobustExitCertificate
+signalReturnRequiresRobustExit certificate = certificate.robustExit
