@@ -28,6 +28,7 @@ jobs:
           else
             python3 scripts/fix-linux-file-patch.py
             python3 scripts/patch-linux-file-syscalls.py
+            python3 scripts/fix-linux-file-tests.py
           fi
       - run: cargo fmt --all
       - run: cargo fmt --all -- --check
