@@ -69,7 +69,10 @@ pub fn set_tid_address(owner: ProcessHandle, address: u64) -> Result<u32, Thread
     }
 
     let mut table = THREAD_IDENTITIES.lock();
-    if let Some(slot) = table.iter_mut().find(|slot| slot.occupied() && slot.owner == owner) {
+    if let Some(slot) = table
+        .iter_mut()
+        .find(|slot| slot.occupied() && slot.owner == owner)
+    {
         if address == 0 {
             *slot = ThreadIdentitySlot::EMPTY;
         } else {
@@ -138,10 +141,19 @@ mod tests {
     #[test]
     fn rejects_kernel_unaligned_overflowing_and_ownerless_addresses() {
         assert_eq!(
-            set_tid_address(ProcessHandle { pid: 0, generation: 1 }, 0x4000),
+            set_tid_address(
+                ProcessHandle {
+                    pid: 0,
+                    generation: 1
+                },
+                0x4000
+            ),
             Err(ThreadIdentityError::InvalidOwner)
         );
-        assert_eq!(set_tid_address(OWNER, 0x4001), Err(ThreadIdentityError::InvalidAddress));
+        assert_eq!(
+            set_tid_address(OWNER, 0x4001),
+            Err(ThreadIdentityError::InvalidAddress)
+        );
         assert_eq!(
             set_tid_address(OWNER, USER_ADDRESS_LIMIT),
             Err(ThreadIdentityError::InvalidAddress)
