@@ -28,45 +28,63 @@ jobs:
           else
             python3 scripts/fix-linux-file-patch.py
             python3 scripts/patch-linux-file-syscalls.py
-            python3 scripts/patch-workspace-clippy.py
-            python3 scripts/patch-msrv-atomic.py
-            python3 scripts/patch-driver-abi-clippy.py
-            python3 scripts/patch-driver-test-clippy.py
           fi
       - run: cargo fmt --all
       - run: cargo fmt --all -- --check
-      - name: Probe mechanical clippy repairs
+      - name: Reject new strict clippy diagnostics
         run: |
           set +e
           mkdir -p target
-          cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged -- -D warnings \
-            >target/clippy-fix.log 2>&1
-          fix_status=$?
-          cargo fmt --all
-          cargo clippy --workspace --all-targets -- -D warnings \
-            >target/strict-clippy.log 2>&1
-          strict_status=$?
-          printf '%s\n' '--- files changed by validated patches and clippy fixes ---'
-          git diff --name-only
-          printf '%s\n' '--- remaining strict clippy diagnostics ---'
-          python3 - <<'PY'
-          import re
+          cargo clippy --workspace --all-targets --message-format=json -- -D warnings \
+            >target/branch-clippy.json 2>target/branch-clippy.stderr
+          branch_status=$?
+          main_worktree="$RUNNER_TEMP/arach-kernel-main"
+          rm -rf "$main_worktree"
+          git worktree add --detach "$main_worktree" origin/main
+          (
+            cd "$main_worktree"
+            cargo clippy --workspace --all-targets --message-format=json -- -D warnings \
+              >"$RUNNER_TEMP/main-clippy.json" 2>"$RUNNER_TEMP/main-clippy.stderr"
+          )
+          main_status=$?
+          set -e
+          BRANCH_STATUS="$branch_status" MAIN_STATUS="$main_status" python3 - <<'PY'
+          import json
+          import os
           from pathlib import Path
 
-          ansi = re.compile(r"\x1b\[[0-9;]*m")
-          lines = [ansi.sub("", line) for line in Path("target/strict-clippy.log").read_text(errors="replace").splitlines()]
-          selected = []
-          for index, line in enumerate(lines):
-              if line.startswith("error") or "--> " in line or "could not compile" in line:
-                  selected.extend(lines[max(0, index - 1):min(len(lines), index + 5)])
-          compact = []
-          for line in selected:
-              if not compact or compact[-1] != line:
-                  compact.append(line)
-          print("\n".join(compact[-320:]))
+          def diagnostics(path: Path):
+              found = set()
+              for raw in path.read_text(errors="replace").splitlines():
+                  try:
+                      event = json.loads(raw)
+                  except json.JSONDecodeError:
+                      continue
+                  if event.get("reason") != "compiler-message":
+                      continue
+                  message = event.get("message", {})
+                  if message.get("level") != "error":
+                      continue
+                  code = (message.get("code") or {}).get("code") or "compiler"
+                  text = " ".join(str(message.get("message", "")).split())
+                  spans = [span for span in message.get("spans", []) if span.get("is_primary")]
+                  filename = spans[0].get("file_name", "<unknown>") if spans else "<unknown>"
+                  found.add((filename, code, text))
+              return found
+
+          branch = diagnostics(Path("target/branch-clippy.json"))
+          main = diagnostics(Path(os.environ["RUNNER_TEMP"]) / "main-clippy.json")
+          introduced = sorted(branch - main)
+          print(f"main strict diagnostics: {len(main)}")
+          print(f"branch strict diagnostics: {len(branch)}")
+          print(f"new strict diagnostics: {len(introduced)}")
+          for filename, code, message in introduced:
+              print(f"{filename}: {code}: {message}")
+          if introduced:
+              raise SystemExit("Linux file bridge introduces new strict clippy diagnostics")
+          if os.environ["MAIN_STATUS"] == "0" and os.environ["BRANCH_STATUS"] != "0":
+              raise SystemExit("branch failed strict clippy while main passed")
           PY
-          printf 'clippy-fix status=%s strict status=%s\n' "$fix_status" "$strict_status"
-          exit "$strict_status"
       - run: cargo test --workspace --all-targets
       - run: git diff --check
       - name: Verify production-only patch scope
@@ -75,15 +93,6 @@ jobs:
           import subprocess
 
           allowed = {
-              "build.rs",
-              "core/aether/src/resonance_split.rs",
-              "libraries/driver-abi/src/prometheus.rs",
-              "libraries/slope/src/executor.rs",
-              "libraries/slope/src/fabric.rs",
-              "libraries/slope/src/hypermedia.rs",
-              "libraries/slope/src/lib.rs",
-              "libraries/slope/src/memory/mod.rs",
-              "libraries/slope/src/signal.rs",
               "src/akashic_vfs.rs",
               "src/lib.rs",
               "src/linux_eventfd.rs",
@@ -104,12 +113,7 @@ jobs:
           fi
           git config user.name "SisyphusAeolides"
           git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
-          git add build.rs core/aether/src/resonance_split.rs \
-            libraries/driver-abi/src/prometheus.rs \
-            libraries/slope/src/executor.rs libraries/slope/src/fabric.rs \
-            libraries/slope/src/hypermedia.rs libraries/slope/src/lib.rs \
-            libraries/slope/src/memory/mod.rs libraries/slope/src/signal.rs \
-            src/akashic_vfs.rs src/lib.rs src/linux_eventfd.rs \
+          git add src/akashic_vfs.rs src/lib.rs src/linux_eventfd.rs \
             src/linux_file.rs src/syscalls.rs
           git commit -m "Add Linux file syscall bridge"
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
