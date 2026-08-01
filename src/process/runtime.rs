@@ -4,7 +4,15 @@
 //! this runtime before Ring 3 is entered. A retiring image is released only
 //! after the return path has switched CR3 away from that image's root.
 
-use crate::process::install::{ProcessImageHandle, UserAddressSpaceBackend};
+use blacklab::oureboros::ArtifactMeasurement;
+
+use crate::capability::RuntimeImageControl;
+use crate::process::image::UserImageError;
+#[cfg(target_os = "none")]
+use crate::process::image::prepare_runtime_user_image;
+#[cfg(target_os = "none")]
+use crate::process::install::install_runtime_user_image;
+use crate::process::install::{InstallError, ProcessImageHandle, UserAddressSpaceBackend};
 use crate::process::x86_64::{
     DirectMapFrameMemory, DirectMapMemoryError, FrameBackedAddressSpace, FrameBackedError,
 };
@@ -17,11 +25,24 @@ pub enum ProcessRuntimeError {
     AlreadyInstalled,
     Unavailable,
     ReapAlreadyPending,
+    Image(UserImageError),
+    Install(InstallError<FrameBackedError<DirectMapMemoryError>>),
     Backend(FrameBackedError<DirectMapMemoryError>),
+}
+
+pub struct RuntimeReplacement {
+    pub process: ProcessImageHandle,
+    pub entry_point: u64,
+    pub user_stack_pointer: u64,
+    pub address_space_root: u64,
+    pub image_measurement_root: u64,
+    pub measurement: ArtifactMeasurement,
 }
 
 struct ProcessRuntime {
     backend: KernelProcessBackend,
+    #[cfg(target_os = "none")]
+    image_control: RuntimeImageControl,
     pending_reap: Option<ProcessImageHandle>,
 }
 
@@ -29,16 +50,130 @@ static RUNTIME: SpinLock<Option<ProcessRuntime>> = SpinLock::new(None);
 
 /// Transfers the boot-installed address-space backend into persistent kernel
 /// ownership. This is a one-way handoff made before the first Ring 3 entry.
-pub fn install(backend: KernelProcessBackend) -> Result<(), ProcessRuntimeError> {
+pub fn install(
+    backend: KernelProcessBackend,
+    _image_control: RuntimeImageControl,
+) -> Result<(), ProcessRuntimeError> {
     let mut runtime = RUNTIME.lock();
     if runtime.is_some() {
         return Err(ProcessRuntimeError::AlreadyInstalled);
     }
     *runtime = Some(ProcessRuntime {
         backend,
+        #[cfg(target_os = "none")]
+        image_control: _image_control,
         pending_reap: None,
     });
     Ok(())
+}
+
+/// Installs and activation-validates a measured static ELF replacement while
+/// the former image remains active and untouched.
+///
+/// The returned handle is not yet published to lifecycle ownership. Callers
+/// must either atomically exchange it into the service registry or return it
+/// through [`discard_exec_image`].
+#[cfg(target_os = "none")]
+pub fn install_exec_image(
+    inode_id: u32,
+    bytes: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<RuntimeReplacement, ProcessRuntimeError> {
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    if runtime.pending_reap.is_some() {
+        return Err(ProcessRuntimeError::ReapAlreadyPending);
+    }
+    let image = prepare_runtime_user_image(inode_id, bytes, &runtime.image_control)
+        .map_err(ProcessRuntimeError::Image)?;
+    let installed = install_runtime_user_image(image, &mut runtime.backend, &runtime.image_control)
+        .map_err(ProcessRuntimeError::Install)?;
+    let process = installed.process;
+    if let Err(error) = runtime
+        .backend
+        .install_runtime_stack(&process, &runtime.image_control)
+    {
+        discard_failed_install(runtime, process);
+        return Err(ProcessRuntimeError::Backend(error));
+    }
+    let user_stack_pointer = match runtime.backend.prepare_initial_stack(&process, argv, envp) {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            discard_failed_install(runtime, process);
+            return Err(ProcessRuntimeError::Backend(error));
+        }
+    };
+    // SAFETY: The syscall gate is serialized with interrupts masked. The new
+    // image is not lifecycle-visible, and validation restores the old active
+    // root before returning.
+    if let Err(error) = unsafe {
+        runtime
+            .backend
+            .validate_runtime_activation(&process, &runtime.image_control)
+    } {
+        discard_failed_install(runtime, process);
+        return Err(ProcessRuntimeError::Backend(error));
+    }
+    let Some(info) = runtime.backend.process_info(&process) else {
+        discard_failed_install(runtime, process);
+        return Err(ProcessRuntimeError::Unavailable);
+    };
+    let Some(address_space_root) = info.address_space_root else {
+        discard_failed_install(runtime, process);
+        return Err(ProcessRuntimeError::Unavailable);
+    };
+    Ok(RuntimeReplacement {
+        process,
+        entry_point: installed.entry_point,
+        user_stack_pointer,
+        address_space_root,
+        image_measurement_root: fold_measurement_root(installed.measurement.sha256),
+        measurement: installed.measurement,
+    })
+}
+
+#[cfg(target_os = "none")]
+fn discard_failed_install(runtime: &mut ProcessRuntime, process: ProcessImageHandle) {
+    if runtime.backend.release_process(&process).is_err() {
+        runtime.pending_reap = Some(process);
+    }
+}
+
+#[cfg(target_os = "none")]
+pub fn discard_exec_image(process: ProcessImageHandle) -> Result<(), ProcessRuntimeError> {
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    match runtime.backend.release_process(&process) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if runtime.pending_reap.is_none() {
+                runtime.pending_reap = Some(process);
+            }
+            Err(ProcessRuntimeError::Backend(error))
+        }
+    }
+}
+
+pub const fn fold_measurement_root(digest: [u8; 32]) -> u64 {
+    let mut root = 0_u64;
+    let mut index = 0;
+    while index < 4 {
+        let offset = index * 8;
+        let word = u64::from_le_bytes([
+            digest[offset],
+            digest[offset + 1],
+            digest[offset + 2],
+            digest[offset + 3],
+            digest[offset + 4],
+            digest[offset + 5],
+            digest[offset + 6],
+            digest[offset + 7],
+        ]);
+        root ^= word.rotate_left((index as u32) * 13);
+        index += 1;
+    }
+    if root == 0 { 1 } else { root }
 }
 
 /// Records a fully stopped image for deferred reclamation.

@@ -20,11 +20,15 @@ use crate::sync::SpinLock;
 use aether::grimoire;
 
 const ERROR_BAD_FILE_DESCRIPTOR: isize = -9;
+#[cfg(any(target_os = "none", test))]
+const ERROR_ARGUMENT_LIST_TOO_LONG: isize = -7;
+#[cfg(target_os = "none")]
+const ERROR_EXEC_FORMAT: isize = -8;
 #[cfg(target_os = "none")]
 const ERROR_OPERATION_NOT_PERMITTED: isize = -1;
 #[cfg(any(target_os = "none", test))]
 const ERROR_NO_ENTRY: isize = -2;
-#[cfg(any(target_os = "none", test))]
+#[cfg(target_os = "none")]
 const ERROR_IO: isize = -5;
 #[cfg(any(target_os = "none", test))]
 const ERROR_PERMISSION_DENIED: isize = -13;
@@ -46,7 +50,7 @@ const ERROR_DIRECTORY_NOT_EMPTY: isize = -39;
 const ERROR_NOT_SUPPORTED: isize = -95;
 #[cfg(target_os = "none")]
 const ERROR_TRY_AGAIN: isize = -11;
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", test))]
 const ERROR_BAD_ADDRESS: isize = -14;
 const ERROR_INVALID_ARGUMENT: isize = -22;
 const ERROR_NOT_IMPLEMENTED: isize = -38;
@@ -76,6 +80,10 @@ const ENTRY_HUGE: u64 = 1 << 7;
 const MAXIMUM_WRITE_BYTES: usize = 256;
 #[cfg(target_os = "none")]
 const MAXIMUM_AKASHIC_IO_BYTES: usize = 4096;
+#[cfg(any(target_os = "none", test))]
+const MAXIMUM_EXEC_VECTOR_ENTRIES: usize = 128;
+#[cfg(any(target_os = "none", test))]
+const MAXIMUM_EXEC_STRING_BYTES: usize = 32 * 1024;
 #[cfg(target_os = "none")]
 const MAXIMUM_LINUX_POLL_FDS: usize = 64;
 #[cfg(target_os = "none")]
@@ -378,6 +386,39 @@ static CREST_PRESENT_STAGING: SpinLock<[u8; MAXIMUM_CREST_PRESENT_BYTES]> =
 #[cfg(target_os = "none")]
 static AKASHIC_IO_STAGING: SpinLock<[u8; MAXIMUM_AKASHIC_IO_BYTES]> =
     SpinLock::new([0; MAXIMUM_AKASHIC_IO_BYTES]);
+#[cfg(target_os = "none")]
+static EXEC_STAGING: SpinLock<ExecStaging> = SpinLock::new(ExecStaging::EMPTY);
+
+#[cfg(target_os = "none")]
+struct ExecStaging {
+    image: [u8; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
+    strings: [u8; MAXIMUM_EXEC_STRING_BYTES],
+}
+
+#[cfg(target_os = "none")]
+impl ExecStaging {
+    const EMPTY: Self = Self {
+        image: [0; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
+        strings: [0; MAXIMUM_EXEC_STRING_BYTES],
+    };
+}
+
+#[cfg(any(target_os = "none", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CapturedExecVector {
+    offsets: [u32; MAXIMUM_EXEC_VECTOR_ENTRIES],
+    lengths: [u32; MAXIMUM_EXEC_VECTOR_ENTRIES],
+    count: usize,
+}
+
+#[cfg(any(target_os = "none", test))]
+impl CapturedExecVector {
+    const EMPTY: Self = Self {
+        offsets: [0; MAXIMUM_EXEC_VECTOR_ENTRIES],
+        lengths: [0; MAXIMUM_EXEC_VECTOR_ENTRIES],
+        count: 0,
+    };
+}
 
 /// The syscall entry frame combines the complete user register image with the
 /// generation and epoch authority selected by the lifecycle scheduler.
@@ -521,6 +562,9 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
             }
             Some(crate::process::abi::LinuxSyscall::RtSigreturn) => {
                 schedule_linux_sigreturn(frame.dispatch.user)
+            }
+            Some(crate::process::abi::LinuxSyscall::Execve) => {
+                schedule_linux_execve_return(frame.dispatch.user, arguments)
             }
             _ => {
                 let mut saved = frame.dispatch.user;
@@ -806,6 +850,205 @@ fn schedule_linux_clone_return(
         return resume_linux_result(saved, ERROR_BAD_ADDRESS);
     }
     parent_return
+}
+
+#[cfg(target_os = "none")]
+fn schedule_linux_execve_return(
+    saved: crate::process::context::SavedUserContext,
+    arguments: [u64; 6],
+) -> crate::process::lifecycle::ScheduledProcess {
+    let current = match crate::process::lifecycle::preflight_current_image_replacement() {
+        Ok(current) => current,
+        Err(_) => return resume_linux_result(saved, ERROR_NOT_SUPPORTED),
+    };
+    let (path, path_length, _) = match copy_linux_path(arguments[0]) {
+        Ok(path) => path,
+        Err(error) => return resume_linux_result(saved, error),
+    };
+
+    let mut staging = EXEC_STAGING.lock();
+    let mut string_cursor = 0_usize;
+    let argv = match capture_exec_vector(arguments[1], &mut staging.strings, &mut string_cursor) {
+        Ok(vector) => vector,
+        Err(error) => return resume_linux_result(saved, error),
+    };
+    let envp = match capture_exec_vector(arguments[2], &mut staging.strings, &mut string_cursor) {
+        Ok(vector) => vector,
+        Err(error) => return resume_linux_result(saved, error),
+    };
+    let snapshot =
+        match crate::akashic_vfs::read_file_snapshot(&path[..path_length], &mut staging.image) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return resume_linux_result(saved, map_akashic_error(error)),
+        };
+
+    let mut argv_refs: [&[u8]; MAXIMUM_EXEC_VECTOR_ENTRIES] = [&[]; MAXIMUM_EXEC_VECTOR_ENTRIES];
+    let mut envp_refs: [&[u8]; MAXIMUM_EXEC_VECTOR_ENTRIES] = [&[]; MAXIMUM_EXEC_VECTOR_ENTRIES];
+    for (index, target) in argv_refs[..argv.count].iter_mut().enumerate() {
+        let start = argv.offsets[index] as usize;
+        let end = start + argv.lengths[index] as usize;
+        *target = &staging.strings[start..end];
+    }
+    for (index, target) in envp_refs[..envp.count].iter_mut().enumerate() {
+        let start = envp.offsets[index] as usize;
+        let end = start + envp.lengths[index] as usize;
+        *target = &staging.strings[start..end];
+    }
+
+    let replacement = match crate::process::runtime::install_exec_image(
+        snapshot.inode_id,
+        &staging.image[..snapshot.bytes],
+        &argv_refs[..argv.count],
+        &envp_refs[..envp.count],
+    ) {
+        Ok(replacement) => replacement,
+        Err(error) => return resume_linux_result(saved, map_exec_runtime_error(error)),
+    };
+    let crate::process::runtime::RuntimeReplacement {
+        process,
+        entry_point,
+        user_stack_pointer,
+        address_space_root,
+        image_measurement_root,
+        measurement: _,
+    } = replacement;
+
+    let previous = match crate::process::service_registry::exchange_running_image(current, process)
+    {
+        Ok(previous) => previous,
+        Err((_error, rejected)) => {
+            if crate::process::runtime::discard_exec_image(rejected).is_err() {
+                crate::arch::x86_64::halt();
+            }
+            return resume_linux_result(saved, ERROR_PERMISSION_DENIED);
+        }
+    };
+    let scheduled = match crate::process::lifecycle::replace_current_image(
+        address_space_root,
+        entry_point,
+        user_stack_pointer,
+        image_measurement_root,
+    ) {
+        Ok(scheduled) => scheduled,
+        Err(_) => {
+            match crate::process::service_registry::exchange_running_image(current, previous) {
+                Ok(rejected) => {
+                    if crate::process::runtime::discard_exec_image(rejected).is_err() {
+                        crate::arch::x86_64::halt();
+                    }
+                }
+                Err(_) => crate::arch::x86_64::halt(),
+            }
+            return resume_linux_result(saved, ERROR_TRY_AGAIN);
+        }
+    };
+
+    if crate::process::runtime::defer_reap(previous).is_err() {
+        crate::arch::x86_64::halt();
+    }
+    let _ = crate::linux_futex::cancel_wait(current);
+    let _ = crate::linux_robust::take_robust_list(current);
+    let _ = crate::linux_thread::take_clear_child_tid(current);
+    crate::linux_signal::reset_for_exec(current);
+    let _ = crate::linux_file::close_on_exec(current);
+    let _ = crate::linux_epoll::close_on_exec(current.pid);
+    let _ = crate::linux_timerfd::close_on_exec(current.pid);
+    let _ = crate::linux_eventfd::close_on_exec(current.pid);
+    scheduled
+}
+
+#[cfg(target_os = "none")]
+fn capture_exec_vector(
+    pointer: u64,
+    strings: &mut [u8; MAXIMUM_EXEC_STRING_BYTES],
+    cursor: &mut usize,
+) -> Result<CapturedExecVector, isize> {
+    capture_exec_vector_with(pointer, strings, cursor, |source, target| {
+        copy_from_user(source, target).map_err(|_| ())
+    })
+}
+
+#[cfg(any(target_os = "none", test))]
+fn capture_exec_vector_with(
+    pointer: u64,
+    strings: &mut [u8; MAXIMUM_EXEC_STRING_BYTES],
+    cursor: &mut usize,
+    mut copy: impl FnMut(u64, &mut [u8]) -> Result<(), ()>,
+) -> Result<CapturedExecVector, isize> {
+    if pointer == 0 {
+        return Ok(CapturedExecVector::EMPTY);
+    }
+    let mut vector = CapturedExecVector::EMPTY;
+    while vector.count < MAXIMUM_EXEC_VECTOR_ENTRIES {
+        let address = pointer
+            .checked_add((vector.count * core::mem::size_of::<u64>()) as u64)
+            .ok_or(ERROR_BAD_ADDRESS)?;
+        let mut encoded = [0_u8; core::mem::size_of::<u64>()];
+        copy(address, &mut encoded).map_err(|_| ERROR_BAD_ADDRESS)?;
+        let string_pointer = u64::from_le_bytes(encoded);
+        if string_pointer == 0 {
+            return Ok(vector);
+        }
+
+        let start = *cursor;
+        loop {
+            if *cursor == strings.len() {
+                return Err(ERROR_ARGUMENT_LIST_TOO_LONG);
+            }
+            let source = string_pointer
+                .checked_add((*cursor - start) as u64)
+                .ok_or(ERROR_BAD_ADDRESS)?;
+            let mut byte = [0_u8; 1];
+            copy(source, &mut byte).map_err(|_| ERROR_BAD_ADDRESS)?;
+            if byte[0] == 0 {
+                break;
+            }
+            strings[*cursor] = byte[0];
+            *cursor += 1;
+        }
+        vector.offsets[vector.count] = start as u32;
+        vector.lengths[vector.count] = (*cursor - start) as u32;
+        vector.count += 1;
+    }
+    Err(ERROR_ARGUMENT_LIST_TOO_LONG)
+}
+
+#[cfg(target_os = "none")]
+fn map_exec_runtime_error(error: crate::process::runtime::ProcessRuntimeError) -> isize {
+    use crate::process::install::InstallError;
+    use crate::process::runtime::ProcessRuntimeError;
+
+    match error {
+        ProcessRuntimeError::ReapAlreadyPending => ERROR_TRY_AGAIN,
+        ProcessRuntimeError::Image(_) => ERROR_EXEC_FORMAT,
+        ProcessRuntimeError::Install(
+            InstallError::Loader(_)
+            | InstallError::InvalidSegmentSize
+            | InstallError::VerificationFailed
+            | InstallError::WriteExecuteMapping,
+        ) => ERROR_EXEC_FORMAT,
+        ProcessRuntimeError::Install(
+            InstallError::Backend(error) | InstallError::Cleanup(error),
+        )
+        | ProcessRuntimeError::Backend(error) => map_exec_backend_error(error),
+        ProcessRuntimeError::AlreadyInstalled | ProcessRuntimeError::Unavailable => ERROR_IO,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn map_exec_backend_error(
+    error: crate::process::x86_64::FrameBackedError<crate::process::x86_64::DirectMapMemoryError>,
+) -> isize {
+    use crate::process::x86_64::{DirectMapMemoryError, FrameBackedError};
+
+    match error {
+        FrameBackedError::CapacityExceeded
+        | FrameBackedError::Memory(
+            DirectMapMemoryError::OutOfFrames | DirectMapMemoryError::Allocator(_),
+        ) => ERROR_OUT_OF_MEMORY,
+        FrameBackedError::InvalidRange => ERROR_ARGUMENT_LIST_TOO_LONG,
+        _ => ERROR_IO,
+    }
 }
 
 #[cfg(target_os = "none")]
@@ -3239,6 +3482,50 @@ mod tests {
         assert_eq!(map_akashic_error(VfsError::Capacity), -28);
         assert_eq!(map_akashic_error(VfsError::DirectoryNotEmpty), -39);
         assert_eq!(map_akashic_error(VfsError::Unsupported), -95);
+    }
+
+    #[test]
+    fn exec_vector_capture_preserves_order_and_requires_a_null_terminator() {
+        const BASE: u64 = 0x1000;
+        let mut memory = [0_u8; 96];
+        memory[..8].copy_from_slice(&(BASE + 32).to_le_bytes());
+        memory[8..16].copy_from_slice(&(BASE + 40).to_le_bytes());
+        memory[32..38].copy_from_slice(b"first\0");
+        memory[40..47].copy_from_slice(b"second\0");
+        let mut strings = [0_u8; MAXIMUM_EXEC_STRING_BYTES];
+        let mut cursor = 0;
+        let vector =
+            capture_exec_vector_with(BASE, &mut strings, &mut cursor, |address, target| {
+                let start =
+                    usize::try_from(address.checked_sub(BASE).ok_or(())?).map_err(|_| ())?;
+                let end = start.checked_add(target.len()).ok_or(())?;
+                let source = memory.get(start..end).ok_or(())?;
+                target.copy_from_slice(source);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(vector.count, 2);
+        assert_eq!(&strings[..cursor], b"firstsecond");
+        assert_eq!((vector.offsets[0], vector.lengths[0]), (0, 5));
+        assert_eq!((vector.offsets[1], vector.lengths[1]), (5, 6));
+
+        let mut unterminated = [0_u8; MAXIMUM_EXEC_VECTOR_ENTRIES * 8 + 1];
+        let empty = BASE + (MAXIMUM_EXEC_VECTOR_ENTRIES * 8) as u64;
+        for encoded in unterminated[..MAXIMUM_EXEC_VECTOR_ENTRIES * 8].chunks_exact_mut(8) {
+            encoded.copy_from_slice(&empty.to_le_bytes());
+        }
+        let mut cursor = 0;
+        assert_eq!(
+            capture_exec_vector_with(BASE, &mut strings, &mut cursor, |address, target| {
+                let start =
+                    usize::try_from(address.checked_sub(BASE).ok_or(())?).map_err(|_| ())?;
+                let end = start.checked_add(target.len()).ok_or(())?;
+                let source = unterminated.get(start..end).ok_or(())?;
+                target.copy_from_slice(source);
+                Ok(())
+            }),
+            Err(ERROR_ARGUMENT_LIST_TOO_LONG)
+        );
     }
 
     #[test]

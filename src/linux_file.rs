@@ -240,6 +240,22 @@ pub fn close_all(owner: ProcessHandle) -> usize {
     closed
 }
 
+pub fn close_on_exec(owner: ProcessHandle) -> usize {
+    if owner.pid == 0 || owner.generation == 0 {
+        return 0;
+    }
+    let mut table = FILES.lock();
+    let mut closed = 0;
+    for slot in table.iter_mut() {
+        if slot.occupied() && slot.owner == owner && slot.linux_flags & O_CLOEXEC != 0 {
+            let _ = akashic_vfs::close(owner, slot.capability);
+            *slot = FileSlot::EMPTY;
+            closed += 1;
+        }
+    }
+    closed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +274,10 @@ mod tests {
     };
     const CLOSE_ALL_OWNER: ProcessHandle = ProcessHandle {
         pid: 0x4104,
+        generation: 7,
+    };
+    const EXEC_OWNER: ProcessHandle = ProcessHandle {
+        pid: 0x4105,
         generation: 7,
     };
 
@@ -327,5 +347,25 @@ mod tests {
         );
         unlink(first_path).unwrap();
         unlink(second_path).unwrap();
+    }
+
+    #[test]
+    fn exec_closes_only_flagged_regular_files() {
+        let flagged_path = b"/linux-file-exec-flagged";
+        let retained_path = b"/linux-file-exec-retained";
+        let flagged = open(
+            EXEC_OWNER,
+            flagged_path,
+            O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC,
+            1,
+        )
+        .unwrap();
+        let retained = open(EXEC_OWNER, retained_path, O_CREAT | O_EXCL | O_RDWR, 1).unwrap();
+        assert_eq!(close_on_exec(EXEC_OWNER), 1);
+        assert!(!is_open(EXEC_OWNER, flagged));
+        assert!(is_open(EXEC_OWNER, retained));
+        close(EXEC_OWNER, retained).unwrap();
+        unlink(flagged_path).unwrap();
+        unlink(retained_path).unwrap();
     }
 }

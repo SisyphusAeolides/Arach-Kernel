@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "arach-exec-target"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+publish = false
+build = "build.rs"
+
+[dependencies]
+
+[[bin]]
+name = "arach-exec-target"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

@@ -1,6 +1,6 @@
 use blacklab::oureboros::ArtifactMeasurement;
 
-use crate::capability::{Capability, ProcessInstallControl};
+use crate::capability::{Capability, ProcessInstallControl, RuntimeImageControl};
 use crate::module::loader::LoaderError;
 use crate::process::image::PreparedUserImage;
 
@@ -98,6 +98,21 @@ pub fn install_user_image<Backend: UserAddressSpaceBackend>(
     image: PreparedUserImage<'_>,
     backend: &mut Backend,
     _authority: &Capability<'_, ProcessInstallControl>,
+) -> Result<InstalledUserImage<Backend::Process>, InstallError<Backend::Error>> {
+    install_user_image_inner(image, backend)
+}
+
+pub fn install_runtime_user_image<Backend: UserAddressSpaceBackend>(
+    image: PreparedUserImage<'_>,
+    backend: &mut Backend,
+    _authority: &RuntimeImageControl,
+) -> Result<InstalledUserImage<Backend::Process>, InstallError<Backend::Error>> {
+    install_user_image_inner(image, backend)
+}
+
+fn install_user_image_inner<Backend: UserAddressSpaceBackend>(
+    image: PreparedUserImage<'_>,
+    backend: &mut Backend,
 ) -> Result<InstalledUserImage<Backend::Process>, InstallError<Backend::Error>> {
     let plan = *image.plan();
     let space = backend

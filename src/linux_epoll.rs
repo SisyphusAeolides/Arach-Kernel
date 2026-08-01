@@ -352,6 +352,21 @@ pub fn close_all(owner: u32) -> usize {
     closed
 }
 
+pub fn close_on_exec(owner: u32) -> usize {
+    if owner == 0 {
+        return 0;
+    }
+    let mut table = EPOLLS.lock();
+    let mut closed = 0;
+    for slot in table.iter_mut() {
+        if slot.owner == owner && slot.flags & EPOLL_CLOEXEC != 0 {
+            *slot = EpollSlot::EMPTY;
+            closed += 1;
+        }
+    }
+    closed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +428,15 @@ mod tests {
         );
         close_all(owner);
         linux_eventfd::close(owner, eventfd).unwrap();
+    }
+
+    #[test]
+    fn exec_closes_only_flagged_epoll_instances() {
+        let owner = 0x2005;
+        let flagged = create(owner, EPOLL_CLOEXEC).unwrap();
+        let retained = create(owner, 0).unwrap();
+        assert_eq!(close_on_exec(owner), 1);
+        assert_eq!(close(owner, flagged), Err(EpollError::BadFileDescriptor));
+        close(owner, retained).unwrap();
     }
 }

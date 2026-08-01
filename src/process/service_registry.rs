@@ -180,6 +180,25 @@ impl ServiceImageRegistry {
         self.handles[index] = None;
         Ok(Some(image))
     }
+
+    fn exchange_authenticated_image(
+        &mut self,
+        caller: ProcessHandle,
+        service_class: u16,
+        replacement: ProcessImageHandle,
+    ) -> Result<ProcessImageHandle, (ServiceRegistryError, ProcessImageHandle)> {
+        let Some(index) = Self::index(service_class) else {
+            return Err((ServiceRegistryError::UnsupportedService, replacement));
+        };
+        if self.handles[index] != Some(caller) || !self.launched[index] {
+            return Err((ServiceRegistryError::UnauthorizedCaller, replacement));
+        }
+        let Some(previous) = self.images[index].take() else {
+            return Err((ServiceRegistryError::NotRunning, replacement));
+        };
+        self.images[index] = ImageSlot::from_handle(&replacement);
+        Ok(previous)
+    }
 }
 
 static REGISTRY: SpinLock<ServiceImageRegistry> = SpinLock::new(ServiceImageRegistry::EMPTY);
@@ -218,6 +237,26 @@ pub fn take_exited_service(
     caller: ProcessHandle,
 ) -> Result<Option<ProcessImageHandle>, ServiceRegistryError> {
     REGISTRY.lock().take_exited(caller)
+}
+
+/// Exchanges retained address-space ownership for an exact running service.
+///
+/// Lifecycle identity is unchanged by `execve`; only the image handle moves.
+/// Returning the former handle lets the syscall path defer reclamation until
+/// hardware has switched away from its page-table root.
+pub fn exchange_running_image(
+    caller: ProcessHandle,
+    replacement: ProcessImageHandle,
+) -> Result<ProcessImageHandle, (ServiceRegistryError, ProcessImageHandle)> {
+    let Some(snapshot) = lifecycle::snapshot_exact(caller) else {
+        return Err((ServiceRegistryError::NotRunning, replacement));
+    };
+    if snapshot.phase != ProcessPhase::Running {
+        return Err((ServiceRegistryError::NotRunning, replacement));
+    }
+    REGISTRY
+        .lock()
+        .exchange_authenticated_image(caller, snapshot.launch.service_class, replacement)
 }
 
 // Compatibility wrappers retained for the C0 probe while callers migrate to
@@ -330,6 +369,37 @@ mod tests {
                 COSMIC_GREETER_SERVICE_CLASS,
             ),
             Err(ServiceRegistryError::UnauthorizedCaller)
+        );
+    }
+
+    #[test]
+    fn exchanges_only_the_authenticated_running_image_slot() {
+        let mut registry = ServiceImageRegistry::EMPTY;
+        let caller = ProcessHandle {
+            pid: 9,
+            generation: 4,
+        };
+        let class = COSMIC_SESSION_SERVICE_CLASS;
+        registry.handles[class as usize] = Some(caller);
+        registry.launched[class as usize] = true;
+        registry.images[class as usize] = ImageSlot::from_handle(&ProcessImageHandle::new(3, 7));
+        let previous = registry
+            .exchange_authenticated_image(caller, class, ProcessImageHandle::new(5, 8))
+            .unwrap();
+        assert_eq!((previous.slot(), previous.generation()), (3, 7));
+        assert_eq!(
+            registry.exchange_authenticated_image(
+                ProcessHandle {
+                    pid: 9,
+                    generation: 5,
+                },
+                class,
+                ProcessImageHandle::new(6, 9),
+            ),
+            Err((
+                ServiceRegistryError::UnauthorizedCaller,
+                ProcessImageHandle::new(6, 9),
+            ))
         );
     }
 }

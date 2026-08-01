@@ -408,6 +408,36 @@ pub fn clear_thread(owner: ProcessHandle, clear_group: Option<ProcessHandle>) {
     }
 }
 
+/// Applies Linux's successful-exec signal transition.
+///
+/// Caught dispositions return to default, ignored dispositions remain
+/// ignored, the calling thread keeps its mask, and pending/frame state from
+/// the former address space is discarded.
+pub fn reset_for_exec(owner: ProcessHandle) {
+    const SIG_IGN: u64 = 1;
+
+    let mut table = SIGNALS.lock();
+    if let Some(group) = table
+        .groups
+        .iter_mut()
+        .find(|slot| slot.occupied() && slot.owner == owner)
+    {
+        for action in &mut group.actions {
+            if action.handler != SIG_IGN {
+                *action = SignalAction::default();
+            }
+        }
+    }
+    if let Some(thread) = table
+        .threads
+        .iter_mut()
+        .find(|slot| slot.occupied() && slot.owner == owner)
+    {
+        thread.pending = 0;
+        thread.active_frame = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +501,39 @@ mod tests {
         assert_eq!(update_mask(THREAD, 2, Some(u64::MAX)), Ok(0));
         assert_eq!(update_mask(THREAD, 0, None), Ok(sanitize_mask(u64::MAX)));
         clear_thread(THREAD, Some(GROUP));
+    }
+
+    #[test]
+    fn exec_resets_caught_signals_and_retains_ignored_signals_and_mask() {
+        let _serial = TEST_SERIALIZATION.lock();
+        let caught = SignalAction {
+            handler: 0x4000,
+            flags: SA_RESTORER,
+            restorer: 0x5000,
+            mask: 0,
+        };
+        let ignored = SignalAction {
+            handler: 1,
+            flags: 0,
+            restorer: 0,
+            mask: 0,
+        };
+        set_action(GROUP, 10, Some(caught)).unwrap();
+        set_action(GROUP, 12, Some(ignored)).unwrap();
+        update_mask(GROUP, 0, Some(1 << 4)).unwrap();
+        queue(GROUP, 10).unwrap();
+        assert!(matches!(
+            begin_delivery(GROUP, GROUP, 0x7000),
+            Ok(Delivery::Handler { signal: 10, .. })
+        ));
+
+        reset_for_exec(GROUP);
+
+        assert_eq!(set_action(GROUP, 10, None), Ok(SignalAction::default()));
+        assert_eq!(set_action(GROUP, 12, None), Ok(ignored));
+        assert_eq!(update_mask(GROUP, 0, None), Ok((1 << 4) | (1 << 9)));
+        assert_eq!(active_frame(GROUP), None);
+        assert_eq!(begin_delivery(GROUP, GROUP, 0x7000), Ok(Delivery::None));
+        clear_thread(GROUP, Some(GROUP));
     }
 }

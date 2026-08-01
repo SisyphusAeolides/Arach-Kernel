@@ -15,6 +15,8 @@ data Gate : Set where
   robustListRegistration ownerDeathPublication robustFutexWake : Gate
   signalDisposition signalMaskAndPending rtSignalFrame rtSignalReturn : Gate
   threadGroupSnapshot peerGenerationRetirement leaderZombiePublication supervisorReap : Gate
+  immutableFileSnapshot boundedExecVectors measuredStaticImage inactiveActivation : Gate
+  atomicImageExchange execStateReset deferredImageReap rollbackPreservesImage : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -85,6 +87,19 @@ record GroupExitCertificate : Set where
     leaderZombiePublicationEvidence : Measurement leaderZombiePublication
     supervisorReapEvidence : Measurement supervisorReap
 
+record ExecReplacementCertificate : Set where
+  constructor execReplacementCertificate
+  field
+    groupExit : GroupExitCertificate
+    immutableFileSnapshotEvidence : Measurement immutableFileSnapshot
+    boundedExecVectorsEvidence : Measurement boundedExecVectors
+    measuredStaticImageEvidence : Measurement measuredStaticImage
+    inactiveActivationEvidence : Measurement inactiveActivation
+    atomicImageExchangeEvidence : Measurement atomicImageExchange
+    execStateResetEvidence : Measurement execStateReset
+    deferredImageReapEvidence : Measurement deferredImageReap
+    rollbackPreservesImageEvidence : Measurement rollbackPreservesImage
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -109,3 +124,9 @@ signalReturnRequiresRobustExit certificate = SignalReturnCertificate.robustExit 
 -- Whole-group termination structurally retains qualified signal return.
 groupExitRequiresSignalReturn : GroupExitCertificate -> SignalReturnCertificate
 groupExitRequiresSignalReturn certificate = GroupExitCertificate.signalReturn certificate
+
+-- Image replacement cannot be projected without the prior group-lifecycle
+-- qualification on which its single-threaded admission rule depends.
+execReplacementRequiresGroupExit : ExecReplacementCertificate -> GroupExitCertificate
+execReplacementRequiresGroupExit certificate =
+  ExecReplacementCertificate.groupExit certificate

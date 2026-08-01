@@ -99,10 +99,22 @@ monotonic timerfd implementation now covers create, settime, gettime,
 expiration reads, ownership, close, periodic expiry accounting, and readiness
 generation for edge-triggered epoll. These are real wake primitives for early
 COSMIC services, not a claim that ordinary files or device descriptors are
-available yet. File-backed
-mappings, `mprotect`, and the dynamic linker remain gated. Every other decoded
+available yet. File-backed mappings, `mprotect`, and the dynamic linker remain
+gated. Every other decoded
 Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.
+
+The C0 probe now writes a separately measured static x86-64 ELF into Akashic
+VFS and replaces its own image through `execve`. The syscall first copies
+bounded argv and environment vectors from the old hierarchy, snapshots one
+complete file under the VFS lock, measures and activation-validates an
+inactive W^X hierarchy, and exchanges registry and lifecycle ownership while
+retaining the PID generation. Caught signal handlers and close-on-exec objects
+are reset only after publication; the former image is reclaimed by the return
+gate only after CR3 points at the replacement. The admitted slice is
+single-threaded, static-ELF-only, and bounded by Akashic's 64 KiB file ceiling.
+`PT_INTERP`, file-backed mappings, and general dynamic-linker behavior remain
+fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,
 filesystem context, descriptor ownership, signal-handler identity, and SysV
@@ -127,7 +139,8 @@ syscall return, pending standard signals are bit-coalesced, and only self
 real-time queues, alternate stacks, FPU/xstate restoration, stop/continue
 semantics, and interrupted-syscall restart remain fail-closed gates.
 
-Whole-process termination now snapshots at most 64 exact thread generations,
+After replacement, the exec target creates the peer used by the group-exit
+gate. Whole-process termination now snapshots at most 64 exact thread generations,
 consumes every member's futex, robust-list, child-TID, and signal exit state,
 retires every non-leader generation atomically, and publishes only the leader
 as a waitable zombie. The measured probe leaves a cloned peer blocked before

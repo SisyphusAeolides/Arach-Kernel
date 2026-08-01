@@ -215,6 +215,21 @@ pub fn close_all(owner: u32) -> usize {
     closed
 }
 
+pub fn close_on_exec(owner: u32) -> usize {
+    if owner == 0 {
+        return 0;
+    }
+    let mut table = EVENTFDS.lock();
+    let mut closed = 0;
+    for slot in table.iter_mut() {
+        if slot.owner == owner && slot.flags & EFD_CLOEXEC != 0 {
+            *slot = EventFdSlot::EMPTY;
+            closed += 1;
+        }
+    }
+    closed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +274,17 @@ mod tests {
         assert_eq!(close_all(owner), 2);
         assert_eq!(close(owner, first), Err(EventFdError::BadFileDescriptor));
         assert_eq!(close(owner, second), Err(EventFdError::BadFileDescriptor));
+    }
+
+    #[test]
+    fn exec_closes_only_flagged_eventfds() {
+        let owner = 0x1008;
+        let flagged = create(owner, 1, EFD_CLOEXEC).unwrap();
+        let retained = create(owner, 1, 0).unwrap();
+        assert_eq!(close_on_exec(owner), 1);
+        assert_eq!(read(owner, flagged), Err(EventFdError::BadFileDescriptor));
+        assert_eq!(read(owner, retained), Ok(1));
+        close(owner, retained).unwrap();
     }
 
     #[test]

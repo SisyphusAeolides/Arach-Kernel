@@ -25,6 +25,16 @@ pub struct UserlandImageControl;
 pub struct ProcessInstallControl;
 pub struct ModuleLoadControl;
 
+/// Long-lived delegated authority for measured runtime image replacement.
+///
+/// Unlike a borrowed [`Capability`], this token can move into the persistent
+/// process runtime. Its private representation means only the bootstrap root
+/// can create it, and it grants no access outside the image measurement and
+/// installation boundary that explicitly accepts this type.
+pub struct RuntimeImageControl {
+    _private: (),
+}
+
 impl sealed::Sealed for FabricControl {}
 impl sealed::Sealed for PhysicalMemoryControl {}
 impl sealed::Sealed for DeviceMemoryControl {}
@@ -87,6 +97,10 @@ impl Authority {
             _authority: PhantomData,
             _right: PhantomData,
         }
+    }
+
+    pub const fn delegate_runtime_image_control(&self) -> RuntimeImageControl {
+        RuntimeImageControl { _private: () }
     }
 }
 
@@ -202,6 +216,7 @@ mod tests {
         let authority = unsafe { Authority::assume_root() };
         let _: Capability<'_, FabricControl> = authority.grant();
         let _: Capability<'_, DmaControl> = authority.grant();
+        let _runtime = authority.delegate_runtime_image_control();
     }
 
     #[test]

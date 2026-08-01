@@ -247,6 +247,21 @@ pub fn close_all(owner: u32) -> usize {
     closed
 }
 
+pub fn close_on_exec(owner: u32) -> usize {
+    if owner == 0 {
+        return 0;
+    }
+    let mut table = TIMERFDS.lock();
+    let mut closed = 0;
+    for slot in table.iter_mut() {
+        if slot.owner == owner && slot.flags & TFD_CLOEXEC != 0 {
+            *slot = TimerFdSlot::EMPTY;
+            closed += 1;
+        }
+    }
+    closed
+}
+
 /// Advance a timer to `now_ns`, recording every elapsed interval. This is
 /// deliberately called while the table lock is held by all public readers.
 fn refresh(slot: &mut TimerFdSlot, now_ns: u64) {
@@ -387,5 +402,19 @@ mod tests {
         assert_eq!(close_all(owner), 2);
         assert_eq!(close(owner, first), Err(TimerFdError::BadFileDescriptor));
         assert_eq!(close(owner, second), Err(TimerFdError::BadFileDescriptor));
+    }
+
+    #[test]
+    fn exec_closes_only_flagged_timerfds() {
+        let owner = 0x3007;
+        let flagged = create(owner, CLOCK_MONOTONIC, TFD_CLOEXEC).unwrap();
+        let retained = create(owner, CLOCK_MONOTONIC, 0).unwrap();
+        assert_eq!(close_on_exec(owner), 1);
+        assert_eq!(
+            gettime(owner, flagged, 0),
+            Err(TimerFdError::BadFileDescriptor)
+        );
+        assert_eq!(gettime(owner, retained, 0), Ok(TimerSpec::DISARMED));
+        close(owner, retained).unwrap();
     }
 }

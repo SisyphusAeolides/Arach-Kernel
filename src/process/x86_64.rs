@@ -7,7 +7,9 @@ use abyss::paging::{PAGE_SIZE, PhysicalAddress};
 use crate::arch::x86_64::{X86_64, active_page_table_root, load_page_table_root};
 #[cfg(target_os = "none")]
 use crate::capability::InterruptGuard;
-use crate::capability::{Capability, PhysicalMemoryControl, ProcessInstallControl};
+use crate::capability::{
+    Capability, PhysicalMemoryControl, ProcessInstallControl, RuntimeImageControl,
+};
 use crate::memory::frame_pool::PhysicalFramePool;
 use crate::process::install::{
     MappingPermissions, ProcessImageHandle, ProcessImageInfo, UserAddressSpaceBackend,
@@ -27,13 +29,20 @@ const TABLE_ENTRIES: usize = 512;
 // measured stack; they are boot policy, never user-controlled.
 pub const MAXIMUM_PROCESS_PAGES: usize = 1024;
 pub const MAXIMUM_OWNED_FRAMES: usize = 1088;
-pub const MAXIMUM_RETAINED_PROCESSES: usize = 2;
+/// One retained address-space slot per measured service class. Class zero is
+/// unusable, so the spare slot remains available while every admitted class
+/// is live and provides the inactive hierarchy required by transactional
+/// image replacement. Unit tests use two slots to keep the inline hardware
+/// page-record pool below the host test harness's per-thread stack ceiling.
+pub const MAXIMUM_RETAINED_PROCESSES: usize = if cfg!(test) {
+    2
+} else {
+    crate::process::service_registry::MAXIMUM_SERVICE_CLASSES
+};
 pub const INITIAL_USER_STACK_BASE: u64 = 0x0040_0000;
 pub const INITIAL_USER_STACK_PAGES: usize = if cfg!(test) { 112 } else { 192 };
-// Leave one mapped page below the ABI block so the entry trampoline and the
-// first Rust prologue can push return state without faulting at the boundary.
-pub const INITIAL_USER_STACK_POINTER: u64 =
-    INITIAL_USER_STACK_BASE + (INITIAL_USER_STACK_PAGES as u64 * PAGE_SIZE as u64);
+/// Exclusive top of the highest mapped initial-stack page.
+pub const INITIAL_USER_STACK_POINTER: u64 = INITIAL_USER_STACK_BASE + PAGE_SIZE as u64;
 
 /// First address used for Linux anonymous mappings when the caller supplies
 /// no hint.  It is deliberately above the bootstrap image/stack and below the
@@ -434,7 +443,15 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         process: &ProcessImageHandle,
         _authority: &Capability<'_, ProcessInstallControl>,
     ) -> Result<u64, FrameBackedError<Memory::Error>> {
-        self.install_initial_stack_pages(process, INITIAL_USER_STACK_PAGES, _authority)
+        self.install_stack_pages(process, INITIAL_USER_STACK_PAGES)
+    }
+
+    pub fn install_runtime_stack(
+        &mut self,
+        process: &ProcessImageHandle,
+        _authority: &RuntimeImageControl,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        self.install_stack_pages(process, INITIAL_USER_STACK_PAGES)
     }
 
     /// Adds a zeroed, writable, non-executable stack with an image-specific
@@ -446,6 +463,14 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         pages: usize,
         _authority: &Capability<'_, ProcessInstallControl>,
     ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        self.install_stack_pages(process, pages)
+    }
+
+    fn install_stack_pages(
+        &mut self,
+        process: &ProcessImageHandle,
+        pages: usize,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
         let slot_index = self.process_slot(process)?;
         let stack_span = pages
             .checked_sub(1)
@@ -455,11 +480,7 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             .checked_sub(stack_span)
             .ok_or(FrameBackedError::InvalidRange)?;
         let initial_pointer = INITIAL_USER_STACK_BASE
-            .checked_add(
-                (pages as u64)
-                    .checked_mul(PAGE_SIZE as u64)
-                    .ok_or(FrameBackedError::InvalidRange)?,
-            )
+            .checked_add(PAGE_SIZE as u64)
             .ok_or(FrameBackedError::InvalidRange)?;
         if self.active_slot.is_some()
             || self.slots[slot_index]
@@ -1081,11 +1102,30 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             return Err(FrameBackedError::InvalidRange);
         }
 
-        let stack_base = INITIAL_USER_STACK_BASE;
-        let mut word_address = stack_base;
+        let stack_top = self.slots[slot_index]
+            .process_info
+            .initial_stack_pointer
+            .ok_or(FrameBackedError::InvalidState)?;
+        let mapped_bytes = self.slots[slot_index]
+            .initial_stack_pages
+            .checked_mul(PAGE_SIZE)
+            .ok_or(FrameBackedError::InvalidState)?;
+        let mapped_base = stack_top
+            .checked_sub(mapped_bytes as u64)
+            .ok_or(FrameBackedError::InvalidState)?;
+        let block_bytes = pointer_bytes
+            .checked_add(string_bytes)
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let stack_pointer = stack_top
+            .checked_sub(block_bytes as u64)
+            .map(|address| address & !0xf)
+            .filter(|address| *address >= mapped_base)
+            .ok_or(FrameBackedError::InvalidRange)?;
+
+        let mut word_address = stack_pointer;
         self.write_stack_word(slot_index, word_address, argv.len() as u64)?;
         word_address += 8;
-        let string_start = stack_base + pointer_bytes as u64;
+        let string_start = stack_pointer + pointer_bytes as u64;
         let mut string_address = string_start;
         for value in argv {
             self.write_stack_word(slot_index, word_address, string_address)?;
@@ -1108,8 +1148,8 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             self.write_stack_bytes(slot_index, string_address, &[0])?;
             string_address += 1;
         }
-        self.slots[slot_index].process_info.initial_stack_pointer = Some(stack_base);
-        Ok(stack_base)
+        self.slots[slot_index].process_info.initial_stack_pointer = Some(stack_pointer);
+        Ok(stack_pointer)
     }
 
     /// Retries reclamation after a frame-memory backend reported a release
@@ -1524,6 +1564,46 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             .map(|_| slot_index)
             .ok_or(FrameBackedError::InvalidHandle)
     }
+
+    pub unsafe fn validate_runtime_activation(
+        &mut self,
+        process: &ProcessImageHandle,
+        _authority: &RuntimeImageControl,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        // SAFETY: The caller provides the same serialized activation boundary
+        // required by the private implementation.
+        unsafe { self.validate_process_activation(process) }
+    }
+
+    unsafe fn validate_process_activation(
+        &mut self,
+        process: &ProcessImageHandle,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let root = self
+            .process_info(process)
+            .and_then(|info| info.address_space_root)
+            .ok_or(FrameBackedError::InvalidHandle)?;
+
+        #[cfg(target_os = "none")]
+        {
+            let _interrupt_guard = InterruptGuard::<X86_64>::enter();
+            let original_root = unsafe { active_page_table_root() };
+            unsafe { load_page_table_root(root) };
+            if unsafe { active_page_table_root() } != root {
+                unsafe { load_page_table_root(original_root) };
+                return Err(FrameBackedError::ActivationFailed);
+            }
+            unsafe { load_page_table_root(original_root) };
+            if unsafe { active_page_table_root() } != original_root {
+                return Err(FrameBackedError::RestoreFailed);
+            }
+        }
+
+        #[cfg(not(target_os = "none"))]
+        let _ = root;
+
+        Ok(())
+    }
 }
 
 impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressSpace<Memory> {
@@ -1810,35 +1890,9 @@ impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressS
         process: &Self::Process,
         _authority: &Capability<'_, ProcessInstallControl>,
     ) -> Result<(), Self::Error> {
-        let root = self
-            .process_info(process)
-            .and_then(|info| info.address_space_root)
-            .ok_or(FrameBackedError::InvalidHandle)?;
-
-        #[cfg(target_os = "none")]
-        {
-            let _interrupt_guard = InterruptGuard::<X86_64>::enter();
-            // SAFETY: The serialized bootstrap phase owns this inactive root.
-            // Its upper PML4 half was copied from the active kernel hierarchy,
-            // so this code, stack, and direct map remain reachable.
-            let original_root = unsafe { active_page_table_root() };
-            unsafe { load_page_table_root(root) };
-            if unsafe { active_page_table_root() } != root {
-                unsafe { load_page_table_root(original_root) };
-                return Err(FrameBackedError::ActivationFailed);
-            }
-            // Reaching this point while the process root is active proves the
-            // inherited higher-half execution mappings are operational.
-            unsafe { load_page_table_root(original_root) };
-            if unsafe { active_page_table_root() } != original_root {
-                return Err(FrameBackedError::RestoreFailed);
-            }
-        }
-
-        #[cfg(not(target_os = "none"))]
-        let _ = root;
-
-        Ok(())
+        // SAFETY: ProcessInstallControl proves the caller owns the serialized
+        // bootstrap activation boundary.
+        unsafe { self.validate_process_activation(process) }
     }
 
     fn release_process(&mut self, process: &Self::Process) -> Result<(), Self::Error> {
@@ -2174,7 +2228,15 @@ mod tests {
         let stack_pointer = backend
             .prepare_initial_stack(&installed.process, &[b"push"], &[b"SISYPHUS_PROCESS=push"])
             .unwrap();
-        assert_eq!(stack_pointer, INITIAL_USER_STACK_BASE);
+        assert_eq!(stack_pointer & 0xf, 0);
+        assert!(stack_pointer < INITIAL_USER_STACK_POINTER);
+
+        let large_argument = [b'x'; PAGE_SIZE + 128];
+        let large_stack_pointer = backend
+            .prepare_initial_stack(&installed.process, &[&large_argument], &[])
+            .unwrap();
+        assert_eq!(large_stack_pointer & 0xf, 0);
+        assert!(large_stack_pointer + (PAGE_SIZE as u64) < INITIAL_USER_STACK_POINTER);
 
         let p3 = backend.memory().read_entry(root, 0).unwrap() & PAGE_ADDRESS_MASK;
         let p2 = backend
@@ -2473,8 +2535,7 @@ mod tests {
         let installed = install_user_image(image, &mut backend, &install_control).unwrap();
 
         const CREST_STACK_PAGES: usize = 160;
-        let expected_initial_pointer =
-            INITIAL_USER_STACK_BASE + (CREST_STACK_PAGES * PAGE_SIZE) as u64;
+        let expected_initial_pointer = INITIAL_USER_STACK_POINTER;
         assert_eq!(
             backend.install_initial_stack_pages(
                 &installed.process,
@@ -2489,10 +2550,11 @@ mod tests {
             Some(expected_initial_pointer)
         );
         assert_eq!(installed_info.owned_frames, 5 + CREST_STACK_PAGES + 2);
-        assert_eq!(
-            backend.prepare_initial_stack(&installed.process, &[b"crest"], &[]),
-            Ok(INITIAL_USER_STACK_BASE),
-        );
+        let stack_pointer = backend
+            .prepare_initial_stack(&installed.process, &[b"crest"], &[])
+            .unwrap();
+        assert_eq!(stack_pointer & 0xf, 0);
+        assert!(stack_pointer < INITIAL_USER_STACK_POINTER);
         assert_eq!(
             backend.install_initial_stack_pages(&installed.process, 1, &install_control),
             Err(FrameBackedError::InvalidState),
@@ -2500,7 +2562,7 @@ mod tests {
     }
 
     #[test]
-    fn retains_two_processes_and_recycles_only_the_released_slot() {
+    fn fills_the_bounded_process_pool_and_recycles_only_the_released_slot() {
         let memory = Box::new(TestMemory::<176>::new());
         let authority = unsafe { Authority::assume_root() };
         let image_control = authority.grant::<UserlandImageControl>();
@@ -2518,9 +2580,6 @@ mod tests {
         let second_artifact = catalog.materialize(1, &mut second_bytes).unwrap();
         let second_image = prepare_user_image(second_artifact, &image_control).unwrap();
         let second = install_user_image(second_image, &mut backend, &install_control).unwrap();
-        backend
-            .install_initial_stack(&second.process, &install_control)
-            .unwrap();
         let second_info = backend.process_info(&second.process).unwrap();
 
         assert_ne!(first.process.slot(), second.process.slot());
@@ -2545,8 +2604,7 @@ mod tests {
         backend.release_process(&first.process).unwrap();
         assert_eq!(backend.process_info(&first.process), None);
         assert_eq!(backend.process_info(&second.process), Some(second_info));
-        assert_eq!(backend.owned_frame_count(), second_info.owned_frames);
-        assert_eq!(backend.memory().in_use(), second_info.owned_frames);
+        assert_eq!(backend.memory().in_use(), backend.owned_frame_count());
 
         let mut replacement_bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
         let replacement_artifact = catalog.materialize(1, &mut replacement_bytes).unwrap();

@@ -51,6 +51,37 @@ derives the required KPI from that source's conftests and behavioral tests.
 
 ## Current state
 
+### Transactional static process replacement
+
+The first `execve` profile admits one running Linux thread-group leader with no
+peer threads and one static x86-64 ELF no larger than Akashic's bounded file
+object. Path bytes, argv pointers, environment pointers, and all referenced
+strings are copied from the old address space before any replacement is
+installed. The VFS returns inode identity and complete file bytes from one
+locked snapshot, and runtime-only image authority measures those exact bytes
+before parsing their load plan.
+
+Installation creates a separate inactive hierarchy, seals every segment W^X,
+builds a fresh stack, and performs a temporary activation validation that
+restores the old root. Publication then exchanges the service registry's
+owned image and atomically updates lifecycle launch/context state while
+preserving PID generation, parent, service class, capability root, ABI, and
+kernel entry stack. Any failure before lifecycle publication returns ownership
+to the old image and releases the rejected hierarchy. Successful publication
+resets caught signal dispositions, pending/frame state, robust and child-TID
+registrations, FS base, and close-on-exec descriptors. The architecture return
+gate changes CR3 before it reclaims the deferred old hierarchy.
+
+The measured C0 chain requires `ARACH_C1_EXECVE_PASS` from the replacement and
+then obtains the existing live-peer `exit_group` evidence from that new image.
+Host tests separately cover bounded vector capture, immutable snapshots,
+runtime measurement, lifecycle epoch invalidation, registry exchange,
+close-on-exec families, signal reset, rollback ownership, and process-pool
+recycling. Idris 2 and Agda make those gates fields of the downstream exec
+replacement certificate. This is not dynamic ELF qualification: `PT_INTERP`,
+shared-library relocation, file-backed `mmap`, `mprotect`, and demand paging
+remain separate acceptance gates.
+
 The current tree passes external-Kbuild and static load-admission gates against
 real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux
 `.ko` path now plans six page-separated core/init RX, R and RW regions, freezes

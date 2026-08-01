@@ -1723,6 +1723,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     let artifact_synthesis = authority.grant::<ArtifactSynthesisControl>();
     let userland_image = authority.grant::<UserlandImageControl>();
     let process_install = authority.grant::<ProcessInstallControl>();
+    let runtime_image_control = authority.delegate_runtime_image_control();
     let physical_memory = authority.grant::<PhysicalMemoryControl>();
     // SAFETY: Bootstrap is serialized at ring 0 and no process page tables
     // containing NX entries can be activated before this feature gate.
@@ -4118,7 +4119,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         pid1_snapshot.launch.image_measurement_root,
     );
     interrupts::disable();
-    if let Err(error) = runtime::install(process_backend) {
+    if let Err(error) = runtime::install(process_backend, runtime_image_control) {
         let _ = writeln!(serial, "Arach: process runtime handoff failed: {error:?}");
         halt();
     }

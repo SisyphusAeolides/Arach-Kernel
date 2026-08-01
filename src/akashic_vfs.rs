@@ -57,6 +57,12 @@ pub struct Stat {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileSnapshot {
+    pub inode_id: u32,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Dirent {
     pub name: [u8; MAXIMUM_PATH_BYTES],
     pub name_len: u8,
@@ -426,6 +432,36 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
         Ok(self.nodes[index].stat())
     }
 
+    /// Copies one regular file from a single locked namespace snapshot.
+    pub fn read_file(&mut self, path: &[u8], output: &mut [u8]) -> Result<usize, VfsError> {
+        self.read_file_snapshot(path, output)
+            .map(|snapshot| snapshot.bytes)
+    }
+
+    /// Copies one complete regular file and returns its namespace identity
+    /// from the same locked snapshot as the bytes.
+    pub fn read_file_snapshot(
+        &mut self,
+        path: &[u8],
+        output: &mut [u8],
+    ) -> Result<FileSnapshot, VfsError> {
+        self.ensure_initialized()?;
+        validate_path(path)?;
+        let index = self.find_node(path).ok_or(VfsError::NotFound)?;
+        let node = &self.nodes[index];
+        if node.kind != NodeKind::File {
+            return Err(VfsError::NotFile);
+        }
+        if output.len() < node.content_len {
+            return Err(VfsError::FileTooLarge);
+        }
+        output[..node.content_len].copy_from_slice(&node.content[..node.content_len]);
+        Ok(FileSnapshot {
+            inode_id: u32::try_from(index + 1).map_err(|_| VfsError::Capacity)?,
+            bytes: node.content_len,
+        })
+    }
+
     pub fn stat_handle(&mut self, owner: ProcessHandle, token: u64) -> Result<Stat, VfsError> {
         self.ensure_initialized()?;
         let handle_index = self.find_handle(owner, token)?;
@@ -701,6 +737,14 @@ pub fn stat(path: &[u8]) -> Result<Stat, VfsError> {
     KERNEL_VFS.lock().stat(path)
 }
 
+pub fn read_file(path: &[u8], output: &mut [u8]) -> Result<usize, VfsError> {
+    KERNEL_VFS.lock().read_file(path, output)
+}
+
+pub fn read_file_snapshot(path: &[u8], output: &mut [u8]) -> Result<FileSnapshot, VfsError> {
+    KERNEL_VFS.lock().read_file_snapshot(path, output)
+}
+
 pub fn stat_handle(owner: ProcessHandle, token: u64) -> Result<Stat, VfsError> {
     KERNEL_VFS.lock().stat_handle(owner, token)
 }
@@ -861,6 +905,16 @@ mod tests {
         assert_eq!(stat.size_bytes, 6);
         assert_eq!(stat.modified_ticks, 12);
         assert_eq!(stat.flags, flags::EPHEMERAL);
+        let mut snapshot = [0_u8; 8];
+        assert_eq!(vfs.read_file(b"/state", &mut snapshot), Ok(6));
+        assert_eq!(
+            vfs.read_file_snapshot(b"/state", &mut snapshot),
+            Ok(FileSnapshot {
+                inode_id: 2,
+                bytes: 6,
+            })
+        );
+        assert_eq!(&snapshot[..6], b"abc\0\0z");
     }
 
     #[test]

@@ -86,6 +86,7 @@ for marker in \
     "ARACH_C1_ROBUST_FUTEX_PASS" \
     "ARACH_C1_SIGNAL_RETURN_PASS" \
     "ARACH_C1_LINUX_SYSCALL_PASS" \
+    "ARACH_C1_EXECVE_PASS" \
     "ARACH_C1_EXIT_GROUP_ARMED" \
     "[PID 1] child 2 exited with status 0"; do
     grep -F -- "$marker" "$log" >/dev/null || {

@@ -8,9 +8,12 @@ const PASS: &[u8] = b"ARACH_C0_RING3_SYSCALL_PASS\n";
 const THREAD_PASS: &[u8] = b"ARACH_C1_THREAD_FUTEX_PASS\n";
 const ROBUST_PASS: &[u8] = b"ARACH_C1_ROBUST_FUTEX_PASS\n";
 const SIGNAL_PASS: &[u8] = b"ARACH_C1_SIGNAL_RETURN_PASS\n";
-const EXIT_GROUP_ARMED: &[u8] = b"ARACH_C1_EXIT_GROUP_ARMED\n";
 const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
 const PANIC: &[u8] = b"ARACH_C0_RING3_PANIC\n";
+const EXEC_PATH: &[u8] = b"/exec-target\0";
+const EXEC_ARG0: &[u8] = b"exec-target\0";
+const EXEC_ENV0: &[u8] = b"ARACH_EXEC_TRANSACTION=1\0";
+const EXEC_TARGET: &[u8] = include_bytes!(env!("ARACH_EXEC_TARGET_IMAGE_PATH"));
 
 const SYS_WRITE: usize = 1;
 const SYS_READ: usize = 0;
@@ -23,6 +26,7 @@ const SYS_RT_SIGPROCMASK: usize = 14;
 const SYS_RT_SIGRETURN: usize = 15;
 const SYS_GETPID: usize = 39;
 const SYS_CLONE: usize = 56;
+const SYS_EXECVE: usize = 59;
 const SYS_EXIT: usize = 60;
 const SYS_UNAME: usize = 63;
 const SYS_GETUID: usize = 102;
@@ -41,6 +45,11 @@ const SYS_POLL: usize = 7;
 const SYS_EPOLL_WAIT: usize = 232;
 const SYS_EPOLL_CTL: usize = 233;
 const SYS_EPOLL_CREATE1: usize = 291;
+const SYS_OPEN: usize = 2;
+
+const O_RDWR: usize = 0x2;
+const O_CREAT: usize = 0x40;
+const O_EXCL: usize = 0x80;
 
 const EFD_SEMAPHORE: usize = 0x1;
 const POLLIN: u16 = 0x001;
@@ -94,8 +103,6 @@ static THREAD_OBSERVED_PID: AtomicU32 = AtomicU32::new(0);
 static THREAD_EVENT_FD: AtomicU32 = AtomicU32::new(0);
 static THREAD_DESCRIPTOR_WRITE: AtomicU32 = AtomicU32::new(0);
 static SIGNAL_HITS: AtomicU32 = AtomicU32::new(0);
-static GROUP_EXIT_READY: AtomicU32 = AtomicU32::new(0);
-static GROUP_EXIT_HOLD: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C)]
 struct RobustListHead {
@@ -300,40 +307,6 @@ extern "C" fn clear_tid_thread_entry() -> isize {
     0
 }
 
-extern "C" fn group_exit_thread_entry() -> isize {
-    GROUP_EXIT_READY.store(1, Ordering::Release);
-    let woken = unsafe {
-        linux_syscall6(
-            SYS_FUTEX,
-            &GROUP_EXIT_READY as *const _ as usize,
-            FUTEX_WAKE_PRIVATE,
-            1,
-            0,
-            0,
-            0,
-        )
-    };
-    if woken != 1 {
-        return 122;
-    }
-    loop {
-        let waited = unsafe {
-            linux_syscall6(
-                SYS_FUTEX,
-                &GROUP_EXIT_HOLD as *const _ as usize,
-                FUTEX_WAIT_PRIVATE,
-                0,
-                0,
-                0,
-                0,
-            )
-        };
-        if waited != 0 && waited != -11 {
-            return 121;
-        }
-    }
-}
-
 #[repr(C)]
 struct LinuxTimespec {
     tv_sec: i64,
@@ -450,6 +423,25 @@ unsafe fn linux_syscall6(
 #[inline(always)]
 fn passed(value: isize) -> bool {
     value >= 0
+}
+
+fn write_all(fd: usize, bytes: &[u8]) -> bool {
+    let mut written = 0_usize;
+    while written < bytes.len() {
+        let result = unsafe {
+            linux_syscall3(
+                SYS_WRITE,
+                fd,
+                bytes.as_ptr().add(written) as usize,
+                bytes.len() - written,
+            )
+        };
+        if result <= 0 {
+            return false;
+        }
+        written += result as usize;
+    }
+    true
 }
 
 fn fail() -> ! {
@@ -569,8 +561,7 @@ pub extern "C" fn _start() -> ! {
             options(nostack, readonly, preserves_flags),
         );
     }
-    if observed_tls != tls_word
-        || unsafe { linux_syscall3(SYS_ARCH_PRCTL, ARCH_SET_FS, 0, 0) } != 0
+    if observed_tls != tls_word || unsafe { linux_syscall3(SYS_ARCH_PRCTL, ARCH_SET_FS, 0, 0) } != 0
     {
         fail();
     }
@@ -998,62 +989,36 @@ pub extern "C" fn _start() -> ! {
         fail();
     }
 
-    // Leave one independently scheduled peer blocked in the shared address
-    // space. Push can report status 0 only if exit_group retires that live TID
-    // and publishes the leader as the group's sole waitable zombie.
-    THREAD_TID.store(0, Ordering::Release);
-    GROUP_EXIT_READY.store(0, Ordering::Release);
-    GROUP_EXIT_HOLD.store(0, Ordering::Release);
-    let group_peer = unsafe {
-        arach_clone_thread(
-            THREAD_CLONE_FLAGS,
-            stack_top,
-            tid_word,
-            tid_word,
-            0,
-            group_exit_thread_entry,
-        )
-    };
-    if group_peer <= 0 || group_peer == pid {
-        fail();
-    }
-    let waited = unsafe {
-        linux_syscall6(
-            SYS_FUTEX,
-            &GROUP_EXIT_READY as *const _ as usize,
-            FUTEX_WAIT_PRIVATE,
-            0,
-            0,
-            0,
+    // Materialize an immutable VFS snapshot, then replace this same PID with
+    // the measured target. Successful execve cannot return to this image.
+    let target = unsafe {
+        linux_syscall3(
+            SYS_OPEN,
+            EXEC_PATH.as_ptr() as usize,
+            O_CREAT | O_EXCL | O_RDWR,
             0,
         )
     };
-    if waited != 0
-        || GROUP_EXIT_READY.load(Ordering::Acquire) != 1
-        || THREAD_TID.load(Ordering::Acquire) != group_peer as u32
+    if target < 3
+        || !write_all(target as usize, EXEC_TARGET)
+        || unsafe { linux_syscall1(SYS_CLOSE, target as usize) } != 0
     {
         fail();
     }
-    let wrote = unsafe {
+    let argv = [EXEC_ARG0.as_ptr(), core::ptr::null()];
+    let envp = [EXEC_ENV0.as_ptr(), core::ptr::null()];
+    let result = unsafe {
         linux_syscall3(
-            SYS_WRITE,
-            1,
-            EXIT_GROUP_ARMED.as_ptr() as usize,
-            EXIT_GROUP_ARMED.len(),
+            SYS_EXECVE,
+            EXEC_PATH.as_ptr() as usize,
+            argv.as_ptr() as usize,
+            envp.as_ptr() as usize,
         )
     };
-    if wrote != EXIT_GROUP_ARMED.len() as isize {
+    if result != 0 {
         fail();
     }
-
-    // SAFETY: exit_group accepts a scalar status and is handled before the
-    // ordinary Linux syscall dispatcher schedules the next process.
-    unsafe {
-        let _ = linux_syscall1(SYS_EXIT_GROUP, 0);
-    }
-    loop {
-        core::hint::spin_loop();
-    }
+    fail();
 }
 
 #[panic_handler]

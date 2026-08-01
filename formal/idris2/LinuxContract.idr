@@ -39,6 +39,14 @@ data Gate
   | PeerGenerationRetirement
   | LeaderZombiePublication
   | SupervisorReap
+  | ImmutableFileSnapshot
+  | BoundedExecVectors
+  | MeasuredStaticImage
+  | InactiveActivation
+  | AtomicImageExchange
+  | ExecStateReset
+  | DeferredImageReap
+  | RollbackPreservesImage
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -125,6 +133,23 @@ record GroupExitCertificate where
   leaderZombiePublication : Measurement LeaderZombiePublication
   supervisorReap : Measurement SupervisorReap
 
+||| Runtime evidence for same-PID static image replacement. The former image
+||| remains the rollback target until a measured replacement has passed
+||| inactive activation and both ownership registries commit. Reclamation is
+||| represented only after the architecture return path changes page roots.
+public export
+record ExecReplacementCertificate where
+  constructor MkExecReplacementCertificate
+  groupExit : GroupExitCertificate
+  immutableFileSnapshot : Measurement ImmutableFileSnapshot
+  boundedExecVectors : Measurement BoundedExecVectors
+  measuredStaticImage : Measurement MeasuredStaticImage
+  inactiveActivation : Measurement InactiveActivation
+  atomicImageExchange : Measurement AtomicImageExchange
+  execStateReset : Measurement ExecStateReset
+  deferredImageReap : Measurement DeferredImageReap
+  rollbackPreservesImage : Measurement RollbackPreservesImage
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -152,3 +177,9 @@ signalReturnRequiresRobustExit certificate = certificate.robustExit
 public export
 groupExitRequiresSignalReturn : GroupExitCertificate -> SignalReturnCertificate
 groupExitRequiresSignalReturn certificate = certificate.signalReturn
+
+||| Image replacement remains downstream of qualified whole-group lifecycle
+||| behavior, even though the admitted first slice requires one group member.
+public export
+execReplacementRequiresGroupExit : ExecReplacementCertificate -> GroupExitCertificate
+execReplacementRequiresGroupExit certificate = certificate.groupExit

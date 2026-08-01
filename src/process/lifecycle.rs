@@ -784,6 +784,92 @@ pub fn resume_current(saved: SavedUserContext) -> Result<ScheduledProcess, Lifec
     Ok(scheduled)
 }
 
+/// Atomically replaces the running single-threaded Linux process image.
+///
+/// PID generation, parentage, kernel entry stack, capability root, service
+/// class, priority, and ABI remain unchanged. Only measured image state and
+/// the initial user context are replaced, and the scheduler epoch advances so
+/// no return authority issued for the former image can validate afterward.
+pub fn preflight_current_image_replacement() -> Result<ProcessHandle, LifecycleError> {
+    let current = current_user_handle()?;
+    let table = TABLE.lock();
+    current_replacement_index(&table, current)?;
+    next_scheduler_epoch(table.scheduler_epoch)?;
+    Ok(current)
+}
+
+pub fn replace_current_image(
+    address_space_root: u64,
+    entry_point: u64,
+    user_stack_pointer: u64,
+    image_measurement_root: u64,
+) -> Result<ScheduledProcess, LifecycleError> {
+    let current = current_user_handle()?;
+    let mut table = TABLE.lock();
+    let current_index = current_replacement_index(&table, current)?;
+    let current_slot = table.slots[current_index];
+    let replacement = ProcessLaunch {
+        address_space_root,
+        entry_point,
+        user_stack_pointer,
+        image_measurement_root,
+        ..current_slot.launch
+    };
+    if !replacement.validate() {
+        return Err(LifecycleError::InvalidLaunch);
+    }
+    let user = SavedUserContext::initial(entry_point, user_stack_pointer);
+    let next_epoch = next_scheduler_epoch(table.scheduler_epoch)?;
+    let scheduled = ScheduledProcess {
+        handle: current,
+        context: DispatchContext {
+            user,
+            address_space_root,
+            kernel_stack_pointer: replacement.kernel_stack_pointer,
+            fs_base: 0,
+        },
+        scheduler_epoch: next_epoch,
+    };
+    scheduled
+        .context
+        .validate()
+        .map_err(|_| LifecycleError::InvalidContext)?;
+
+    table.slots[current_index].launch = replacement;
+    table.slots[current_index].context = user;
+    table.slots[current_index].fs_base = 0;
+    table.scheduler_epoch = next_epoch;
+    publish_scheduler_epoch(next_epoch);
+    Ok(scheduled)
+}
+
+fn current_replacement_index(
+    table: &ProcessTable,
+    current: ProcessHandle,
+) -> Result<usize, LifecycleError> {
+    let index = table
+        .slots
+        .iter()
+        .position(|slot| {
+            slot.occupied && slot.pid == current.pid && slot.generation == current.generation
+        })
+        .ok_or(LifecycleError::InvalidHandle)?;
+    let slot = table.slots[index];
+    if slot.phase != ProcessPhase::Running
+        || !slot.launch.abi.is_linux()
+        || slot.pid != slot.thread_group
+        || table
+            .slots
+            .iter()
+            .filter(|member| member.occupied && member.thread_group == slot.thread_group)
+            .count()
+            != 1
+    {
+        return Err(LifecycleError::InvalidTransition);
+    }
+    Ok(index)
+}
+
 /// Returns the TLS base owned by the exact currently running PID generation.
 pub fn current_fs_base() -> Result<u64, LifecycleError> {
     let current = current_user_handle()?;
@@ -1488,6 +1574,31 @@ mod tests {
         assert_eq!(current_pid(), NO_PID);
         assert_eq!(current_handle(), None);
         assert_eq!(snapshot(init.pid).unwrap().phase, ProcessPhase::Zombie);
+    }
+
+    #[test]
+    fn exec_replaces_only_image_state_and_invalidates_the_old_epoch() {
+        let _serial = TEST_SERIALIZATION.lock();
+        reset_lifecycle();
+        let mut linux = launch(1);
+        linux.abi = ExecutionAbi::LinuxX86_64;
+        let init = register_init(linux).unwrap();
+        mark_running(init).unwrap();
+        set_current_fs_base(0x7000).unwrap();
+        let old_epoch = TABLE.lock().scheduler_epoch;
+        assert_eq!(preflight_current_image_replacement(), Ok(init));
+
+        let scheduled = replace_current_image(0x9000, 0x5000, 0xa000, 0x1234).unwrap();
+        let snapshot = snapshot_exact(init).unwrap();
+        assert_eq!(scheduled.handle, init);
+        assert_eq!(snapshot.launch.address_space_root, 0x9000);
+        assert_eq!(snapshot.launch.entry_point, 0x5000);
+        assert_eq!(snapshot.launch.user_stack_pointer, 0xa000);
+        assert_eq!(snapshot.launch.image_measurement_root, 0x1234);
+        assert_eq!(snapshot.launch.capability_root, linux.capability_root);
+        assert_eq!(snapshot.launch.abi, ExecutionAbi::LinuxX86_64);
+        assert_eq!(scheduled.context.fs_base, 0);
+        assert!(scheduled.scheduler_epoch > old_epoch);
     }
 
     #[test]

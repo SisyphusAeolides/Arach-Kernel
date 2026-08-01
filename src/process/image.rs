@@ -1,8 +1,9 @@
 use blacklab::oureboros::{
-    ArtifactMeasurement, FractalClass, TargetArchitecture, VerifiedArtifact,
+    ArtifactManifest, ArtifactMeasurement, FractalClass, OureborosError, TargetArchitecture,
+    VerifiedArtifact, sha256, verify_artifact,
 };
 
-use crate::capability::{Capability, UserlandImageControl};
+use crate::capability::{Capability, RuntimeImageControl, UserlandImageControl};
 use crate::module::loader::{LoadPlan, LoaderError};
 
 pub const MINIMUM_USER_ADDRESS: u64 = 0x1000;
@@ -11,7 +12,7 @@ pub const MAXIMUM_USER_IMAGE_SPAN: u64 = 64 * 1024 * 1024;
 
 /// A measured image and its validated static load plan.
 ///
-/// The artifact remains immutably borrowed for this object's lifetime. A
+/// The artifact remains immutably borrowed for this object's lifetime.
 /// The address-space installer consumes this object, copies each segment into
 /// inaccessible zeroed staging memory, verifies initialized data and BSS, and
 /// only then seals final permissions. Static relocations remain unsupported.
@@ -37,6 +38,39 @@ impl PreparedUserImage<'_> {
 pub fn prepare_user_image<'bytes>(
     artifact: VerifiedArtifact<'bytes>,
     _authority: &Capability<'_, UserlandImageControl>,
+) -> Result<PreparedUserImage<'bytes>, UserImageError> {
+    validate_user_image(artifact)
+}
+
+/// Measures and validates an executable supplied by the runtime filesystem.
+///
+/// Unlike boot artifacts, runtime files have no build-time digest manifest.
+/// This boundary therefore computes the digest from the immutable snapshot,
+/// binds that measurement to the load plan, and retains both until the
+/// transactional installer has copied and verified every segment.
+pub fn prepare_runtime_user_image<'bytes>(
+    inode_id: u32,
+    bytes: &'bytes [u8],
+    _authority: &RuntimeImageControl,
+) -> Result<PreparedUserImage<'bytes>, UserImageError> {
+    let plan = LoadPlan::parse(bytes).map_err(UserImageError::Loader)?;
+    let entry_offset = plan.entry_file_offset().map_err(UserImageError::Loader)?;
+    let artifact = verify_artifact(
+        ArtifactManifest {
+            inode_id: inode_id.max(1),
+            class: FractalClass::Executable,
+            architecture: TargetArchitecture::X86_64,
+            entry_offset,
+            expected_sha256: sha256(bytes),
+        },
+        bytes,
+    )
+    .map_err(UserImageError::Measurement)?;
+    validate_user_image(artifact)
+}
+
+fn validate_user_image<'bytes>(
+    artifact: VerifiedArtifact<'bytes>,
 ) -> Result<PreparedUserImage<'bytes>, UserImageError> {
     let measurement = artifact.measurement();
     if measurement.class != FractalClass::Executable {
@@ -88,6 +122,7 @@ pub enum UserImageError {
     InvalidUserRange,
     UnreadableCode,
     EntryMetadataMismatch,
+    Measurement(OureborosError),
     Loader(LoaderError),
 }
 
@@ -166,5 +201,34 @@ mod tests {
             prepare_user_image(artifact, &image_control),
             Err(UserImageError::WrongClass)
         ));
+    }
+
+    #[test]
+    fn runtime_image_is_measured_before_its_plan_is_returned() {
+        let recipe = recipe();
+        let mut bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let mut catalog = FractalCatalog::new();
+        catalog
+            .plant_seed(FractalSeed {
+                inode_id: 7,
+                class: FractalClass::Executable,
+                architecture: TargetArchitecture::X86_64,
+                recipe,
+                unfolded_size_bytes: MINIMAL_X86_64_ELF_BYTES as u32,
+                entry_offset: 128,
+                expected_sha256: measure_recipe(recipe, MINIMAL_X86_64_ELF_BYTES).unwrap(),
+            })
+            .unwrap();
+        let expected = {
+            let artifact = catalog.materialize(7, &mut bytes).unwrap();
+            artifact.measurement().sha256
+        };
+        // SAFETY: Unit tests establish one isolated bootstrap authority.
+        let authority = unsafe { Authority::assume_root() };
+        let runtime_control = authority.delegate_runtime_image_control();
+        let prepared = prepare_runtime_user_image(9, &bytes, &runtime_control).unwrap();
+        assert_eq!(prepared.measurement().inode_id, 9);
+        assert_eq!(prepared.measurement().sha256, expected);
+        assert_eq!(prepared.plan().entry_file_offset(), Ok(128));
     }
 }
