@@ -49,19 +49,21 @@ The Linux personality currently covers:
   `stat`, `fstat`, `lseek`, and `unlinkat` paths;
 - generation-bound `set_tid_address`, with best-effort zeroing of the exact
   exiting PID generation's registered `clear_child_tid` word before zombie
-  publication and descriptor cleanup.
+  publication and descriptor cleanup;
+- generation- and address-space-bound private futex `WAIT`/`WAKE` queues with
+  an atomic compare-to-block scheduler transition and clear-child-tid wake.
 
 The file bridge is intentionally bounded and ephemeral. It is not a persistent
 block-backed filesystem, and the current Linux descriptor families are not yet
 one unified descriptor namespace. The process model also does not yet provide
-full Linux `clone` thread groups. Robust-list recovery, blocking futex
-`WAIT`/`WAKE`, signal delivery and return, and FS-base TLS remain future
-compatibility slices.
+full Linux `clone` thread groups. Cross-thread futex wake qualification,
+robust-list recovery, signal delivery and return, and FS-base TLS remain
+future compatibility slices.
 
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
-| Linux userspace compatibility | Identity, memory, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, and generation-bound `set_tid_address` are implemented and tested | Add a real block-and-reschedule futex path, robust-list exit recovery, signal delivery, FS-base TLS, thread groups, a unified descriptor namespace, and persistent storage |
+| Linux userspace compatibility | Identity, memory, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, generation-bound `set_tid_address`, and private futex compare/block/wake are implemented and tested | Qualify futex wake with shared-address-space threads, then add robust-list exit recovery, signal delivery, FS-base TLS, thread groups, a unified descriptor namespace, and persistent storage |
 | System bootstrap | The pinned Granite/Arach/Push C0 bundle executes under QEMU/OVMF and emits measured ring-3 syscall evidence | Promote the measured bootstrap into a native Push service graph and qualified COSMIC login/session path |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -71,8 +73,9 @@ compatibility slices.
 The current critical path is:
 
 1. Keep the measured C0 QEMU/OVMF path green.
-2. Complete futex blocking/wake and robust-list exit recovery.
-3. Add signal delivery/return and FS-base TLS, then introduce measured thread
+2. Qualify futex wake across a measured shared-address-space thread group and
+   complete robust-list exit recovery.
+3. Add signal delivery/return and FS-base TLS, then expand measured thread
    groups without weakening generation isolation.
 4. Unify Linux descriptor ownership and add persistent block-backed storage.
 5. Connect qualified modules and the native Push service graph to a complete

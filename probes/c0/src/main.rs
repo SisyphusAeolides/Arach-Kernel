@@ -19,6 +19,7 @@ const SYS_GETUID: usize = 102;
 const SYS_GETGID: usize = 104;
 const SYS_GETPPID: usize = 110;
 const SYS_GETTID: usize = 186;
+const SYS_FUTEX: usize = 202;
 const SYS_CLOCK_GETTIME: usize = 228;
 const SYS_EXIT_GROUP: usize = 231;
 const SYS_EVENTFD2: usize = 290;
@@ -31,6 +32,8 @@ const EFD_SEMAPHORE: usize = 0x1;
 const POLLIN: u16 = 0x001;
 const EPOLLIN: u32 = 0x001;
 const EPOLL_CTL_ADD: usize = 1;
+const FUTEX_WAIT_PRIVATE: usize = 128;
+const FUTEX_WAKE_PRIVATE: usize = 129;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
@@ -241,6 +244,36 @@ pub extern "C" fn _start() -> ! {
     // A zero brk query must return the process's bounded initial break.
     // SAFETY: brk's first argument is a scalar query.
     if unsafe { linux_syscall1(SYS_BRK, 0) } <= 0 {
+        fail();
+    }
+
+    // The measured single-process probe cannot manufacture a Linux thread
+    // group, but it can prove private-futex dispatch, atomic value comparison,
+    // and the empty wake path. A mismatched WAIT must never enqueue or block.
+    let futex_word = 7_u32;
+    if unsafe {
+        linux_syscall6(
+            SYS_FUTEX,
+            &futex_word as *const _ as usize,
+            FUTEX_WAIT_PRIVATE,
+            8,
+            0,
+            0,
+            0,
+        )
+    } != -11
+        || unsafe {
+            linux_syscall6(
+                SYS_FUTEX,
+                &futex_word as *const _ as usize,
+                FUTEX_WAKE_PRIVATE,
+                1,
+                0,
+                0,
+                0,
+            )
+        } != 0
+    {
         fail();
     }
 

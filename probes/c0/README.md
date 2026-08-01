@@ -4,10 +4,13 @@ This bounded `no_std` ELF is qualification input, not a desktop or production
 service. It is launched with Arach's Linux x86-64 execution personality and
 proves the first live userspace slice: `write`, `read`, `close`, `eventfd2`,
 `poll`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `getpid`, `gettid`,
-`getppid`, anonymous `mmap`, exact-range `munmap`, `brk`, and `exit_group`.
+`getppid`, anonymous `mmap`, exact-range `munmap`, `brk`, private `futex`, and
+`exit_group`.
 The probe checks both normal and semaphore eventfd semantics, including
 non-sleeping `EAGAIN` on an empty counter, and verifies that poll/epoll
-readiness clears after the eventfd is drained. It writes
+readiness clears after the eventfd is drained. Its single-process futex gate
+proves mismatch rejection and an empty wake without claiming a cross-thread
+wake. It writes
 `ARACH_C0_RING3_SYSCALL_PASS` after entering ring 3 and
 `ARACH_C1_LINUX_SYSCALL_PASS` only after every Linux operation succeeds. Both
 markers must come from the exact measured bundle.

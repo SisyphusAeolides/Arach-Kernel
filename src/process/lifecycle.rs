@@ -713,6 +713,61 @@ pub fn schedule_preempt(
     Ok(scheduled)
 }
 
+/// Saves the running process context, marks that exact PID generation
+/// blocked, and atomically selects either a runnable peer or PID0.
+///
+/// A wait-object implementation must retain its own queue lock while calling
+/// this function. A matching wake can then move the blocked generation back
+/// to `Runnable` only after both the saved context and blocked phase are
+/// visible, which closes the enqueue-to-sleep lost-wake window.
+pub fn schedule_block(saved: SavedUserContext) -> Result<ScheduleDecision, LifecycleError> {
+    saved
+        .validate()
+        .map_err(|_| LifecycleError::InvalidContext)?;
+
+    let current = current_user_handle()?;
+    let mut table = TABLE.lock();
+    let current_index = table
+        .slots
+        .iter()
+        .position(|slot| {
+            slot.occupied && slot.pid == current.pid && slot.generation == current.generation
+        })
+        .ok_or(LifecycleError::InvalidHandle)?;
+    if table.slots[current_index].phase != ProcessPhase::Running {
+        return Err(LifecycleError::InvalidTransition);
+    }
+
+    let next_epoch = next_scheduler_epoch(table.scheduler_epoch)?;
+    let target = table
+        .next_runnable_index(current_index)
+        .map(|target_index| {
+            (
+                target_index,
+                table.scheduled(target_index, table.slots[target_index].context, next_epoch),
+            )
+        });
+    if target.is_some_and(|(_, scheduled)| scheduled.context.validate().is_err()) {
+        return Err(LifecycleError::InvalidContext);
+    }
+
+    table.slots[current_index].context = saved;
+    table.slots[current_index].phase = ProcessPhase::Blocked;
+    table.slots[current_index].wait_sequence = next_epoch;
+    table.scheduler_epoch = next_epoch;
+
+    if let Some((target_index, scheduled)) = target {
+        table.slots[target_index].phase = ProcessPhase::Running;
+        CURRENT_EXECUTION.store(scheduled.handle.encode(), Ordering::Release);
+        publish_scheduler_epoch(next_epoch);
+        Ok(ScheduleDecision::User(scheduled))
+    } else {
+        CURRENT_EXECUTION.store(PID0_IDENTITY, Ordering::Release);
+        publish_scheduler_epoch(next_epoch);
+        Ok(ScheduleDecision::Pid0(pid0_authority(next_epoch)))
+    }
+}
+
 /// Terminates the running process and atomically selects either another user
 /// process or the explicit PID0 scheduler context.
 pub fn schedule_exit(exit_code: isize) -> Result<ScheduleDecision, LifecycleError> {
@@ -1206,6 +1261,38 @@ mod tests {
             schedule_from_pid0(reselected),
             Err(LifecycleError::StalePid0Authority)
         );
+    }
+
+    #[test]
+    fn blocking_saves_context_and_selects_only_a_runnable_peer() {
+        let _serial = TEST_SERIALIZATION.lock();
+        reset_lifecycle();
+
+        let init = register_init(launch(1)).unwrap();
+        mark_running(init).unwrap();
+        let child = commit_child(INIT_PID, launch(2)).unwrap();
+        let blocked_context = saved(0x710);
+
+        let ScheduleDecision::User(dispatched) = schedule_block(blocked_context).unwrap() else {
+            panic!("runnable child must be selected");
+        };
+        assert_eq!(dispatched.handle, child);
+        assert_eq!(snapshot(init.pid).unwrap().phase, ProcessPhase::Blocked);
+        assert_eq!(snapshot(child.pid).unwrap().phase, ProcessPhase::Running);
+
+        mark_runnable(init).unwrap();
+        let resumed = schedule_yield(saved(0x720)).unwrap();
+        assert_eq!(resumed.handle, init);
+        assert_eq!(resumed.context.user, blocked_context);
+
+        reset_lifecycle();
+        let only = register_init(launch(1)).unwrap();
+        mark_running(only).unwrap();
+        let ScheduleDecision::Pid0(idle) = schedule_block(saved(0x730)).unwrap() else {
+            panic!("PID0 must be selected when every user process is blocked");
+        };
+        assert_eq!(authorize_pid0(idle), Ok(()));
+        assert_eq!(snapshot(only.pid).unwrap().phase, ProcessPhase::Blocked);
     }
 
     #[test]

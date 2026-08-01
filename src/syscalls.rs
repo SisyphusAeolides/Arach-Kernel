@@ -340,6 +340,9 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
             | Some(crate::process::abi::LinuxSyscall::ExitGroup) => {
                 schedule_exit_return(arguments[0] as isize)
             }
+            Some(crate::process::abi::LinuxSyscall::Futex) => {
+                schedule_linux_futex_return(frame.dispatch.user, arguments)
+            }
             _ => {
                 let mut saved = frame.dispatch.user;
                 saved.set_syscall_result(dispatch_linux_syscall(number, arguments));
@@ -446,8 +449,11 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         Some(handle) => handle,
         None => crate::arch::x86_64::halt(),
     };
+    let _ = crate::linux_futex::cancel_wait(exiting);
     if let Some(clear_child_tid) = crate::linux_thread::take_clear_child_tid(exiting) {
-        let _ = copy_value_to_user(clear_child_tid, &0_u32);
+        if copy_value_to_user(clear_child_tid, &0_u32).is_ok() {
+            let _ = crate::linux_futex::wake_current(clear_child_tid, 1);
+        }
     }
     let _ = crate::linux_file::close_all(exiting);
     let _ = crate::akashic_vfs::close_all(exiting);
@@ -470,12 +476,20 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         Ok(None) => {}
         Err(_) => crate::arch::x86_64::halt(),
     }
+    complete_schedule_decision(decision)
+}
+
+#[cfg(target_os = "none")]
+fn complete_schedule_decision(
+    decision: crate::process::lifecycle::ScheduleDecision,
+) -> crate::process::lifecycle::ScheduledProcess {
     match decision {
         crate::process::lifecycle::ScheduleDecision::User(scheduled) => scheduled,
         crate::process::lifecycle::ScheduleDecision::Pid0(mut idle) => loop {
-            // SAFETY: `schedule_exit` selected PID0 at a serialized syscall
+            // SAFETY: lifecycle selected PID0 at a serialized syscall
             // boundary. The immutable kernel root remains reachable through
-            // the retiring process hierarchy.
+            // every retained user hierarchy, and any exited image can be
+            // reclaimed only after this root switch.
             if unsafe { crate::process::runtime::enter_kernel_idle_and_reap() }.is_err() {
                 crate::arch::x86_64::halt();
             }
@@ -493,6 +507,89 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
                 Err(_) => crate::arch::x86_64::halt(),
             }
         },
+    }
+}
+
+#[cfg(target_os = "none")]
+fn resume_linux_result(
+    mut saved: crate::process::context::SavedUserContext,
+    result: isize,
+) -> crate::process::lifecycle::ScheduledProcess {
+    saved.set_syscall_result(result);
+    match crate::process::lifecycle::resume_current(saved) {
+        Ok(scheduled) => scheduled,
+        Err(_) => crate::arch::x86_64::halt(),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn schedule_linux_futex_return(
+    mut saved: crate::process::context::SavedUserContext,
+    arguments: [u64; 6],
+) -> crate::process::lifecycle::ScheduledProcess {
+    const FUTEX_WAIT: u32 = 0;
+    const FUTEX_WAKE: u32 = 1;
+    const FUTEX_PRIVATE_FLAG: u32 = 128;
+    const FUTEX_COMMAND_MASK: u32 = 127;
+
+    let operation = arguments[1] as u32;
+    let command = operation & FUTEX_COMMAND_MASK;
+    let flags = operation & !FUTEX_COMMAND_MASK;
+    // Shared futex keys require a physical-page or file-backed identity. The
+    // current address-space key is exact for private futexes only, so fail
+    // closed instead of aliasing unrelated mappings at the same VA.
+    if flags != FUTEX_PRIVATE_FLAG {
+        return resume_linux_result(saved, ERROR_NOT_IMPLEMENTED);
+    }
+
+    match command {
+        FUTEX_WAIT => {
+            if arguments[3] != 0 {
+                // Deadline-driven wakeup is admitted separately once timer
+                // expiry can remove the exact queue generation atomically.
+                return resume_linux_result(saved, ERROR_NOT_IMPLEMENTED);
+            }
+            let expected = arguments[2] as u32;
+            saved.set_syscall_result(0);
+            let waited = crate::linux_futex::wait_current(arguments[0], expected, saved, || {
+                let mut encoded = [0_u8; core::mem::size_of::<u32>()];
+                copy_from_user(arguments[0], &mut encoded)?;
+                Ok::<u32, UserCopyError>(u32::from_ne_bytes(encoded))
+            });
+            match waited {
+                Ok(decision) => complete_schedule_decision(decision),
+                Err(crate::linux_futex::FutexWaitError::ValueChanged) => {
+                    resume_linux_result(saved, ERROR_TRY_AGAIN)
+                }
+                Err(crate::linux_futex::FutexWaitError::UserMemory(_)) => {
+                    resume_linux_result(saved, ERROR_BAD_ADDRESS)
+                }
+                Err(crate::linux_futex::FutexWaitError::Queue(
+                    crate::linux_futex::FutexQueueError::InvalidAddress,
+                )) => resume_linux_result(saved, ERROR_INVALID_ARGUMENT),
+                Err(crate::linux_futex::FutexWaitError::Queue(
+                    crate::linux_futex::FutexQueueError::InvalidOwner,
+                )) => resume_linux_result(saved, -13),
+                Err(crate::linux_futex::FutexWaitError::Queue(_))
+                | Err(crate::linux_futex::FutexWaitError::Lifecycle(_)) => {
+                    resume_linux_result(saved, ERROR_TRY_AGAIN)
+                }
+            }
+        }
+        FUTEX_WAKE => {
+            let maximum = arguments[2] as i64;
+            if maximum < 0 {
+                return resume_linux_result(saved, ERROR_INVALID_ARGUMENT);
+            }
+            let result = match crate::linux_futex::wake_current(arguments[0], maximum as usize) {
+                Ok(woken) => isize::try_from(woken).unwrap_or(isize::MAX),
+                Err(crate::linux_futex::FutexQueueError::InvalidAddress) => ERROR_INVALID_ARGUMENT,
+                Err(crate::linux_futex::FutexQueueError::InvalidOwner) => -13,
+                Err(_) => ERROR_TRY_AGAIN,
+            };
+            resume_linux_result(saved, result)
+        }
+        _ => resume_linux_result(saved, ERROR_NOT_IMPLEMENTED),
     }
 }
 
