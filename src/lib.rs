@@ -50,6 +50,7 @@ pub mod lease_lattice;
 pub mod linux_contract;
 pub mod linux_epoll;
 pub mod linux_eventfd;
+pub mod linux_file;
 pub mod linux_timerfd;
 pub mod manifold_orchestrator;
 pub mod many_worlds;
