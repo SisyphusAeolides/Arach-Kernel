@@ -446,6 +446,9 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         Some(handle) => handle,
         None => crate::arch::x86_64::halt(),
     };
+    if let Some(clear_child_tid) = crate::linux_thread::take_clear_child_tid(exiting) {
+        let _ = copy_value_to_user(clear_child_tid, &0_u32);
+    }
     let _ = crate::linux_file::close_all(exiting);
     let _ = crate::akashic_vfs::close_all(exiting);
     // Linux descriptors are process-owned. Reclaim the bounded eventfd set
@@ -514,6 +517,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Gettid) => {
             crate::process::lifecycle::current_pid() as isize
         }
+        Some(crate::process::abi::LinuxSyscall::SetTidAddress) => linux_set_tid_address(arguments),
         Some(crate::process::abi::LinuxSyscall::Getppid) => {
             let Some(handle) = crate::process::lifecycle::current_handle() else {
                 return -3;
@@ -549,6 +553,20 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::UnlinkAt) => linux_unlinkat(arguments),
         Some(_) => ERROR_NOT_IMPLEMENTED,
         None => ERROR_NOT_IMPLEMENTED,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_set_tid_address(arguments: [u64; 6]) -> isize {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_thread::set_tid_address(owner, arguments[0]) {
+        Ok(tid) => tid as isize,
+        Err(crate::linux_thread::ThreadIdentityError::InvalidOwner) => ERROR_PERMISSION_DENIED,
+        Err(crate::linux_thread::ThreadIdentityError::InvalidAddress) => ERROR_INVALID_ARGUMENT,
+        Err(crate::linux_thread::ThreadIdentityError::Capacity) => ERROR_TRY_AGAIN,
     }
 }
 
