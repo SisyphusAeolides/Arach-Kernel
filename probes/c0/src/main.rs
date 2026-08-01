@@ -18,6 +18,7 @@ const SYS_UNAME: usize = 63;
 const SYS_GETUID: usize = 102;
 const SYS_GETGID: usize = 104;
 const SYS_GETPPID: usize = 110;
+const SYS_ARCH_PRCTL: usize = 158;
 const SYS_GETTID: usize = 186;
 const SYS_FUTEX: usize = 202;
 const SYS_CLOCK_GETTIME: usize = 228;
@@ -34,6 +35,8 @@ const EPOLLIN: u32 = 0x001;
 const EPOLL_CTL_ADD: usize = 1;
 const FUTEX_WAIT_PRIVATE: usize = 128;
 const FUTEX_WAKE_PRIVATE: usize = 129;
+const ARCH_SET_FS: usize = 0x1002;
+const ARCH_GET_FS: usize = 0x1003;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
@@ -244,6 +247,40 @@ pub extern "C" fn _start() -> ! {
     // A zero brk query must return the process's bounded initial break.
     // SAFETY: brk's first argument is a scalar query.
     if unsafe { linux_syscall1(SYS_BRK, 0) } <= 0 {
+        fail();
+    }
+
+    // Prove that the generation-bound return path installs FS-base TLS and
+    // that arch_prctl reports the same value back through user memory.
+    let tls_word = 0x4152_4143_4854_4c53_u64;
+    let tls_base = &tls_word as *const _ as usize;
+    let mut reported_fs = usize::MAX;
+    if unsafe { linux_syscall3(SYS_ARCH_PRCTL, ARCH_SET_FS, tls_base, 0) } != 0
+        || unsafe {
+            linux_syscall3(
+                SYS_ARCH_PRCTL,
+                ARCH_GET_FS,
+                &mut reported_fs as *mut _ as usize,
+                0,
+            )
+        } != 0
+        || reported_fs != tls_base
+    {
+        fail();
+    }
+    let observed_tls: u64;
+    // SAFETY: ARCH_SET_FS selected the address of the live `tls_word` and the
+    // one-word read remains within that object.
+    unsafe {
+        core::arch::asm!(
+            "mov {}, fs:[0]",
+            out(reg) observed_tls,
+            options(nostack, readonly, preserves_flags),
+        );
+    }
+    if observed_tls != tls_word
+        || unsafe { linux_syscall3(SYS_ARCH_PRCTL, ARCH_SET_FS, 0, 0) } != 0
+    {
         fail();
     }
 

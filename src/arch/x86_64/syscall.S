@@ -23,7 +23,7 @@ arach_syscall_entry:
     # selecting its registered kernel-only stack.
     movq %rsp, %gs:16
     movq %gs:8, %rsp
-    subq $176, %rsp
+    subq $192, %rsp
 
     # struct SavedUserContext. The register prefix has the same offsets as
     # InterruptFrame, followed by the SYSRET control triple.
@@ -53,6 +53,8 @@ arach_syscall_entry:
     movq $0, 152(%rsp)
     movq $0, 160(%rsp)
     movq $0, 168(%rsp)
+    movq $0, 176(%rsp)
+    movq $0, 184(%rsp)
 
     # The generation armed at the previous user return must still be current.
     # Registers are safe to use after their complete user image is on-stack.

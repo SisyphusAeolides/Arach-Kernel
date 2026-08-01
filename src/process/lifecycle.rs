@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use super::abi::ExecutionAbi;
 use super::context::{
     AuthorizedUserReturn, DispatchContext, SavedUserContext, valid_kernel_stack_pointer,
-    valid_page_table_root, valid_user_address,
+    valid_page_table_root, valid_user_address, valid_user_tls_base,
 };
 use crate::sync::SpinLock;
 
@@ -185,6 +185,7 @@ struct ProcessSlot {
     phase: ProcessPhase,
     launch: ProcessLaunch,
     context: SavedUserContext,
+    fs_base: u64,
     exit_code: isize,
     wait_sequence: u64,
 }
@@ -208,6 +209,7 @@ impl ProcessSlot {
             abi: ExecutionAbi::ArachNative,
         },
         context: SavedUserContext::EMPTY,
+        fs_base: 0,
         exit_code: 0,
         wait_sequence: 0,
     };
@@ -301,6 +303,7 @@ impl ProcessTable {
                 user,
                 address_space_root: slot.launch.address_space_root,
                 kernel_stack_pointer: slot.launch.kernel_stack_pointer,
+                fs_base: slot.fs_base,
             },
             scheduler_epoch,
         }
@@ -459,6 +462,7 @@ pub fn register_init(launch: ProcessLaunch) -> Result<ProcessHandle, LifecycleEr
     slot.phase = ProcessPhase::Runnable;
     slot.launch = launch;
     slot.context = SavedUserContext::initial(launch.entry_point, launch.user_stack_pointer);
+    slot.fs_base = 0;
     slot.exit_code = 0;
     slot.wait_sequence = 0;
 
@@ -500,6 +504,7 @@ pub fn commit_child(parent: u32, launch: ProcessLaunch) -> Result<ProcessHandle,
         slot.phase = ProcessPhase::Runnable;
         slot.launch = launch;
         slot.context = SavedUserContext::initial(launch.entry_point, launch.user_stack_pointer);
+        slot.fs_base = 0;
         slot.exit_code = 0;
         slot.wait_sequence = scheduler_epoch;
         slot.generation
@@ -573,6 +578,35 @@ pub fn resume_current(saved: SavedUserContext) -> Result<ScheduledProcess, Lifec
     table.scheduler_epoch = next_epoch;
     publish_scheduler_epoch(next_epoch);
     Ok(scheduled)
+}
+
+/// Returns the TLS base owned by the exact currently running PID generation.
+pub fn current_fs_base() -> Result<u64, LifecycleError> {
+    let current = current_user_handle()?;
+    TABLE
+        .lock()
+        .slot_by_handle(current)
+        .map(|slot| slot.fs_base)
+        .ok_or(LifecycleError::InvalidHandle)
+}
+
+/// Replaces the current process/thread TLS base without weakening scheduler
+/// authority. The next scheduling decision binds this value into the exact
+/// generation-and-epoch-qualified return context.
+pub fn set_current_fs_base(fs_base: u64) -> Result<(), LifecycleError> {
+    if !valid_user_tls_base(fs_base) {
+        return Err(LifecycleError::InvalidContext);
+    }
+    let current = current_user_handle()?;
+    let mut table = TABLE.lock();
+    let slot = table
+        .slot_by_handle_mut(current)
+        .ok_or(LifecycleError::InvalidHandle)?;
+    if slot.phase != ProcessPhase::Running {
+        return Err(LifecycleError::InvalidTransition);
+    }
+    slot.fs_base = fs_base;
+    Ok(())
 }
 
 /// Revalidates the exact lifecycle decision consumed by the architecture
@@ -1145,6 +1179,35 @@ mod tests {
 
         reset_lifecycle();
         assert_eq!(current_execution_abi(), ExecutionAbi::ArachNative);
+    }
+
+    #[test]
+    fn fs_base_is_generation_bound_and_restored_across_process_switches() {
+        let _serial = TEST_SERIALIZATION.lock();
+        reset_lifecycle();
+
+        let init = register_init(launch(1)).unwrap();
+        mark_running(init).unwrap();
+        let child = commit_child(INIT_PID, launch(2)).unwrap();
+
+        assert_eq!(current_fs_base(), Ok(0));
+        set_current_fs_base(0x7000).unwrap();
+        assert_eq!(current_fs_base(), Ok(0x7000));
+
+        let child_dispatch = schedule_yield(saved(0x100)).unwrap();
+        assert_eq!(child_dispatch.handle, child);
+        assert_eq!(child_dispatch.context.fs_base, 0);
+        set_current_fs_base(0x9000).unwrap();
+
+        let init_dispatch = schedule_yield(saved(0x200)).unwrap();
+        assert_eq!(init_dispatch.handle, init);
+        assert_eq!(init_dispatch.context.fs_base, 0x7000);
+        assert_eq!(current_fs_base(), Ok(0x7000));
+        assert_eq!(
+            set_current_fs_base(super::super::context::USER_ADDRESS_LIMIT),
+            Err(LifecycleError::InvalidContext),
+        );
+        assert_eq!(current_fs_base(), Ok(0x7000));
     }
 
     #[test]

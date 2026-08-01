@@ -138,6 +138,8 @@ pub struct DispatchContext {
     pub user: SavedUserContext,
     pub address_space_root: u64,
     pub kernel_stack_pointer: u64,
+    /// User FS base restored immediately before the Ring 3 return.
+    pub fs_base: u64,
 }
 
 impl DispatchContext {
@@ -150,6 +152,9 @@ impl DispatchContext {
         }
         if !valid_kernel_stack_pointer(self.kernel_stack_pointer) {
             return Err(ContextError::InvalidKernelStackPointer);
+        }
+        if !valid_user_tls_base(self.fs_base) {
+            return Err(ContextError::InvalidFsBase);
         }
         Ok(())
     }
@@ -176,6 +181,7 @@ impl AuthorizedUserReturn {
             user: SavedUserContext::EMPTY,
             address_space_root: 0,
             kernel_stack_pointer: 0,
+            fs_base: 0,
         },
         pid: 0,
         generation: 0,
@@ -197,6 +203,7 @@ pub enum ContextError {
     InvalidFlags,
     InvalidAddressSpaceRoot,
     InvalidKernelStackPointer,
+    InvalidFsBase,
     InvalidDispatchAuthority,
 }
 
@@ -212,6 +219,13 @@ pub const fn valid_kernel_stack_pointer(pointer: u64) -> bool {
     pointer >= KERNEL_ADDRESS_MINIMUM && pointer & 0xf == 0
 }
 
+/// FS may be null before a runtime installs TLS, otherwise it must remain in
+/// the canonical lower-half user range. Unlike instruction and stack
+/// pointers, the ABI permits a TLS base in the first page.
+pub const fn valid_user_tls_base(address: u64) -> bool {
+    address < USER_ADDRESS_LIMIT
+}
+
 const _: () = assert!(core::mem::size_of::<SavedUserContext>() == 144);
 const _: () = assert!(core::mem::align_of::<SavedUserContext>() == 16);
 const _: () = assert!(core::mem::offset_of!(SavedUserContext, r15) == 0);
@@ -219,15 +233,16 @@ const _: () = assert!(core::mem::offset_of!(SavedUserContext, rax) == 112);
 const _: () = assert!(core::mem::offset_of!(SavedUserContext, instruction_pointer) == 120);
 const _: () = assert!(core::mem::offset_of!(SavedUserContext, flags) == 128);
 const _: () = assert!(core::mem::offset_of!(SavedUserContext, stack_pointer) == 136);
-const _: () = assert!(core::mem::size_of::<DispatchContext>() == 160);
+const _: () = assert!(core::mem::size_of::<DispatchContext>() == 176);
 const _: () = assert!(core::mem::offset_of!(DispatchContext, address_space_root) == 144);
 const _: () = assert!(core::mem::offset_of!(DispatchContext, kernel_stack_pointer) == 152);
-const _: () = assert!(core::mem::size_of::<AuthorizedUserReturn>() == 176);
+const _: () = assert!(core::mem::offset_of!(DispatchContext, fs_base) == 160);
+const _: () = assert!(core::mem::size_of::<AuthorizedUserReturn>() == 192);
 const _: () = assert!(core::mem::align_of::<AuthorizedUserReturn>() == 16);
 const _: () = assert!(core::mem::offset_of!(AuthorizedUserReturn, dispatch) == 0);
-const _: () = assert!(core::mem::offset_of!(AuthorizedUserReturn, pid) == 160);
-const _: () = assert!(core::mem::offset_of!(AuthorizedUserReturn, generation) == 164);
-const _: () = assert!(core::mem::offset_of!(AuthorizedUserReturn, scheduler_epoch) == 168);
+const _: () = assert!(core::mem::offset_of!(AuthorizedUserReturn, pid) == 176);
+const _: () = assert!(core::mem::offset_of!(AuthorizedUserReturn, generation) == 180);
+const _: () = assert!(core::mem::offset_of!(AuthorizedUserReturn, scheduler_epoch) == 184);
 
 #[cfg(test)]
 mod tests {
@@ -246,6 +261,7 @@ mod tests {
             user,
             address_space_root: 0x3000,
             kernel_stack_pointer: 0xffff_8000_0000_4000,
+            fs_base: 0,
         };
         assert_eq!(dispatch.validate(), Ok(()));
     }
@@ -283,6 +299,7 @@ mod tests {
                 user: valid,
                 address_space_root: 0x3123,
                 kernel_stack_pointer: 0xffff_8000_0000_4000,
+                fs_base: 0,
             }
             .validate(),
             Err(ContextError::InvalidAddressSpaceRoot),
@@ -292,6 +309,7 @@ mod tests {
                 user: valid,
                 address_space_root: 0x3000,
                 kernel_stack_pointer: 0x8000,
+                fs_base: 0,
             }
             .validate(),
             Err(ContextError::InvalidKernelStackPointer),
@@ -303,6 +321,7 @@ mod tests {
                     user: valid,
                     address_space_root: 0x3000,
                     kernel_stack_pointer: 0xffff_8000_0000_4000,
+                    fs_base: 0,
                 },
                 pid: 0,
                 generation: 1,
@@ -311,5 +330,18 @@ mod tests {
             .validate(),
             Err(ContextError::InvalidDispatchAuthority),
         );
+
+        assert_eq!(
+            DispatchContext {
+                user: valid,
+                address_space_root: 0x3000,
+                kernel_stack_pointer: 0xffff_8000_0000_4000,
+                fs_base: USER_ADDRESS_LIMIT,
+            }
+            .validate(),
+            Err(ContextError::InvalidFsBase),
+        );
+        assert!(valid_user_tls_base(0));
+        assert!(valid_user_tls_base(USER_ADDRESS_LIMIT - 1));
     }
 }

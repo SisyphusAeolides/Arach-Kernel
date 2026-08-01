@@ -51,6 +51,7 @@ pub enum LinuxSyscall {
     Getgid,
     Geteuid,
     Getegid,
+    ArchPrctl,
     Clone,
     Fork,
     Vfork,
@@ -126,6 +127,7 @@ impl LinuxSyscall {
             107 => Some(Self::Geteuid),
             108 => Some(Self::Getegid),
             110 => Some(Self::Getppid),
+            158 => Some(Self::ArchPrctl),
             41 => Some(Self::Socket),
             42 => Some(Self::Connect),
             43 => Some(Self::Accept),
@@ -194,6 +196,10 @@ mod tests {
         assert_eq!(LinuxSyscall::from_number(3), Some(LinuxSyscall::Close));
         assert_eq!(LinuxSyscall::from_number(39), Some(LinuxSyscall::Getpid));
         assert_eq!(LinuxSyscall::from_number(110), Some(LinuxSyscall::Getppid));
+        assert_eq!(
+            LinuxSyscall::from_number(158),
+            Some(LinuxSyscall::ArchPrctl)
+        );
         assert_eq!(LinuxSyscall::from_number(202), Some(LinuxSyscall::Futex));
         assert_eq!(LinuxSyscall::from_number(257), Some(LinuxSyscall::OpenAt));
         assert_eq!(

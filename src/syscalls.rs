@@ -18,6 +18,8 @@ use crate::sync::SpinLock;
 use aether::grimoire;
 
 const ERROR_BAD_FILE_DESCRIPTOR: isize = -9;
+#[cfg(target_os = "none")]
+const ERROR_OPERATION_NOT_PERMITTED: isize = -1;
 #[cfg(any(target_os = "none", test))]
 const ERROR_NO_ENTRY: isize = -2;
 #[cfg(any(target_os = "none", test))]
@@ -634,6 +636,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
             // multi-user credentials are implemented.
             0
         }
+        Some(crate::process::abi::LinuxSyscall::ArchPrctl) => linux_arch_prctl(arguments),
         Some(crate::process::abi::LinuxSyscall::ClockGettime) => linux_clock_gettime(arguments),
         Some(crate::process::abi::LinuxSyscall::Mmap) => linux_mmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Munmap) => linux_munmap(arguments),
@@ -650,6 +653,34 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::UnlinkAt) => linux_unlinkat(arguments),
         Some(_) => ERROR_NOT_IMPLEMENTED,
         None => ERROR_NOT_IMPLEMENTED,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_arch_prctl(arguments: [u64; 6]) -> isize {
+    const ARCH_SET_FS: u64 = 0x1002;
+    const ARCH_GET_FS: u64 = 0x1003;
+
+    match arguments[0] {
+        ARCH_SET_FS => {
+            if !crate::process::context::valid_user_tls_base(arguments[1]) {
+                return ERROR_OPERATION_NOT_PERMITTED;
+            }
+            crate::process::lifecycle::set_current_fs_base(arguments[1])
+                .map(|()| 0)
+                .unwrap_or(ERROR_OPERATION_NOT_PERMITTED)
+        }
+        ARCH_GET_FS => {
+            let Ok(fs_base) = crate::process::lifecycle::current_fs_base() else {
+                return ERROR_OPERATION_NOT_PERMITTED;
+            };
+            if copy_value_to_user(arguments[1], &fs_base).is_ok() {
+                0
+            } else {
+                ERROR_BAD_ADDRESS
+            }
+        }
+        _ => ERROR_INVALID_ARGUMENT,
     }
 }
 
@@ -1647,6 +1678,7 @@ enum MachineDispatchError {
     TaskState(TaskStateDescriptorError),
     CpuLocal(cpu_local::CpuLocalError),
     TaskStateWriteFailed,
+    FsBaseWriteFailed,
 }
 
 /// Decodes an x86-64 16-byte available/active TSS descriptor. Keeping this
@@ -1785,6 +1817,15 @@ fn activate_machine_dispatch(authority: AuthorizedUserReturn) -> Result<(), Mach
     }
     cpu_local::commit_return(return_lease, tss.base, stack)
         .map_err(MachineDispatchError::CpuLocal)?;
+    // SAFETY: Dispatch validation admits only canonical lower-half bases.
+    // IA32_FS_BASE is architectural in x86-64 long mode and readback closes
+    // the return gate if the per-thread TLS state was not published.
+    unsafe {
+        crate::arch::x86_64::write_msr(0xc000_0100, authority.dispatch.fs_base);
+        if crate::arch::x86_64::read_msr(0xc000_0100) != authority.dispatch.fs_base {
+            return Err(MachineDispatchError::FsBaseWriteFailed);
+        }
+    }
     // SAFETY: The lifecycle and CPU-local generations are committed, the new
     // TSS RSP0 was read back, and the target hierarchy retains this entry
     // frame through its inherited higher-half kernel mapping.
@@ -2514,6 +2555,7 @@ mod tests {
                 user: next_user,
                 address_space_root: 0x4000,
                 kernel_stack_pointer: 0xffff_8000_0000_8000,
+                fs_base: 0x7000,
             },
             scheduler_epoch: 19,
         };
