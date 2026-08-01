@@ -380,6 +380,48 @@ pub fn current_thread_group_member_count() -> usize {
         .count()
 }
 
+/// Returns every exact generation in the running task's thread group and the
+/// leader generation that owns process-scoped resources. The fixed array is
+/// bounded by the lifecycle table and never allocates during exit handling.
+pub fn current_thread_group_handles() -> Result<
+    (
+        ProcessHandle,
+        [Option<ProcessHandle>; MAXIMUM_PROCESSES],
+        usize,
+    ),
+    LifecycleError,
+> {
+    let current = current_user_handle()?;
+    let table = TABLE.lock();
+    let group = table
+        .slot_by_handle(current)
+        .ok_or(LifecycleError::InvalidHandle)?
+        .thread_group;
+    let leader = table
+        .slots
+        .iter()
+        .find(|slot| slot.occupied && slot.pid == group && slot.thread_group == group)
+        .map(|slot| ProcessHandle {
+            pid: slot.pid,
+            generation: slot.generation,
+        })
+        .ok_or(LifecycleError::InvalidHandle)?;
+    let mut handles = [None; MAXIMUM_PROCESSES];
+    let mut count = 0;
+    for slot in table
+        .slots
+        .iter()
+        .filter(|slot| slot.occupied && slot.thread_group == group)
+    {
+        handles[count] = Some(ProcessHandle {
+            pid: slot.pid,
+            generation: slot.generation,
+        });
+        count += 1;
+    }
+    Ok((leader, handles, count))
+}
+
 /// Returns the exact leader generation that owns process-scoped resources.
 pub fn current_thread_group_handle() -> Option<ProcessHandle> {
     let current = current_handle()?;
@@ -1011,6 +1053,79 @@ pub fn schedule_exit(exit_code: isize) -> Result<ScheduleDecision, LifecycleErro
     }
 }
 
+/// Terminates the complete running Linux thread group as one bounded
+/// lifecycle transaction. Non-leader TID generations are retired, while the
+/// leader remains as the sole waitable process zombie carrying the group exit
+/// status. A runnable task from the terminating group can never be selected.
+pub fn schedule_exit_group(exit_code: isize) -> Result<ScheduleDecision, LifecycleError> {
+    let current = current_user_handle()?;
+    let mut table = TABLE.lock();
+    let current_index = table
+        .slots
+        .iter()
+        .position(|slot| {
+            slot.occupied && slot.pid == current.pid && slot.generation == current.generation
+        })
+        .ok_or(LifecycleError::InvalidHandle)?;
+    let current_slot = table.slots[current_index];
+    if current_slot.phase != ProcessPhase::Running {
+        return Err(LifecycleError::InvalidTransition);
+    }
+    let group = current_slot.thread_group;
+    let leader_index = table
+        .slots
+        .iter()
+        .position(|slot| slot.occupied && slot.pid == group && slot.thread_group == group)
+        .ok_or(LifecycleError::InvalidHandle)?;
+
+    let next_epoch = next_scheduler_epoch(table.scheduler_epoch)?;
+    let target = (1..=table.slots.len())
+        .map(|offset| (current_index + offset) % table.slots.len())
+        .find(|index| {
+            let slot = table.slots[*index];
+            slot.occupied && slot.phase == ProcessPhase::Runnable && slot.thread_group != group
+        })
+        .map(|target_index| {
+            (
+                target_index,
+                table.scheduled(target_index, table.slots[target_index].context, next_epoch),
+            )
+        });
+    if target.is_some_and(|(_, scheduled)| scheduled.context.validate().is_err()) {
+        return Err(LifecycleError::InvalidContext);
+    }
+
+    for index in 0..table.slots.len() {
+        if !table.slots[index].occupied || table.slots[index].thread_group != group {
+            continue;
+        }
+        if index == leader_index {
+            table.slots[index].phase = ProcessPhase::Zombie;
+            table.slots[index].exit_code = exit_code;
+            table.slots[index].wait_sequence = next_epoch;
+        } else {
+            let next_generation = table.slots[index]
+                .generation
+                .checked_add(1)
+                .unwrap_or(u32::MAX);
+            table.slots[index] = ProcessSlot::EMPTY;
+            table.slots[index].generation = next_generation;
+        }
+    }
+    table.scheduler_epoch = next_epoch;
+
+    if let Some((target_index, scheduled)) = target {
+        table.slots[target_index].phase = ProcessPhase::Running;
+        CURRENT_EXECUTION.store(scheduled.handle.encode(), Ordering::Release);
+        publish_scheduler_epoch(next_epoch);
+        Ok(ScheduleDecision::User(scheduled))
+    } else {
+        CURRENT_EXECUTION.store(PID0_IDENTITY, Ordering::Release);
+        publish_scheduler_epoch(next_epoch);
+        Ok(ScheduleDecision::Pid0(pid0_authority(next_epoch)))
+    }
+}
+
 /// Terminates a non-leader thread without publishing a waitable process
 /// zombie or reclaiming the shared process image. The exact TID generation is
 /// retired only after another runnable context has been validated.
@@ -1470,6 +1585,72 @@ mod tests {
         assert_eq!(current_thread_group_handle(), Some(leader));
         assert_eq!(current_thread_group_member_count(), 1);
         assert!(current_is_thread_group_leader());
+    }
+
+    #[test]
+    fn exit_group_retires_peer_generations_and_publishes_one_leader_zombie() {
+        let _serial = TEST_SERIALIZATION.lock();
+        reset_lifecycle();
+
+        let mut linux_launch = launch(1);
+        linux_launch.abi = ExecutionAbi::LinuxX86_64;
+        let leader = register_init(linux_launch).unwrap();
+        mark_running(leader).unwrap();
+        let (first, _) = clone_current_thread(saved(0x80), 0x9000, 0x7000).unwrap();
+        let (second, _) = clone_current_thread(saved(0x90), 0xa000, 0x8000).unwrap();
+
+        let selected = schedule_block(saved(0xa0)).unwrap();
+        let ScheduleDecision::User(selected) = selected else {
+            panic!("a cloned group member must be selected");
+        };
+        assert_eq!(selected.handle, first);
+        let (observed_leader, handles, count) = current_thread_group_handles().unwrap();
+        assert_eq!(observed_leader, leader);
+        assert_eq!(count, 3);
+        assert!(handles[..count].contains(&Some(leader)));
+        assert!(handles[..count].contains(&Some(first)));
+        assert!(handles[..count].contains(&Some(second)));
+
+        let ScheduleDecision::Pid0(idle) = schedule_exit_group(41).unwrap() else {
+            panic!("a group with no external runnable task must select PID0");
+        };
+        assert_eq!(authorize_pid0(idle), Ok(()));
+        assert_eq!(snapshot_exact(first), None);
+        assert_eq!(snapshot_exact(second), None);
+        let zombie = snapshot_exact(leader).unwrap();
+        assert_eq!(zombie.phase, ProcessPhase::Zombie);
+        assert_eq!(zombie.exit_code, 41);
+        assert_eq!(current_handle(), None);
+    }
+
+    #[test]
+    fn exit_group_selects_only_a_runnable_task_outside_the_dying_group() {
+        let _serial = TEST_SERIALIZATION.lock();
+        reset_lifecycle();
+
+        let mut linux_launch = launch(1);
+        linux_launch.abi = ExecutionAbi::LinuxX86_64;
+        let leader = register_init(linux_launch).unwrap();
+        mark_running(leader).unwrap();
+        let supervisor_peer = commit_child(INIT_PID, launch(2)).unwrap();
+        let (thread, _) = clone_current_thread(saved(0xb0), 0x9000, 0x7000).unwrap();
+
+        let selected = schedule_yield(saved(0xc0)).unwrap();
+        assert_eq!(selected.handle, supervisor_peer);
+        let selected = schedule_yield(saved(0xd0)).unwrap();
+        assert_eq!(selected.handle, thread);
+
+        let ScheduleDecision::User(selected) = schedule_exit_group(23).unwrap() else {
+            panic!("an external runnable process must be selected");
+        };
+        assert_eq!(selected.handle, supervisor_peer);
+        assert_eq!(snapshot_exact(thread), None);
+        assert_eq!(snapshot_exact(leader).unwrap().phase, ProcessPhase::Zombie);
+        assert_eq!(snapshot_exact(leader).unwrap().exit_code, 23);
+        assert_eq!(
+            snapshot_exact(supervisor_peer).unwrap().phase,
+            ProcessPhase::Running
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ data Gate : Set where
   privateFutexBlock clearChildTidWake : Gate
   robustListRegistration ownerDeathPublication robustFutexWake : Gate
   signalDisposition signalMaskAndPending rtSignalFrame rtSignalReturn : Gate
+  threadGroupSnapshot peerGenerationRetirement leaderZombiePublication supervisorReap : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -75,6 +76,15 @@ record SignalReturnCertificate : Set where
     rtSignalFrameEvidence : Measurement rtSignalFrame
     rtSignalReturnEvidence : Measurement rtSignalReturn
 
+record GroupExitCertificate : Set where
+  constructor groupExitCertificate
+  field
+    signalReturn : SignalReturnCertificate
+    threadGroupSnapshotEvidence : Measurement threadGroupSnapshot
+    peerGenerationRetirementEvidence : Measurement peerGenerationRetirement
+    leaderZombiePublicationEvidence : Measurement leaderZombiePublication
+    supervisorReapEvidence : Measurement supervisorReap
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -95,3 +105,7 @@ robustExitRequiresThreadWake certificate = RobustExitCertificate.threadWake cert
 -- qualification.
 signalReturnRequiresRobustExit : SignalReturnCertificate -> RobustExitCertificate
 signalReturnRequiresRobustExit certificate = SignalReturnCertificate.robustExit certificate
+
+-- Whole-group termination structurally retains qualified signal return.
+groupExitRequiresSignalReturn : GroupExitCertificate -> SignalReturnCertificate
+groupExitRequiresSignalReturn certificate = GroupExitCertificate.signalReturn certificate

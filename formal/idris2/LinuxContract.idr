@@ -35,6 +35,10 @@ data Gate
   | SignalMaskAndPending
   | RtSignalFrame
   | RtSignalReturn
+  | ThreadGroupSnapshot
+  | PeerGenerationRetirement
+  | LeaderZombiePublication
+  | SupervisorReap
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -109,6 +113,18 @@ record SignalReturnCertificate where
   rtSignalFrame : Measurement RtSignalFrame
   rtSignalReturn : Measurement RtSignalReturn
 
+||| Runtime evidence that exit_group consumes one bounded exact-generation
+||| snapshot, retires every non-leader TID, publishes one waitable leader
+||| zombie, and is observed by the external supervisor.
+public export
+record GroupExitCertificate where
+  constructor MkGroupExitCertificate
+  signalReturn : SignalReturnCertificate
+  threadGroupSnapshot : Measurement ThreadGroupSnapshot
+  peerGenerationRetirement : Measurement PeerGenerationRetirement
+  leaderZombiePublication : Measurement LeaderZombiePublication
+  supervisorReap : Measurement SupervisorReap
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -131,3 +147,8 @@ robustExitRequiresThreadWake certificate = certificate.threadWake
 public export
 signalReturnRequiresRobustExit : SignalReturnCertificate -> RobustExitCertificate
 signalReturnRequiresRobustExit certificate = certificate.robustExit
+
+||| Whole-group termination remains downstream of qualified signal return.
+public export
+groupExitRequiresSignalReturn : GroupExitCertificate -> SignalReturnCertificate
+groupExitRequiresSignalReturn certificate = certificate.signalReturn

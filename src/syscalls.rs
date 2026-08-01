@@ -511,11 +511,7 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
                 }
             }
             Some(crate::process::abi::LinuxSyscall::ExitGroup) => {
-                if crate::process::lifecycle::current_thread_group_member_count() != 1 {
-                    resume_linux_result(frame.dispatch.user, ERROR_NOT_IMPLEMENTED)
-                } else {
-                    schedule_exit_return(arguments[0] as isize)
-                }
+                schedule_linux_exit_group_return(arguments[0] as isize)
             }
             Some(crate::process::abi::LinuxSyscall::Clone) => {
                 schedule_linux_clone_return(frame.dispatch.user, arguments)
@@ -629,18 +625,11 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         Some(handle) => handle,
         None => crate::arch::x86_64::halt(),
     };
-    let _ = crate::linux_futex::cancel_wait(exiting);
-    recover_exiting_robust_list(exiting);
     let group = crate::process::lifecycle::current_thread_group_handle();
     let clear_group = crate::process::lifecycle::current_is_thread_group_leader()
         .then_some(group)
         .flatten();
-    crate::linux_signal::clear_thread(exiting, clear_group);
-    if let Some(clear_child_tid) = crate::linux_thread::take_clear_child_tid(exiting) {
-        if copy_value_to_user(clear_child_tid, &0_u32).is_ok() {
-            let _ = crate::linux_futex::wake_current(clear_child_tid, 1);
-        }
-    }
+    cleanup_linux_thread_exit(exiting, clear_group);
     if !crate::process::lifecycle::current_is_thread_group_leader() {
         let decision = match crate::process::lifecycle::schedule_thread_exit() {
             Ok(decision) => decision,
@@ -662,6 +651,56 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         Err(_) => crate::arch::x86_64::halt(),
     };
     match crate::process::service_registry::take_exited_service(exiting) {
+        Ok(Some(image)) => {
+            if crate::process::runtime::defer_reap(image).is_err() {
+                crate::arch::x86_64::halt();
+            }
+        }
+        Ok(None) => {}
+        Err(_) => crate::arch::x86_64::halt(),
+    }
+    complete_schedule_decision(decision)
+}
+
+#[cfg(target_os = "none")]
+fn cleanup_linux_thread_exit(
+    exiting: crate::process::lifecycle::ProcessHandle,
+    clear_group: Option<crate::process::lifecycle::ProcessHandle>,
+) {
+    let _ = crate::linux_futex::cancel_wait(exiting);
+    recover_exiting_robust_list(exiting);
+    crate::linux_signal::clear_thread(exiting, clear_group);
+    if let Some(clear_child_tid) = crate::linux_thread::take_clear_child_tid(exiting) {
+        if copy_value_to_user(clear_child_tid, &0_u32).is_ok() {
+            let _ = crate::linux_futex::wake_current(clear_child_tid, 1);
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+fn schedule_linux_exit_group_return(
+    exit_code: isize,
+) -> crate::process::lifecycle::ScheduledProcess {
+    EXIT_REQUESTS.fetch_add(1, Ordering::AcqRel);
+    preemption::retire_superseded();
+    let (leader, handles, count) = match crate::process::lifecycle::current_thread_group_handles() {
+        Ok(group) => group,
+        Err(_) => crate::arch::x86_64::halt(),
+    };
+    for owner in handles[..count].iter().flatten().copied() {
+        cleanup_linux_thread_exit(owner, (owner == leader).then_some(leader));
+    }
+
+    let _ = crate::linux_file::close_all(leader);
+    let _ = crate::akashic_vfs::close_all(leader);
+    let _ = crate::linux_epoll::close_all(leader.pid);
+    let _ = crate::linux_timerfd::close_all(leader.pid);
+    let _ = crate::linux_eventfd::close_all(leader.pid);
+    let decision = match crate::process::lifecycle::schedule_exit_group(exit_code) {
+        Ok(decision) => decision,
+        Err(_) => crate::arch::x86_64::halt(),
+    };
+    match crate::process::service_registry::take_exited_service(leader) {
         Ok(Some(image)) => {
             if crate::process::runtime::defer_reap(image).is_err() {
                 crate::arch::x86_64::halt();

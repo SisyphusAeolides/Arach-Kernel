@@ -114,8 +114,8 @@ one clears its generation-bound child-TID word and wakes the leader; the other
 registers a Linux x86-64 robust list, exits while owning a private futex, and
 causes the kernel to atomically publish `OWNER_DIED` and wake the leader. The
 walker is generation-bound and limited to 2,048 links. Fork-like clone modes,
-PI and process-shared robust futexes, leader exit with live peers, and
-multi-member `exit_group` remain fail-closed gates.
+PI and process-shared robust futexes, and individual leader `exit` with live
+peers remain fail-closed gates.
 
 The first bounded signal slice keeps dispositions generation-bound to the
 thread group and masks, pending bits, and active return-frame authority bound
@@ -126,6 +126,13 @@ syscall return, pending standard signals are bit-coalesced, and only self
 `kill`/`tgkill` targets are admitted. Cross-process and asynchronous delivery,
 real-time queues, alternate stacks, FPU/xstate restoration, stop/continue
 semantics, and interrupted-syscall restart remain fail-closed gates.
+
+Whole-process termination now snapshots at most 64 exact thread generations,
+consumes every member's futex, robust-list, child-TID, and signal exit state,
+retires every non-leader generation atomically, and publishes only the leader
+as a waitable zombie. The measured probe leaves a cloned peer blocked before
+calling `exit_group`; Push's subsequent status-0 reap is the external witness
+that no group peer remained runnable.
 
 ## Push PID 1 boundary
 

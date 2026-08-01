@@ -8,6 +8,7 @@ const PASS: &[u8] = b"ARACH_C0_RING3_SYSCALL_PASS\n";
 const THREAD_PASS: &[u8] = b"ARACH_C1_THREAD_FUTEX_PASS\n";
 const ROBUST_PASS: &[u8] = b"ARACH_C1_ROBUST_FUTEX_PASS\n";
 const SIGNAL_PASS: &[u8] = b"ARACH_C1_SIGNAL_RETURN_PASS\n";
+const EXIT_GROUP_ARMED: &[u8] = b"ARACH_C1_EXIT_GROUP_ARMED\n";
 const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
 const PANIC: &[u8] = b"ARACH_C0_RING3_PANIC\n";
 
@@ -93,6 +94,8 @@ static THREAD_OBSERVED_PID: AtomicU32 = AtomicU32::new(0);
 static THREAD_EVENT_FD: AtomicU32 = AtomicU32::new(0);
 static THREAD_DESCRIPTOR_WRITE: AtomicU32 = AtomicU32::new(0);
 static SIGNAL_HITS: AtomicU32 = AtomicU32::new(0);
+static GROUP_EXIT_READY: AtomicU32 = AtomicU32::new(0);
+static GROUP_EXIT_HOLD: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C)]
 struct RobustListHead {
@@ -295,6 +298,40 @@ extern "C" fn clear_tid_thread_entry() -> isize {
     }
     THREAD_DESCRIPTOR_WRITE.store(1, Ordering::Release);
     0
+}
+
+extern "C" fn group_exit_thread_entry() -> isize {
+    GROUP_EXIT_READY.store(1, Ordering::Release);
+    let woken = unsafe {
+        linux_syscall6(
+            SYS_FUTEX,
+            &GROUP_EXIT_READY as *const _ as usize,
+            FUTEX_WAKE_PRIVATE,
+            1,
+            0,
+            0,
+            0,
+        )
+    };
+    if woken != 1 {
+        return 122;
+    }
+    loop {
+        let waited = unsafe {
+            linux_syscall6(
+                SYS_FUTEX,
+                &GROUP_EXIT_HOLD as *const _ as usize,
+                FUTEX_WAIT_PRIVATE,
+                0,
+                0,
+                0,
+                0,
+            )
+        };
+        if waited != 0 && waited != -11 {
+            return 121;
+        }
+    }
 }
 
 #[repr(C)]
@@ -958,6 +995,54 @@ pub extern "C" fn _start() -> ! {
     let wrote =
         unsafe { linux_syscall3(SYS_WRITE, 1, LINUX_PASS.as_ptr() as usize, LINUX_PASS.len()) };
     if wrote != LINUX_PASS.len() as isize {
+        fail();
+    }
+
+    // Leave one independently scheduled peer blocked in the shared address
+    // space. Push can report status 0 only if exit_group retires that live TID
+    // and publishes the leader as the group's sole waitable zombie.
+    THREAD_TID.store(0, Ordering::Release);
+    GROUP_EXIT_READY.store(0, Ordering::Release);
+    GROUP_EXIT_HOLD.store(0, Ordering::Release);
+    let group_peer = unsafe {
+        arach_clone_thread(
+            THREAD_CLONE_FLAGS,
+            stack_top,
+            tid_word,
+            tid_word,
+            0,
+            group_exit_thread_entry,
+        )
+    };
+    if group_peer <= 0 || group_peer == pid {
+        fail();
+    }
+    let waited = unsafe {
+        linux_syscall6(
+            SYS_FUTEX,
+            &GROUP_EXIT_READY as *const _ as usize,
+            FUTEX_WAIT_PRIVATE,
+            0,
+            0,
+            0,
+            0,
+        )
+    };
+    if waited != 0
+        || GROUP_EXIT_READY.load(Ordering::Acquire) != 1
+        || THREAD_TID.load(Ordering::Acquire) != group_peer as u32
+    {
+        fail();
+    }
+    let wrote = unsafe {
+        linux_syscall3(
+            SYS_WRITE,
+            1,
+            EXIT_GROUP_ARMED.as_ptr() as usize,
+            EXIT_GROUP_ARMED.len(),
+        )
+    };
+    if wrote != EXIT_GROUP_ARMED.len() as isize {
         fail();
     }
 
