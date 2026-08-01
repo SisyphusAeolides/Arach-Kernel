@@ -1,0 +1,124 @@
+name: Linux thread exit release
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: SisyphusAeolides/Push
+          ref: 5bd361b86c048b60b6a8422a8e173ea0ec867bff
+          path: target/c0-sources/push
+      - uses: actions/checkout@v4
+        with:
+          repository: SisyphusAeolides/Granite
+          ref: c4c36daa40ed79a81751b00dcc4cb6eb4f4d9ac5
+          path: target/c0-sources/granite
+      - run: >-
+          sudo apt-get update && sudo apt-get install -y
+          build-essential chezscheme gfortran libgmp-dev xz-utils curl
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          components: rustfmt,rust-src
+          targets: x86_64-unknown-uefi
+      - uses: actions/cache@v4
+        with:
+          path: target/formal/toolchains
+          key: arach-formal-idris2-0.8.0-agda-2.8.0-v1
+      - run: scripts/bootstrap-formal-toolchains.sh
+      - name: Apply Linux thread exit integration
+        run: |
+          if grep -Fq 'pub mod linux_thread;' src/lib.rs; then
+            printf 'Linux thread exit integration is already published\n'
+          else
+            python3 scripts/patch-linux-thread-exit.py
+          fi
+      - run: cargo fmt --all
+      - run: cargo fmt --all -- --check
+      - run: cargo check --workspace --all-targets
+      - run: cargo test --workspace --all-targets
+      - name: Reject new strict clippy diagnostics
+        run: |
+          set +e
+          mkdir -p target
+          cargo clippy --workspace --all-targets --message-format=json -- -D warnings \
+            >target/branch-clippy.json 2>target/branch-clippy.stderr
+          branch_status=$?
+          main_worktree="$RUNNER_TEMP/arach-kernel-main"
+          rm -rf "$main_worktree"
+          git worktree add --detach "$main_worktree" origin/main
+          (
+            cd "$main_worktree"
+            cargo clippy --workspace --all-targets --message-format=json -- -D warnings \
+              >"$RUNNER_TEMP/main-clippy.json" 2>"$RUNNER_TEMP/main-clippy.stderr"
+          )
+          main_status=$?
+          set -e
+          BRANCH_STATUS="$branch_status" MAIN_STATUS="$main_status" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def diagnostics(path: Path):
+              found = set()
+              for raw in path.read_text(errors="replace").splitlines():
+                  try:
+                      event = json.loads(raw)
+                  except json.JSONDecodeError:
+                      continue
+                  if event.get("reason") != "compiler-message":
+                      continue
+                  message = event.get("message", {})
+                  if message.get("level") != "error":
+                      continue
+                  code = (message.get("code") or {}).get("code") or "compiler"
+                  text = " ".join(str(message.get("message", "")).split())
+                  spans = [span for span in message.get("spans", []) if span.get("is_primary")]
+                  filename = spans[0].get("file_name", "<unknown>") if spans else "<unknown>"
+                  found.add((filename, code, text))
+              return found
+
+          branch = diagnostics(Path("target/branch-clippy.json"))
+          main = diagnostics(Path(os.environ["RUNNER_TEMP"]) / "main-clippy.json")
+          introduced = sorted(branch - main)
+          print(f"main strict diagnostics: {len(main)}")
+          print(f"branch strict diagnostics: {len(branch)}")
+          print(f"new strict diagnostics: {len(introduced)}")
+          for filename, code, message in introduced:
+              print(f"{filename}: {code}: {message}")
+          if introduced:
+              raise SystemExit("Linux thread exit bridge introduces new strict clippy diagnostics")
+          if os.environ["MAIN_STATUS"] == "0" and os.environ["BRANCH_STATUS"] != "0":
+              raise SystemExit("branch failed strict clippy while main passed")
+          PY
+      - name: Build measured C0 bundle
+        run: scripts/build-c0-bundle.sh
+        env:
+          ARACH_PUSH_ROOT: ${{ github.workspace }}/target/c0-sources/push
+          ARACH_GRANITE_ROOT: ${{ github.workspace }}/target/c0-sources/granite
+      - run: git diff --check
+      - name: Verify production-only patch scope
+        run: test "$(git diff --name-only | tr '\n' ' ')" = "src/lib.rs src/syscalls.rs "
+      - name: Publish validated integration
+        run: |
+          if test -z "$(git diff --name-only)"; then
+            exit 0
+          fi
+          git config user.name "SisyphusAeolides"
+          git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
+          git add src/lib.rs src/syscalls.rs
+          git commit -m "Add Linux thread exit identity"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
