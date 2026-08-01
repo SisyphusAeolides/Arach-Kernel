@@ -1035,6 +1035,36 @@ fn map_linux_file_error(error: crate::linux_file::FileError) -> isize {
 }
 
 #[cfg(target_os = "none")]
+fn linux_descriptor_revents(
+    owner: crate::process::lifecycle::ProcessHandle,
+    fd: i32,
+    requested: u16,
+) -> u16 {
+    if fd < 0 {
+        return 0;
+    }
+    let Ok(fd) = u32::try_from(fd) else {
+        return LINUX_POLLNVAL;
+    };
+    let ready = if let Ok(ready) = crate::linux_file::readiness(owner, fd) {
+        ready
+    } else if let Ok(ready) = crate::linux_eventfd::readiness(owner.pid, fd) {
+        ready
+    } else if let Ok(ready) =
+        crate::linux_timerfd::readiness(owner.pid, fd, crate::interrupts::monotonic_nanoseconds())
+    {
+        ready
+    } else if let Ok(ready) = crate::linux_epoll::readiness(owner.pid, fd) {
+        ready
+    } else {
+        return LINUX_POLLNVAL;
+    };
+    let mut revents = (ready as u16) & requested;
+    revents |= (ready as u16) & (LINUX_POLLERR | LINUX_POLLHUP);
+    revents
+}
+
+#[cfg(target_os = "none")]
 fn linux_poll(arguments: [u64; 6]) -> isize {
     let Ok(nfds) = usize::try_from(arguments[1]) else {
         return ERROR_INVALID_ARGUMENT;
@@ -1055,7 +1085,10 @@ fn linux_poll(arguments: [u64; 6]) -> isize {
     if copy_from_user(arguments[0], &mut records[..length]).is_err() {
         return ERROR_BAD_ADDRESS;
     }
-    let owner = crate::process::lifecycle::current_pid();
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
     let mut ready_count: isize = 0;
     for index in 0..nfds {
         let offset = index * 8;
