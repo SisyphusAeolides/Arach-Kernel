@@ -66,11 +66,12 @@ The Linux personality currently covers:
 - generation- and epoch-bound x86-64 FS-base TLS with Linux `arch_prctl`
   `ARCH_SET_FS`/`ARCH_GET_FS`, clone inheritance or `CLONE_SETTLS`, and hardware
   readback before every user return;
-- same-PID transactional `execve` for bounded static x86-64 ELF images:
-  immutable Akashic snapshots, kernel-copied argv/environment vectors,
-  measured inactive W^X installation and activation, atomic lifecycle/image
-  exchange, Linux signal and close-on-exec transitions, rollback before
-  publication, and old-root reclamation only after CR3 changes.
+- same-PID transactional `execve` for bounded static ELF and the first
+  x86-64 `PT_INTERP` profile: atomic executable/interpreter snapshots,
+  separate measurements, one inactive composite W^X hierarchy, a System V
+  auxiliary vector, runtime-linker entry and main-entry transfer, atomic
+  lifecycle/image exchange, rollback before publication, and old-root
+  reclamation only after CR3 changes.
 
 The file bridge is intentionally bounded and ephemeral. It is not a persistent
 block-backed filesystem, and the current Linux descriptor families are not yet
@@ -85,7 +86,7 @@ restart remain future compatibility slices.
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
-| Linux userspace compatibility | Identity, memory, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, transactional static `execve`, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add dynamic ELF loading, expand signal delivery, complete individual leader-exit semantics, unify descriptors, and add persistent storage |
+| Linux userspace compatibility | Identity, memory, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, transactional static and measured `PT_INTERP` execution, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add shared-object relocation, file-backed `mmap`/`mprotect`, expand signal delivery, complete individual leader-exit semantics, unify descriptors, and add persistent storage |
 | System bootstrap | The pinned Granite/Arach/Push C0 bundle executes under QEMU/OVMF and emits measured ring-3 syscall evidence | Promote the measured bootstrap into a native Push service graph and qualified COSMIC login/session path |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -95,8 +96,9 @@ restart remain future compatibility slices.
 The current critical path is:
 
 1. Keep the measured C0 QEMU/OVMF path green.
-2. Extend measured static `execve` to the dynamic linker and file-backed
-   mappings without weakening generation isolation, rollback, or W^X.
+2. Extend the measured runtime-linker handoff to shared-object relocation,
+   file-backed mappings, and `mprotect` without weakening generation
+   isolation, rollback, or W^X.
 3. Unify Linux descriptor ownership and add persistent block-backed storage.
 4. Connect qualified modules and the native Push service graph to a complete
    COSMIC session.

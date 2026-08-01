@@ -63,6 +63,12 @@ pub struct FileSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilePairSnapshot {
+    pub executable: FileSnapshot,
+    pub interpreter: FileSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Dirent {
     pub name: [u8; MAXIMUM_PATH_BYTES],
     pub name_len: u8,
@@ -462,6 +468,51 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
         })
     }
 
+    /// Copies an executable and its interpreter while holding one namespace
+    /// lock. All paths, kinds, and destination capacities are checked before
+    /// either output is modified.
+    pub fn read_file_pair_snapshot(
+        &mut self,
+        executable_path: &[u8],
+        interpreter_path: &[u8],
+        executable_output: &mut [u8],
+        interpreter_output: &mut [u8],
+    ) -> Result<FilePairSnapshot, VfsError> {
+        self.ensure_initialized()?;
+        validate_path(executable_path)?;
+        validate_path(interpreter_path)?;
+        let executable_index = self.find_node(executable_path).ok_or(VfsError::NotFound)?;
+        let interpreter_index = self.find_node(interpreter_path).ok_or(VfsError::NotFound)?;
+        let executable = &self.nodes[executable_index];
+        let interpreter = &self.nodes[interpreter_index];
+        if executable.kind != NodeKind::File || interpreter.kind != NodeKind::File {
+            return Err(VfsError::NotFile);
+        }
+        if executable_output.len() < executable.content_len
+            || interpreter_output.len() < interpreter.content_len
+        {
+            return Err(VfsError::FileTooLarge);
+        }
+        let executable_inode =
+            u32::try_from(executable_index + 1).map_err(|_| VfsError::Capacity)?;
+        let interpreter_inode =
+            u32::try_from(interpreter_index + 1).map_err(|_| VfsError::Capacity)?;
+        executable_output[..executable.content_len]
+            .copy_from_slice(&executable.content[..executable.content_len]);
+        interpreter_output[..interpreter.content_len]
+            .copy_from_slice(&interpreter.content[..interpreter.content_len]);
+        Ok(FilePairSnapshot {
+            executable: FileSnapshot {
+                inode_id: executable_inode,
+                bytes: executable.content_len,
+            },
+            interpreter: FileSnapshot {
+                inode_id: interpreter_inode,
+                bytes: interpreter.content_len,
+            },
+        })
+    }
+
     pub fn stat_handle(&mut self, owner: ProcessHandle, token: u64) -> Result<Stat, VfsError> {
         self.ensure_initialized()?;
         let handle_index = self.find_handle(owner, token)?;
@@ -745,6 +796,20 @@ pub fn read_file_snapshot(path: &[u8], output: &mut [u8]) -> Result<FileSnapshot
     KERNEL_VFS.lock().read_file_snapshot(path, output)
 }
 
+pub fn read_file_pair_snapshot(
+    executable_path: &[u8],
+    interpreter_path: &[u8],
+    executable_output: &mut [u8],
+    interpreter_output: &mut [u8],
+) -> Result<FilePairSnapshot, VfsError> {
+    KERNEL_VFS.lock().read_file_pair_snapshot(
+        executable_path,
+        interpreter_path,
+        executable_output,
+        interpreter_output,
+    )
+}
+
 pub fn stat_handle(owner: ProcessHandle, token: u64) -> Result<Stat, VfsError> {
     KERNEL_VFS.lock().stat_handle(owner, token)
 }
@@ -1008,6 +1073,58 @@ mod tests {
             vfs.rename(b"/b/tree", b"/b/tree/child/loop", 9),
             Err(VfsError::InvalidPath)
         );
+    }
+
+    #[test]
+    fn snapshots_an_executable_pair_without_partial_output() {
+        let mut vfs = TestVfs::new();
+        let owner = owner(8, 1);
+        for (path, contents) in [
+            (&b"/dynamic"[..], &b"main-image"[..]),
+            (&b"/lib-ld"[..], &b"runtime-linker"[..]),
+        ] {
+            let handle = vfs
+                .open(owner, path, flags::WRITE_INTENT | flags::CREATE_INTENT, 1)
+                .unwrap();
+            vfs.write(owner, handle, contents, 2).unwrap();
+            vfs.close(owner, handle).unwrap();
+        }
+        let mut executable = [0_u8; 32];
+        let mut interpreter = [0_u8; 32];
+        assert_eq!(
+            vfs.read_file_pair_snapshot(
+                b"/dynamic",
+                b"/lib-ld",
+                &mut executable,
+                &mut interpreter,
+            ),
+            Ok(FilePairSnapshot {
+                executable: FileSnapshot {
+                    inode_id: 2,
+                    bytes: 10,
+                },
+                interpreter: FileSnapshot {
+                    inode_id: 3,
+                    bytes: 14,
+                },
+            })
+        );
+        assert_eq!(&executable[..10], b"main-image");
+        assert_eq!(&interpreter[..14], b"runtime-linker");
+
+        let mut untouched_executable = [0x5a_u8; 32];
+        let mut undersized_interpreter = [0xa5_u8; 4];
+        assert_eq!(
+            vfs.read_file_pair_snapshot(
+                b"/dynamic",
+                b"/lib-ld",
+                &mut untouched_executable,
+                &mut undersized_interpreter,
+            ),
+            Err(VfsError::FileTooLarge)
+        );
+        assert_eq!(untouched_executable, [0x5a; 32]);
+        assert_eq!(undersized_interpreter, [0xa5; 4]);
     }
 
     #[test]

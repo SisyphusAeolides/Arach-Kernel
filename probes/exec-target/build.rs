@@ -11,7 +11,6 @@ fn main() {
         "cargo:rustc-link-arg-bin=arach-exec-target=-T{}",
         script.display()
     );
-    println!("cargo:rustc-link-arg-bin=arach-exec-target=--no-pie");
-    println!("cargo:rustc-link-arg-bin=arach-exec-target=--no-dynamic-linker");
+    println!("cargo:rustc-link-arg-bin=arach-exec-target=--pie");
     println!("cargo:rustc-link-arg-bin=arach-exec-target=--gc-sections");
 }

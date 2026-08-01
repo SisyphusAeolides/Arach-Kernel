@@ -392,6 +392,7 @@ static EXEC_STAGING: SpinLock<ExecStaging> = SpinLock::new(ExecStaging::EMPTY);
 #[cfg(target_os = "none")]
 struct ExecStaging {
     image: [u8; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
+    runtime_linker: [u8; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
     strings: [u8; MAXIMUM_EXEC_STRING_BYTES],
 }
 
@@ -399,6 +400,7 @@ struct ExecStaging {
 impl ExecStaging {
     const EMPTY: Self = Self {
         image: [0; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
+        runtime_linker: [0; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
         strings: [0; MAXIMUM_EXEC_STRING_BYTES],
     };
 }
@@ -876,11 +878,55 @@ fn schedule_linux_execve_return(
         Ok(vector) => vector,
         Err(error) => return resume_linux_result(saved, error),
     };
-    let snapshot =
+    let mut snapshot =
         match crate::akashic_vfs::read_file_snapshot(&path[..path_length], &mut staging.image) {
             Ok(snapshot) => snapshot,
             Err(error) => return resume_linux_result(saved, map_akashic_error(error)),
         };
+    let initial_plan =
+        match crate::module::loader::LoadPlan::parse(&staging.image[..snapshot.bytes]) {
+            Ok(plan) => plan,
+            Err(_) => return resume_linux_result(saved, ERROR_EXEC_FORMAT),
+        };
+    let mut interpreter_path = [0_u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES];
+    let mut interpreter_snapshot = None;
+    match initial_plan.interpreter_path(&staging.image[..snapshot.bytes]) {
+        Ok(Some(candidate)) => {
+            if candidate.len() > interpreter_path.len() {
+                return resume_linux_result(saved, ERROR_NAME_TOO_LONG);
+            }
+            interpreter_path[..candidate.len()].copy_from_slice(candidate);
+            let interpreter_path_length = candidate.len();
+            let pair = {
+                let staging = &mut *staging;
+                crate::akashic_vfs::read_file_pair_snapshot(
+                    &path[..path_length],
+                    &interpreter_path[..interpreter_path_length],
+                    &mut staging.image,
+                    &mut staging.runtime_linker,
+                )
+            };
+            let pair = match pair {
+                Ok(pair) => pair,
+                Err(error) => return resume_linux_result(saved, map_akashic_error(error)),
+            };
+            let refreshed_plan = match crate::module::loader::LoadPlan::parse(
+                &staging.image[..pair.executable.bytes],
+            ) {
+                Ok(plan) => plan,
+                Err(_) => return resume_linux_result(saved, ERROR_EXEC_FORMAT),
+            };
+            match refreshed_plan.interpreter_path(&staging.image[..pair.executable.bytes]) {
+                Ok(Some(refreshed))
+                    if refreshed == &interpreter_path[..interpreter_path_length] => {}
+                _ => return resume_linux_result(saved, ERROR_TRY_AGAIN),
+            }
+            snapshot = pair.executable;
+            interpreter_snapshot = Some(pair.interpreter);
+        }
+        Ok(None) => {}
+        Err(_) => return resume_linux_result(saved, ERROR_EXEC_FORMAT),
+    }
 
     let mut argv_refs: [&[u8]; MAXIMUM_EXEC_VECTOR_ENTRIES] = [&[]; MAXIMUM_EXEC_VECTOR_ENTRIES];
     let mut envp_refs: [&[u8]; MAXIMUM_EXEC_VECTOR_ENTRIES] = [&[]; MAXIMUM_EXEC_VECTOR_ENTRIES];
@@ -895,12 +941,24 @@ fn schedule_linux_execve_return(
         *target = &staging.strings[start..end];
     }
 
-    let replacement = match crate::process::runtime::install_exec_image(
-        snapshot.inode_id,
-        &staging.image[..snapshot.bytes],
-        &argv_refs[..argv.count],
-        &envp_refs[..envp.count],
-    ) {
+    let replacement = match interpreter_snapshot {
+        Some(interpreter) => crate::process::runtime::install_dynamic_exec_image(
+            snapshot.inode_id,
+            &staging.image[..snapshot.bytes],
+            interpreter.inode_id,
+            &staging.runtime_linker[..interpreter.bytes],
+            &path[..path_length],
+            &argv_refs[..argv.count],
+            &envp_refs[..envp.count],
+        ),
+        None => crate::process::runtime::install_exec_image(
+            snapshot.inode_id,
+            &staging.image[..snapshot.bytes],
+            &argv_refs[..argv.count],
+            &envp_refs[..envp.count],
+        ),
+    };
+    let replacement = match replacement {
         Ok(replacement) => replacement,
         Err(error) => return resume_linux_result(saved, map_exec_runtime_error(error)),
     };
@@ -911,6 +969,7 @@ fn schedule_linux_execve_return(
         address_space_root,
         image_measurement_root,
         measurement: _,
+        runtime_linker_measurement: _,
     } = replacement;
 
     let previous = match crate::process::service_registry::exchange_running_image(current, process)
@@ -1025,7 +1084,9 @@ fn map_exec_runtime_error(error: crate::process::runtime::ProcessRuntimeError) -
             InstallError::Loader(_)
             | InstallError::InvalidSegmentSize
             | InstallError::VerificationFailed
-            | InstallError::WriteExecuteMapping,
+            | InstallError::WriteExecuteMapping
+            | InstallError::LinkedImageOverlap
+            | InstallError::ProgramHeadersUnavailable,
         ) => ERROR_EXEC_FORMAT,
         ProcessRuntimeError::Install(
             InstallError::Backend(error) | InstallError::Cleanup(error),

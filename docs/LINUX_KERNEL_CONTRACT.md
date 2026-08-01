@@ -51,36 +51,47 @@ derives the required KPI from that source's conftests and behavioral tests.
 
 ## Current state
 
-### Transactional static process replacement
+### Transactional static and interpreter process replacement
 
 The first `execve` profile admits one running Linux thread-group leader with no
-peer threads and one static x86-64 ELF no larger than Akashic's bounded file
-object. Path bytes, argv pointers, environment pointers, and all referenced
-strings are copied from the old address space before any replacement is
-installed. The VFS returns inode identity and complete file bytes from one
-locked snapshot, and runtime-only image authority measures those exact bytes
-before parsing their load plan.
+peer threads and either one static x86-64 ELF or one ET_DYN main image naming a
+bounded ET_DYN runtime linker. Path bytes, argv pointers, environment pointers,
+and all referenced strings are copied from the old address space before any
+replacement is installed. Static execution uses one locked VFS snapshot. For
+`PT_INTERP`, the kernel first validates the embedded absolute path and then
+re-snapshots the executable and interpreter under one namespace lock; it
+rejects any executable-path drift before using the pair. Runtime-only image
+authority measures each immutable file independently.
 
-Installation creates a separate inactive hierarchy, seals every segment W^X,
-builds a fresh stack, and performs a temporary activation validation that
-restores the old root. Publication then exchanges the service registry's
-owned image and atomically updates lifecycle launch/context state while
-preserving PID generation, parent, service class, capability root, ABI, and
-kernel entry stack. Any failure before lifecycle publication returns ownership
-to the old image and releases the rejected hierarchy. Successful publication
-resets caught signal dispositions, pending/frame state, robust and child-TID
-registrations, FS base, and close-on-exec descriptors. The architecture return
-gate changes CR3 before it reclaims the deferred old hierarchy.
+Installation creates a separate inactive hierarchy and seals every admitted
+segment W^X. Dynamic execution places the main image and runtime linker at
+distinct deterministic biases and commits them as one transaction. Its fresh
+System V x86-64 stack carries argv, envp, `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`,
+`AT_PAGESZ`, `AT_BASE`, `AT_ENTRY`, identity values, `AT_RANDOM`, `AT_EXECFN`,
+and `AT_NULL`; initial RIP names the interpreter, not the main executable. A
+temporary activation validation restores the old root before publication.
+Publication then exchanges the service registry's owned image and atomically
+updates lifecycle launch/context state while preserving PID generation,
+parent, service class, capability root, ABI, and kernel entry stack. Any
+failure before lifecycle publication returns ownership to the old image and
+releases the rejected hierarchy. Successful publication resets caught signal
+dispositions, pending/frame state, robust and child-TID registrations, FS
+base, and close-on-exec descriptors. The architecture return gate changes CR3
+before it reclaims the deferred old hierarchy.
 
-The measured C0 chain requires `ARACH_C1_EXECVE_PASS` from the replacement and
-then obtains the existing live-peer `exit_group` evidence from that new image.
-Host tests separately cover bounded vector capture, immutable snapshots,
-runtime measurement, lifecycle epoch invalidation, registry exchange,
+The measured QEMU chain requires `ARACH_C2_RUNTIME_LINKER_ENTER`, then
+`ARACH_C2_RUNTIME_LINKER_PASS`, then `ARACH_C1_EXECVE_PASS`. The freestanding C
+runtime-linker probe validates the kernel-generated auxiliary vector and jumps
+to `AT_ENTRY`; the Rust main image then supplies the existing live-peer
+`exit_group` evidence. Host tests separately cover bounded vector capture,
+atomic pair snapshots, independent measurements, composite installation,
+auxiliary-vector bytes, lifecycle epoch invalidation, registry exchange,
 close-on-exec families, signal reset, rollback ownership, and process-pool
-recycling. Idris 2 and Agda make those gates fields of the downstream exec
-replacement certificate. This is not dynamic ELF qualification: `PT_INTERP`,
-shared-library relocation, file-backed `mmap`, `mprotect`, and demand paging
-remain separate acceptance gates.
+recycling. Idris 2 and Agda make the new gates fields of a downstream dynamic
+exec certificate. This qualifies the kernel-to-interpreter handoff, not full
+dynamic linking: ELF dependency discovery, shared-library relocation,
+file-backed `mmap`, `mprotect`, demand paging, ASLR, and cryptographically
+qualified process entropy remain separate acceptance gates.
 
 The current tree passes external-Kbuild and static load-admission gates against
 real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux

@@ -55,6 +55,19 @@ pub const LINUX_MMAP_MAXIMUM_BYTES: usize = 16 * 1024 * 1024;
 pub const LINUX_BRK_BASE: u64 = 0x0000_2000_0000;
 pub const LINUX_BRK_MAXIMUM_BYTES: usize = 16 * 1024 * 1024;
 
+/// Kernel-owned values required by an x86-64 ELF runtime linker at process
+/// entry. Pointer-valued entries are materialized only after the final stack
+/// address is known.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinuxAuxiliaryVector<'path> {
+    pub program_header_address: u64,
+    pub program_header_count: u16,
+    pub runtime_linker_base: u64,
+    pub executable_entry_point: u64,
+    pub executable_path: &'path [u8],
+    pub random: [u8; 16],
+}
+
 /// Physical-memory operations required by the process page-table builder.
 ///
 /// Implementations must provide exclusive ownership of allocated frames and
@@ -1152,6 +1165,168 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         Ok(stack_pointer)
     }
 
+    /// Materializes the System V x86-64 process-entry stack consumed by an
+    /// ELF runtime linker: argv, envp, a bounded auxiliary vector, executable
+    /// path, and 16 bytes backing `AT_RANDOM`.
+    pub fn prepare_linux_dynamic_stack(
+        &mut self,
+        process: &ProcessImageHandle,
+        argv: &[&[u8]],
+        envp: &[&[u8]],
+        auxiliary: LinuxAuxiliaryVector<'_>,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        const AUXILIARY_ENTRY_COUNT: usize = 14;
+        const AT_NULL: u64 = 0;
+        const AT_PHDR: u64 = 3;
+        const AT_PHENT: u64 = 4;
+        const AT_PHNUM: u64 = 5;
+        const AT_PAGESZ: u64 = 6;
+        const AT_BASE: u64 = 7;
+        const AT_FLAGS: u64 = 8;
+        const AT_ENTRY: u64 = 9;
+        const AT_UID: u64 = 11;
+        const AT_EUID: u64 = 12;
+        const AT_GID: u64 = 13;
+        const AT_EGID: u64 = 14;
+        const AT_SECURE: u64 = 23;
+        const AT_RANDOM: u64 = 25;
+        const AT_EXECFN: u64 = 31;
+
+        let slot_index = self.process_slot(process)?;
+        if self.active_slot.is_some()
+            || self.slots[slot_index]
+                .process_info
+                .initial_stack_pointer
+                .is_none()
+            || auxiliary.program_header_address == 0
+            || auxiliary.program_header_count == 0
+            || auxiliary.runtime_linker_base == 0
+            || auxiliary.executable_entry_point == 0
+            || auxiliary.executable_path.is_empty()
+            || auxiliary.executable_path.contains(&0)
+        {
+            return Err(FrameBackedError::InvalidState);
+        }
+        let word_count = 1usize
+            .checked_add(argv.len())
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| count.checked_add(envp.len()))
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| count.checked_add((AUXILIARY_ENTRY_COUNT + 1) * 2))
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let pointer_bytes = word_count
+            .checked_mul(size_of::<u64>())
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let vector_string_bytes = argv
+            .iter()
+            .chain(envp.iter())
+            .try_fold(0usize, |total, value| {
+                total.checked_add(value.len().checked_add(1)?)
+            })
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let data_bytes = vector_string_bytes
+            .checked_add(auxiliary.executable_path.len())
+            .and_then(|count| count.checked_add(1 + auxiliary.random.len()))
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let stack_bytes = self.slots[slot_index]
+            .initial_stack_pages
+            .checked_mul(PAGE_SIZE)
+            .ok_or(FrameBackedError::InvalidState)?;
+        if pointer_bytes
+            .checked_add(data_bytes)
+            .is_none_or(|size| size > stack_bytes)
+        {
+            return Err(FrameBackedError::InvalidRange);
+        }
+
+        let stack_top = self.slots[slot_index]
+            .process_info
+            .initial_stack_pointer
+            .ok_or(FrameBackedError::InvalidState)?;
+        let mapped_base = stack_top
+            .checked_sub(stack_bytes as u64)
+            .ok_or(FrameBackedError::InvalidState)?;
+        let block_bytes = pointer_bytes
+            .checked_add(data_bytes)
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let stack_pointer = stack_top
+            .checked_sub(block_bytes as u64)
+            .map(|address| address & !0xf)
+            .filter(|address| *address >= mapped_base)
+            .ok_or(FrameBackedError::InvalidRange)?;
+
+        let mut word_address = stack_pointer;
+        self.write_stack_word(slot_index, word_address, argv.len() as u64)?;
+        word_address += 8;
+        let string_start = stack_pointer + pointer_bytes as u64;
+        let mut string_address = string_start;
+        for value in argv {
+            self.write_stack_word(slot_index, word_address, string_address)?;
+            word_address += 8;
+            string_address += value.len() as u64 + 1;
+        }
+        self.write_stack_word(slot_index, word_address, 0)?;
+        word_address += 8;
+        for value in envp {
+            self.write_stack_word(slot_index, word_address, string_address)?;
+            word_address += 8;
+            string_address += value.len() as u64 + 1;
+        }
+        self.write_stack_word(slot_index, word_address, 0)?;
+        word_address += 8;
+
+        let executable_path_address = string_start
+            .checked_add(vector_string_bytes as u64)
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let random_address = executable_path_address
+            .checked_add(auxiliary.executable_path.len() as u64 + 1)
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let entries = [
+            (AT_PHDR, auxiliary.program_header_address),
+            (AT_PHENT, 56),
+            (AT_PHNUM, u64::from(auxiliary.program_header_count)),
+            (AT_PAGESZ, PAGE_SIZE as u64),
+            (AT_BASE, auxiliary.runtime_linker_base),
+            (AT_FLAGS, 0),
+            (AT_ENTRY, auxiliary.executable_entry_point),
+            (AT_UID, 0),
+            (AT_EUID, 0),
+            (AT_GID, 0),
+            (AT_EGID, 0),
+            (AT_SECURE, 0),
+            (AT_RANDOM, random_address),
+            (AT_EXECFN, executable_path_address),
+        ];
+        for (kind, value) in entries {
+            self.write_stack_word(slot_index, word_address, kind)?;
+            self.write_stack_word(slot_index, word_address + 8, value)?;
+            word_address += 16;
+        }
+        self.write_stack_word(slot_index, word_address, AT_NULL)?;
+        self.write_stack_word(slot_index, word_address + 8, 0)?;
+
+        string_address = string_start;
+        for value in argv.iter().chain(envp.iter()) {
+            self.write_stack_bytes(slot_index, string_address, value)?;
+            string_address += value.len() as u64;
+            self.write_stack_bytes(slot_index, string_address, &[0])?;
+            string_address += 1;
+        }
+        self.write_stack_bytes(
+            slot_index,
+            executable_path_address,
+            auxiliary.executable_path,
+        )?;
+        self.write_stack_bytes(
+            slot_index,
+            executable_path_address + auxiliary.executable_path.len() as u64,
+            &[0],
+        )?;
+        self.write_stack_bytes(slot_index, random_address, &auxiliary.random)?;
+        self.slots[slot_index].process_info.initial_stack_pointer = Some(stack_pointer);
+        Ok(stack_pointer)
+    }
+
     /// Retries reclamation after a frame-memory backend reported a release
     /// failure. Failed frames remain recorded until this succeeds.
     pub fn retry_cleanup(
@@ -1966,7 +2141,7 @@ mod tests {
     use std::thread;
 
     use crate::capability::{Authority, ProcessInstallControl, UserlandImageControl};
-    use crate::module::loader::POSITION_INDEPENDENT_LOAD_BASE;
+    use crate::module::loader::{POSITION_INDEPENDENT_LOAD_BASE, RUNTIME_LINKER_LOAD_BASE};
     use crate::process::image::prepare_user_image;
     use crate::process::install::{InstallError, install_user_image};
 
@@ -2185,6 +2360,42 @@ mod tests {
         catalog
     }
 
+    fn read_user_bytes<const FRAMES: usize>(
+        backend: &FrameBackedAddressSpace<Box<TestMemory<FRAMES>>>,
+        process: &ProcessImageHandle,
+        address: u64,
+        output: &mut [u8],
+    ) {
+        let slot_index = backend.process_slot(process).unwrap();
+        let page = backend.slots[slot_index]
+            .pages
+            .iter()
+            .take(backend.slots[slot_index].page_count)
+            .find(|page| {
+                address >= page.virtual_address
+                    && address + output.len() as u64 <= page.virtual_address + PAGE_SIZE as u64
+            })
+            .unwrap();
+        backend
+            .memory()
+            .read_bytes(
+                page.frame,
+                (address - page.virtual_address) as usize,
+                output,
+            )
+            .unwrap();
+    }
+
+    fn read_user_u64<const FRAMES: usize>(
+        backend: &FrameBackedAddressSpace<Box<TestMemory<FRAMES>>>,
+        process: &ProcessImageHandle,
+        address: u64,
+    ) -> u64 {
+        let mut bytes = [0_u8; 8];
+        read_user_bytes(backend, process, address, &mut bytes);
+        u64::from_le_bytes(bytes)
+    }
+
     #[test]
     fn builds_hardware_entries_and_reclaims_every_owned_frame() {
         let mut memory = Box::new(TestMemory::<176>::new());
@@ -2288,6 +2499,104 @@ mod tests {
             unsafe { backend.validate_activation(&installed.process, &install_control) },
             Err(FrameBackedError::InvalidHandle)
         );
+        assert_eq!(backend.memory().in_use(), 0);
+    }
+
+    #[test]
+    fn builds_a_complete_dynamic_linux_auxiliary_vector() {
+        let memory = Box::new(TestMemory::<176>::new());
+        let authority = unsafe { Authority::assume_root() };
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let image_control = authority.grant::<UserlandImageControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let catalog = catalog();
+        let mut bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let image = prepare_user_image(catalog.materialize(1, &mut bytes).unwrap(), &image_control)
+            .unwrap();
+        let installed = install_user_image(image, &mut backend, &install_control).unwrap();
+        backend
+            .install_initial_stack(&installed.process, &install_control)
+            .unwrap();
+        let random = [0xa5; 16];
+        let stack_pointer = backend
+            .prepare_linux_dynamic_stack(
+                &installed.process,
+                &[b"dynamic-main"],
+                &[b"ARACH_DYNAMIC=1"],
+                LinuxAuxiliaryVector {
+                    program_header_address: 0x1000_0040,
+                    program_header_count: 2,
+                    runtime_linker_base: RUNTIME_LINKER_LOAD_BASE,
+                    executable_entry_point: 0x1000_00b0,
+                    executable_path: b"/dynamic-main",
+                    random,
+                },
+            )
+            .unwrap();
+        assert_eq!(stack_pointer & 0xf, 0);
+        assert_eq!(
+            read_user_u64(&backend, &installed.process, stack_pointer),
+            1
+        );
+        assert_ne!(
+            read_user_u64(&backend, &installed.process, stack_pointer + 8),
+            0
+        );
+        assert_eq!(
+            read_user_u64(&backend, &installed.process, stack_pointer + 16),
+            0
+        );
+        assert_ne!(
+            read_user_u64(&backend, &installed.process, stack_pointer + 24),
+            0
+        );
+        assert_eq!(
+            read_user_u64(&backend, &installed.process, stack_pointer + 32),
+            0
+        );
+
+        let mut auxiliary_address = stack_pointer + 40;
+        let mut random_address = 0;
+        let mut executable_path_address = 0;
+        loop {
+            let kind = read_user_u64(&backend, &installed.process, auxiliary_address);
+            let value = read_user_u64(&backend, &installed.process, auxiliary_address + 8);
+            if kind == 0 {
+                assert_eq!(value, 0);
+                break;
+            }
+            match kind {
+                3 => assert_eq!(value, 0x1000_0040),
+                4 => assert_eq!(value, 56),
+                5 => assert_eq!(value, 2),
+                6 => assert_eq!(value, PAGE_SIZE as u64),
+                7 => assert_eq!(value, RUNTIME_LINKER_LOAD_BASE),
+                9 => assert_eq!(value, 0x1000_00b0),
+                25 => random_address = value,
+                31 => executable_path_address = value,
+                _ => {}
+            }
+            auxiliary_address += 16;
+        }
+        let mut actual_path = [0_u8; 14];
+        read_user_bytes(
+            &backend,
+            &installed.process,
+            executable_path_address,
+            &mut actual_path,
+        );
+        assert_eq!(&actual_path, b"/dynamic-main\0");
+        let mut actual_random = [0_u8; 16];
+        read_user_bytes(
+            &backend,
+            &installed.process,
+            random_address,
+            &mut actual_random,
+        );
+        assert_eq!(actual_random, random);
+
+        backend.release_process(&installed.process).unwrap();
         assert_eq!(backend.memory().in_use(), 0);
     }
 

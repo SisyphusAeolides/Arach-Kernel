@@ -17,6 +17,8 @@ data Gate : Set where
   threadGroupSnapshot peerGenerationRetirement leaderZombiePublication supervisorReap : Gate
   immutableFileSnapshot boundedExecVectors measuredStaticImage inactiveActivation : Gate
   atomicImageExchange execStateReset deferredImageReap rollbackPreservesImage : Gate
+  atomicExecutablePairSnapshot measuredRuntimeLinker compositeImageInstall : Gate
+  linuxAuxiliaryVector runtimeLinkerEntry mainEntryTransfer : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -100,6 +102,17 @@ record ExecReplacementCertificate : Set where
     deferredImageReapEvidence : Measurement deferredImageReap
     rollbackPreservesImageEvidence : Measurement rollbackPreservesImage
 
+record DynamicExecCertificate : Set where
+  constructor dynamicExecCertificate
+  field
+    staticReplacement : ExecReplacementCertificate
+    atomicExecutablePairSnapshotEvidence : Measurement atomicExecutablePairSnapshot
+    measuredRuntimeLinkerEvidence : Measurement measuredRuntimeLinker
+    compositeImageInstallEvidence : Measurement compositeImageInstall
+    linuxAuxiliaryVectorEvidence : Measurement linuxAuxiliaryVector
+    runtimeLinkerEntryEvidence : Measurement runtimeLinkerEntry
+    mainEntryTransferEvidence : Measurement mainEntryTransfer
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -130,3 +143,10 @@ groupExitRequiresSignalReturn certificate = GroupExitCertificate.signalReturn ce
 execReplacementRequiresGroupExit : ExecReplacementCertificate -> GroupExitCertificate
 execReplacementRequiresGroupExit certificate =
   ExecReplacementCertificate.groupExit certificate
+
+-- Dynamic execution cannot be projected without all prior transactional
+-- replacement, rollback, process-state, and lifecycle evidence.
+dynamicExecRequiresStaticReplacement :
+  DynamicExecCertificate -> ExecReplacementCertificate
+dynamicExecRequiresStaticReplacement certificate =
+  DynamicExecCertificate.staticReplacement certificate

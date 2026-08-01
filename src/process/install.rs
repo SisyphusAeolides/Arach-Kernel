@@ -4,7 +4,7 @@ use crate::capability::{Capability, ProcessInstallControl, RuntimeImageControl};
 use crate::module::loader::LoaderError;
 use crate::process::image::PreparedUserImage;
 
-/// Static ELF images plus a bounded set of runtime mappings.  The latter are
+/// ELF load segments plus a bounded set of runtime mappings. The latter are
 /// needed by the Linux personality for anonymous `mmap`; keeping the array
 /// fixed preserves the kernel's allocation-free process control path.
 pub const MAXIMUM_PROCESS_SEGMENTS: usize = 64;
@@ -94,6 +94,21 @@ pub struct InstalledUserImage<Process> {
     pub measurement: ArtifactMeasurement,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct InstalledRuntimeLinkedImage<Process> {
+    pub process: Process,
+    /// Runtime-linker entry point used for the first Ring 3 instruction.
+    pub entry_point: u64,
+    /// Main executable entry exported through `AT_ENTRY`.
+    pub executable_entry_point: u64,
+    pub executable_program_header: u64,
+    pub executable_program_header_count: u16,
+    pub runtime_linker_base: u64,
+    pub segment_count: usize,
+    pub executable_measurement: ArtifactMeasurement,
+    pub runtime_linker_measurement: ArtifactMeasurement,
+}
+
 pub fn install_user_image<Backend: UserAddressSpaceBackend>(
     image: PreparedUserImage<'_>,
     backend: &mut Backend,
@@ -110,58 +125,74 @@ pub fn install_runtime_user_image<Backend: UserAddressSpaceBackend>(
     install_user_image_inner(image, backend)
 }
 
+/// Installs a measured executable and its measured runtime linker in one
+/// inactive hierarchy. No mapping is published unless both plans are copied,
+/// verified, sealed, and committed together.
+pub fn install_runtime_linked_user_image<Backend: UserAddressSpaceBackend>(
+    executable: PreparedUserImage<'_>,
+    runtime_linker: PreparedUserImage<'_>,
+    backend: &mut Backend,
+    _authority: &RuntimeImageControl,
+) -> Result<InstalledRuntimeLinkedImage<Backend::Process>, InstallError<Backend::Error>> {
+    let executable_plan = *executable.plan();
+    let linker_plan = *runtime_linker.plan();
+    let executable_measurement = executable.measurement();
+    let runtime_linker_measurement = runtime_linker.measurement();
+    if executable_plan.image_start < linker_plan.image_end
+        && linker_plan.image_start < executable_plan.image_end
+    {
+        return Err(InstallError::LinkedImageOverlap);
+    }
+    let executable_program_header = executable_plan
+        .program_header_address()
+        .ok_or(InstallError::ProgramHeadersUnavailable)?;
+    let image_start = executable_plan.image_start.min(linker_plan.image_start);
+    let image_end = executable_plan.image_end.max(linker_plan.image_end);
+    let space = backend
+        .begin(image_start, image_end)
+        .map_err(InstallError::Backend)?;
+
+    let executable_segments = match map_image_segments(executable, backend, space) {
+        Ok(count) => count,
+        Err(error) => return fail_after_abort(backend, space, error),
+    };
+    let linker_segments = match map_image_segments(runtime_linker, backend, space) {
+        Ok(count) => count,
+        Err(error) => return fail_after_abort(backend, space, error),
+    };
+    let process = match backend.commit(space, linker_plan.entry_point) {
+        Ok(process) => process,
+        Err(error) => {
+            return fail_after_abort(backend, space, InstallError::Backend(error));
+        }
+    };
+    Ok(InstalledRuntimeLinkedImage {
+        process,
+        entry_point: linker_plan.entry_point,
+        executable_entry_point: executable_plan.entry_point,
+        executable_program_header,
+        executable_program_header_count: executable_plan.program_header_count(),
+        runtime_linker_base: linker_plan.load_bias,
+        segment_count: executable_segments + linker_segments,
+        executable_measurement,
+        runtime_linker_measurement,
+    })
+}
+
 fn install_user_image_inner<Backend: UserAddressSpaceBackend>(
     image: PreparedUserImage<'_>,
     backend: &mut Backend,
 ) -> Result<InstalledUserImage<Backend::Process>, InstallError<Backend::Error>> {
     let plan = *image.plan();
+    let measurement = image.measurement();
     let space = backend
         .begin(plan.image_start, plan.image_end)
         .map_err(InstallError::Backend)?;
 
-    for segment in plan.segments() {
-        let memory_size = match usize::try_from(segment.memory_size) {
-            Ok(size) => size,
-            Err(_) => {
-                return fail_after_abort(backend, space, InstallError::InvalidSegmentSize);
-            }
-        };
-        let mapping = match backend.map_zeroed(space, segment.virtual_address, memory_size) {
-            Ok(mapping) => mapping,
-            Err(error) => {
-                return fail_after_abort(backend, space, InstallError::Backend(error));
-            }
-        };
-        let data = match plan.segment_data(image.bytes(), *segment) {
-            Ok(data) => data,
-            Err(error) => {
-                return fail_after_abort(backend, space, InstallError::Loader(error));
-            }
-        };
-        if let Err(error) = backend.copy_into(mapping, 0, data) {
-            return fail_after_abort(backend, space, InstallError::Backend(error));
-        }
-        match backend.verify_contents(mapping, data, memory_size) {
-            Ok(true) => {}
-            Ok(false) => {
-                return fail_after_abort(backend, space, InstallError::VerificationFailed);
-            }
-            Err(error) => {
-                return fail_after_abort(backend, space, InstallError::Backend(error));
-            }
-        }
-        let permissions = MappingPermissions {
-            readable: segment.readable,
-            writable: segment.writable,
-            executable: segment.executable,
-        };
-        if permissions.writable && permissions.executable {
-            return fail_after_abort(backend, space, InstallError::WriteExecuteMapping);
-        }
-        if let Err(error) = backend.seal(mapping, permissions) {
-            return fail_after_abort(backend, space, InstallError::Backend(error));
-        }
-    }
+    let segment_count = match map_image_segments(image, backend, space) {
+        Ok(count) => count,
+        Err(error) => return fail_after_abort(backend, space, error),
+    };
 
     let process = match backend.commit(space, plan.entry_point) {
         Ok(process) => process,
@@ -172,9 +203,51 @@ fn install_user_image_inner<Backend: UserAddressSpaceBackend>(
     Ok(InstalledUserImage {
         process,
         entry_point: plan.entry_point,
-        segment_count: plan.segments().len(),
-        measurement: image.measurement(),
+        segment_count,
+        measurement,
     })
+}
+
+fn map_image_segments<Backend: UserAddressSpaceBackend>(
+    image: PreparedUserImage<'_>,
+    backend: &mut Backend,
+    space: Backend::Space,
+) -> Result<usize, InstallError<Backend::Error>> {
+    let plan = *image.plan();
+    for segment in plan.segments() {
+        let memory_size = match usize::try_from(segment.memory_size) {
+            Ok(size) => size,
+            Err(_) => return Err(InstallError::InvalidSegmentSize),
+        };
+        let mapping = match backend.map_zeroed(space, segment.virtual_address, memory_size) {
+            Ok(mapping) => mapping,
+            Err(error) => return Err(InstallError::Backend(error)),
+        };
+        let data = match plan.segment_data(image.bytes(), *segment) {
+            Ok(data) => data,
+            Err(error) => return Err(InstallError::Loader(error)),
+        };
+        if let Err(error) = backend.copy_into(mapping, 0, data) {
+            return Err(InstallError::Backend(error));
+        }
+        match backend.verify_contents(mapping, data, memory_size) {
+            Ok(true) => {}
+            Ok(false) => return Err(InstallError::VerificationFailed),
+            Err(error) => return Err(InstallError::Backend(error)),
+        }
+        let permissions = MappingPermissions {
+            readable: segment.readable,
+            writable: segment.writable,
+            executable: segment.executable,
+        };
+        if permissions.writable && permissions.executable {
+            return Err(InstallError::WriteExecuteMapping);
+        }
+        if let Err(error) = backend.seal(mapping, permissions) {
+            return Err(InstallError::Backend(error));
+        }
+    }
+    Ok(plan.segments().len())
 }
 
 fn fail_after_abort<Backend: UserAddressSpaceBackend, T>(
@@ -196,6 +269,8 @@ pub enum InstallError<BackendError> {
     InvalidSegmentSize,
     VerificationFailed,
     WriteExecuteMapping,
+    LinkedImageOverlap,
+    ProgramHeadersUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -527,8 +602,10 @@ mod tests {
     };
 
     use crate::capability::{Authority, UserlandImageControl};
-    use crate::module::loader::POSITION_INDEPENDENT_LOAD_BASE;
-    use crate::process::image::prepare_user_image;
+    use crate::module::loader::{POSITION_INDEPENDENT_LOAD_BASE, RUNTIME_LINKER_LOAD_BASE};
+    use crate::process::image::{
+        prepare_runtime_dynamic_image, prepare_runtime_linker_image, prepare_user_image,
+    };
 
     use super::*;
 
@@ -560,6 +637,57 @@ mod tests {
             })
             .unwrap();
         catalog
+    }
+
+    fn dynamic_pair() -> ([u8; 195], [u8; 132]) {
+        let mut executable = [0_u8; 195];
+        executable[..4].copy_from_slice(b"\x7fELF");
+        executable[4] = 2;
+        executable[5] = 1;
+        executable[6] = 1;
+        executable[16..18].copy_from_slice(&(3_u16).to_le_bytes());
+        executable[18..20].copy_from_slice(&(62_u16).to_le_bytes());
+        executable[20..24].copy_from_slice(&(1_u32).to_le_bytes());
+        executable[24..32].copy_from_slice(&(176_u64).to_le_bytes());
+        executable[32..40].copy_from_slice(&(64_u64).to_le_bytes());
+        executable[52..54].copy_from_slice(&(64_u16).to_le_bytes());
+        executable[54..56].copy_from_slice(&(56_u16).to_le_bytes());
+        executable[56..58].copy_from_slice(&(2_u16).to_le_bytes());
+        let load = &mut executable[64..120];
+        load[0..4].copy_from_slice(&(1_u32).to_le_bytes());
+        load[4..8].copy_from_slice(&(5_u32).to_le_bytes());
+        load[32..40].copy_from_slice(&(184_u64).to_le_bytes());
+        load[40..48].copy_from_slice(&(0x1000_u64).to_le_bytes());
+        load[48..56].copy_from_slice(&(0x1000_u64).to_le_bytes());
+        let interpreter = &mut executable[120..176];
+        interpreter[0..4].copy_from_slice(&(3_u32).to_le_bytes());
+        interpreter[8..16].copy_from_slice(&(184_u64).to_le_bytes());
+        interpreter[32..40].copy_from_slice(&(11_u64).to_le_bytes());
+        interpreter[40..48].copy_from_slice(&(11_u64).to_le_bytes());
+        executable[176..184].copy_from_slice(&[0x90; 8]);
+        executable[184..195].copy_from_slice(b"/lib/ld.so\0");
+
+        let mut linker = [0_u8; 132];
+        linker[..4].copy_from_slice(b"\x7fELF");
+        linker[4] = 2;
+        linker[5] = 1;
+        linker[6] = 1;
+        linker[16..18].copy_from_slice(&(3_u16).to_le_bytes());
+        linker[18..20].copy_from_slice(&(62_u16).to_le_bytes());
+        linker[20..24].copy_from_slice(&(1_u32).to_le_bytes());
+        linker[24..32].copy_from_slice(&(128_u64).to_le_bytes());
+        linker[32..40].copy_from_slice(&(64_u64).to_le_bytes());
+        linker[52..54].copy_from_slice(&(64_u16).to_le_bytes());
+        linker[54..56].copy_from_slice(&(56_u16).to_le_bytes());
+        linker[56..58].copy_from_slice(&(1_u16).to_le_bytes());
+        let load = &mut linker[64..120];
+        load[0..4].copy_from_slice(&(1_u32).to_le_bytes());
+        load[4..8].copy_from_slice(&(5_u32).to_le_bytes());
+        load[32..40].copy_from_slice(&(132_u64).to_le_bytes());
+        load[40..48].copy_from_slice(&(0x1000_u64).to_le_bytes());
+        load[48..56].copy_from_slice(&(0x1000_u64).to_le_bytes());
+        linker[128..132].copy_from_slice(&[0x90; 4]);
+        (executable, linker)
     }
 
     #[test]
@@ -617,5 +745,45 @@ mod tests {
         );
         assert!(!backend.active);
         assert_eq!(backend.slot_count, 0);
+    }
+
+    #[test]
+    fn commits_a_measured_executable_and_linker_as_one_image() {
+        let (executable_bytes, linker_bytes) = dynamic_pair();
+        let authority = unsafe { Authority::assume_root() };
+        let runtime_control = authority.delegate_runtime_image_control();
+        let executable =
+            prepare_runtime_dynamic_image(30, &executable_bytes, &runtime_control).unwrap();
+        let linker = prepare_runtime_linker_image(31, &linker_bytes, &runtime_control).unwrap();
+        let mut backend = DryRunAddressSpace::<4096>::new();
+        let installed =
+            install_runtime_linked_user_image(executable, linker, &mut backend, &runtime_control)
+                .unwrap();
+        assert_eq!(installed.entry_point, RUNTIME_LINKER_LOAD_BASE + 128);
+        assert_eq!(
+            installed.executable_entry_point,
+            POSITION_INDEPENDENT_LOAD_BASE + 176
+        );
+        assert_eq!(
+            installed.executable_program_header,
+            POSITION_INDEPENDENT_LOAD_BASE + 64
+        );
+        assert_eq!(installed.runtime_linker_base, RUNTIME_LINKER_LOAD_BASE);
+        assert_eq!(installed.segment_count, 2);
+        assert_eq!(
+            backend.resolve_process(&installed.process),
+            Some(ProcessImageInfo {
+                entry_point: RUNTIME_LINKER_LOAD_BASE + 128,
+                segment_count: 2,
+                address_space_root: None,
+                owned_frames: 0,
+                initial_stack_pointer: None,
+            })
+        );
+        assert_ne!(
+            installed.executable_measurement.sha256,
+            installed.runtime_linker_measurement.sha256
+        );
+        backend.release(&installed.process).unwrap();
     }
 }

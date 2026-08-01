@@ -4,15 +4,19 @@
 //! this runtime before Ring 3 is entered. A retiring image is released only
 //! after the return path has switched CR3 away from that image's root.
 
-use blacklab::oureboros::ArtifactMeasurement;
+use blacklab::oureboros::{ArtifactMeasurement, sha256};
 
 use crate::capability::RuntimeImageControl;
 use crate::process::image::UserImageError;
 #[cfg(target_os = "none")]
-use crate::process::image::prepare_runtime_user_image;
-#[cfg(target_os = "none")]
-use crate::process::install::install_runtime_user_image;
+use crate::process::image::{
+    prepare_runtime_dynamic_image, prepare_runtime_linker_image, prepare_runtime_user_image,
+};
 use crate::process::install::{InstallError, ProcessImageHandle, UserAddressSpaceBackend};
+#[cfg(target_os = "none")]
+use crate::process::install::{install_runtime_linked_user_image, install_runtime_user_image};
+#[cfg(target_os = "none")]
+use crate::process::x86_64::LinuxAuxiliaryVector;
 use crate::process::x86_64::{
     DirectMapFrameMemory, DirectMapMemoryError, FrameBackedAddressSpace, FrameBackedError,
 };
@@ -37,6 +41,7 @@ pub struct RuntimeReplacement {
     pub address_space_root: u64,
     pub image_measurement_root: u64,
     pub measurement: ArtifactMeasurement,
+    pub runtime_linker_measurement: Option<ArtifactMeasurement>,
 }
 
 struct ProcessRuntime {
@@ -130,7 +135,131 @@ pub fn install_exec_image(
         address_space_root,
         image_measurement_root: fold_measurement_root(installed.measurement.sha256),
         measurement: installed.measurement,
+        runtime_linker_measurement: None,
     })
+}
+
+/// Installs and activation-validates a measured main ELF plus its separately
+/// measured ET_DYN runtime linker. Both images share one unpublished
+/// hierarchy and one Linux auxiliary-vector stack.
+#[cfg(target_os = "none")]
+#[allow(clippy::too_many_arguments)]
+pub fn install_dynamic_exec_image(
+    executable_inode_id: u32,
+    executable_bytes: &[u8],
+    runtime_linker_inode_id: u32,
+    runtime_linker_bytes: &[u8],
+    executable_path: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<RuntimeReplacement, ProcessRuntimeError> {
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    if runtime.pending_reap.is_some() {
+        return Err(ProcessRuntimeError::ReapAlreadyPending);
+    }
+    let executable = prepare_runtime_dynamic_image(
+        executable_inode_id,
+        executable_bytes,
+        &runtime.image_control,
+    )
+    .map_err(ProcessRuntimeError::Image)?;
+    let runtime_linker = prepare_runtime_linker_image(
+        runtime_linker_inode_id,
+        runtime_linker_bytes,
+        &runtime.image_control,
+    )
+    .map_err(ProcessRuntimeError::Image)?;
+    let installed = install_runtime_linked_user_image(
+        executable,
+        runtime_linker,
+        &mut runtime.backend,
+        &runtime.image_control,
+    )
+    .map_err(ProcessRuntimeError::Install)?;
+    let process = installed.process;
+    if let Err(error) = runtime
+        .backend
+        .install_runtime_stack(&process, &runtime.image_control)
+    {
+        discard_failed_install(runtime, process);
+        return Err(ProcessRuntimeError::Backend(error));
+    }
+    let random = derive_auxiliary_random(
+        installed.executable_measurement.sha256,
+        installed.runtime_linker_measurement.sha256,
+        process.generation(),
+    );
+    let user_stack_pointer = match runtime.backend.prepare_linux_dynamic_stack(
+        &process,
+        argv,
+        envp,
+        LinuxAuxiliaryVector {
+            program_header_address: installed.executable_program_header,
+            program_header_count: installed.executable_program_header_count,
+            runtime_linker_base: installed.runtime_linker_base,
+            executable_entry_point: installed.executable_entry_point,
+            executable_path,
+            random,
+        },
+    ) {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            discard_failed_install(runtime, process);
+            return Err(ProcessRuntimeError::Backend(error));
+        }
+    };
+    // SAFETY: The syscall gate is serialized with interrupts masked. The
+    // composite image is not lifecycle-visible, and validation restores the
+    // former active root before returning.
+    if let Err(error) = unsafe {
+        runtime
+            .backend
+            .validate_runtime_activation(&process, &runtime.image_control)
+    } {
+        discard_failed_install(runtime, process);
+        return Err(ProcessRuntimeError::Backend(error));
+    }
+    let Some(info) = runtime.backend.process_info(&process) else {
+        discard_failed_install(runtime, process);
+        return Err(ProcessRuntimeError::Unavailable);
+    };
+    let Some(address_space_root) = info.address_space_root else {
+        discard_failed_install(runtime, process);
+        return Err(ProcessRuntimeError::Unavailable);
+    };
+    Ok(RuntimeReplacement {
+        process,
+        entry_point: installed.entry_point,
+        user_stack_pointer,
+        address_space_root,
+        image_measurement_root: fold_linked_measurement_root(
+            installed.executable_measurement.sha256,
+            installed.runtime_linker_measurement.sha256,
+        ),
+        measurement: installed.executable_measurement,
+        runtime_linker_measurement: Some(installed.runtime_linker_measurement),
+    })
+}
+
+#[cfg(target_os = "none")]
+fn derive_auxiliary_random(
+    executable_digest: [u8; 32],
+    runtime_linker_digest: [u8; 32],
+    process_generation: u32,
+) -> [u8; 16] {
+    use crate::arch::Architecture;
+
+    let mut material = [0_u8; 84];
+    material[..32].copy_from_slice(&executable_digest);
+    material[32..64].copy_from_slice(&runtime_linker_digest);
+    material[64..72].copy_from_slice(&crate::interrupts::monotonic_nanoseconds().to_le_bytes());
+    material[72..80].copy_from_slice(&crate::arch::Active::counter_sample().to_le_bytes());
+    material[80..84].copy_from_slice(&process_generation.to_le_bytes());
+    let digest = sha256(&material);
+    let mut random = [0_u8; 16];
+    random.copy_from_slice(&digest[..16]);
+    random
 }
 
 #[cfg(target_os = "none")]
@@ -174,6 +303,16 @@ pub const fn fold_measurement_root(digest: [u8; 32]) -> u64 {
         index += 1;
     }
     if root == 0 { 1 } else { root }
+}
+
+pub fn fold_linked_measurement_root(
+    executable_digest: [u8; 32],
+    runtime_linker_digest: [u8; 32],
+) -> u64 {
+    let mut transcript = [0_u8; 64];
+    transcript[..32].copy_from_slice(&executable_digest);
+    transcript[32..].copy_from_slice(&runtime_linker_digest);
+    fold_measurement_root(sha256(&transcript))
 }
 
 /// Records a fully stopped image for deferred reclamation.

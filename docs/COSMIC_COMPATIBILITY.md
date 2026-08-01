@@ -98,23 +98,26 @@ control and wait over eventfds and timerfds. A bounded, process-owned
 monotonic timerfd implementation now covers create, settime, gettime,
 expiration reads, ownership, close, periodic expiry accounting, and readiness
 generation for edge-triggered epoll. These are real wake primitives for early
-COSMIC services, not a claim that ordinary files or device descriptors are
-available yet. File-backed mappings, `mprotect`, and the dynamic linker remain
-gated. Every other decoded
+COSMIC services, not a claim that every descriptor family is unified yet.
+File-backed mappings, `mprotect`, shared-object dependency loading and
+relocation remain gated. Every other decoded
 Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.
 
-The C0 probe now writes a separately measured static x86-64 ELF into Akashic
-VFS and replaces its own image through `execve`. The syscall first copies
-bounded argv and environment vectors from the old hierarchy, snapshots one
-complete file under the VFS lock, measures and activation-validates an
-inactive W^X hierarchy, and exchanges registry and lifecycle ownership while
-retaining the PID generation. Caught signal handlers and close-on-exec objects
-are reset only after publication; the former image is reclaimed by the return
-gate only after CR3 points at the replacement. The admitted slice is
-single-threaded, static-ELF-only, and bounded by Akashic's 64 KiB file ceiling.
-`PT_INTERP`, file-backed mappings, and general dynamic-linker behavior remain
-fail-closed.
+The C0 probe now writes a PIE main executable and a separately built C runtime
+linker into Akashic VFS before replacing its own image through `execve`. The
+syscall copies bounded argv and environment vectors from the old hierarchy,
+validates `PT_INTERP`, atomically snapshots both files, measures them
+independently, and activation-validates one inactive composite W^X hierarchy.
+It constructs a bounded System V auxiliary vector and enters the runtime
+linker, whose measured marker precedes its `AT_ENTRY` transfer to the Rust main
+image. Registry and lifecycle ownership exchange retains the PID generation;
+caught signal handlers and close-on-exec objects reset only after publication,
+and the former hierarchy is reclaimed only after CR3 points at the replacement.
+The admitted slice remains single-threaded at exec and each Akashic file is
+bounded to 64 KiB. This is the first `PT_INTERP` handoff slice, not completion
+of C2: general `DT_NEEDED` discovery, shared-object relocation, file-backed
+mapping, `mprotect`, ASLR, and production entropy remain fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,
 filesystem context, descriptor ownership, signal-handler identity, and SysV

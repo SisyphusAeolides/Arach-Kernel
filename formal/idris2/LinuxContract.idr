@@ -47,6 +47,12 @@ data Gate
   | ExecStateReset
   | DeferredImageReap
   | RollbackPreservesImage
+  | AtomicExecutablePairSnapshot
+  | MeasuredRuntimeLinker
+  | CompositeImageInstall
+  | LinuxAuxiliaryVector
+  | RuntimeLinkerEntry
+  | MainEntryTransfer
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -150,6 +156,21 @@ record ExecReplacementCertificate where
   deferredImageReap : Measurement DeferredImageReap
   rollbackPreservesImage : Measurement RollbackPreservesImage
 
+||| Dynamic execution extends, rather than replaces, the same-PID static
+||| replacement contract. A certificate cannot omit either immutable file,
+||| either measurement, the one-hierarchy commit, the Linux auxiliary vector,
+||| or the observed linker-to-main control transfer.
+public export
+record DynamicExecCertificate where
+  constructor MkDynamicExecCertificate
+  staticReplacement : ExecReplacementCertificate
+  atomicExecutablePairSnapshot : Measurement AtomicExecutablePairSnapshot
+  measuredRuntimeLinker : Measurement MeasuredRuntimeLinker
+  compositeImageInstall : Measurement CompositeImageInstall
+  linuxAuxiliaryVector : Measurement LinuxAuxiliaryVector
+  runtimeLinkerEntry : Measurement RuntimeLinkerEntry
+  mainEntryTransfer : Measurement MainEntryTransfer
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -183,3 +204,10 @@ groupExitRequiresSignalReturn certificate = certificate.signalReturn
 public export
 execReplacementRequiresGroupExit : ExecReplacementCertificate -> GroupExitCertificate
 execReplacementRequiresGroupExit certificate = certificate.groupExit
+
+||| Dynamic ELF entry structurally retains every transactional replacement
+||| and rollback obligation already required by static execution.
+public export
+dynamicExecRequiresStaticReplacement :
+  DynamicExecCertificate -> ExecReplacementCertificate
+dynamicExecRequiresStaticReplacement certificate = certificate.staticReplacement

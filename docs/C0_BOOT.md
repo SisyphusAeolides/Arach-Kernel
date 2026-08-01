@@ -1,12 +1,17 @@
 # C0 measured boot qualification
 
 C0 is not a boolean in a manifest. It requires one exact Arach revision to
-produce four measured artifacts and then execute them under UEFI/QEMU:
+produce four boot artifacts and then execute them under UEFI/QEMU:
 
 1. Granite UEFI loader;
 2. Arach kernel;
 3. Push PID 1;
 4. the bounded ring-3 syscall probe in `probes/c0`.
+
+The syscall probe embeds two additional independently hashed execution inputs:
+the PIE exec target and the freestanding C runtime-linker probe. They are
+materialized as separate Akashic files at runtime and are never treated as one
+prelinked blob.
 
 `scripts/build-c0-bundle.sh` builds those artifacts from separate immutable
 component checkouts. `ARACH_PUSH_IMAGE` and `ARACH_BOOTSTRAP_IMAGE` remove the
@@ -43,7 +48,12 @@ containing all of the following evidence from the same bundle:
   exercised identity, anonymous memory, `brk`, shared-address-space clone,
   shared descriptor access, independent private robust-futex and
   clear-child-tid block/wake paths, kernel owner-death publication, measured
-  signal delivery/return, bounded whole-group exit, and clean supervisor reap.
+  signal delivery/return, bounded whole-group exit, and clean supervisor reap;
+- `ARACH_C2_RUNTIME_LINKER_ENTER` and `ARACH_C2_RUNTIME_LINKER_PASS` were
+  emitted by the separately measured C interpreter after the kernel entered
+  its ET_DYN entry point and it validated `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`,
+  `AT_PAGESZ`, `AT_BASE`, `AT_ENTRY`, `AT_RANDOM`, and `AT_EXECFN`. The later
+  `ARACH_C1_EXECVE_PASS` proves control transferred to the Rust main image.
 
 The execution gate is implemented in the Arach validation workflow: CI installs
 QEMU/OVMF, runs this helper against the freshly assembled image, and uploads
