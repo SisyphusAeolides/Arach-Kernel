@@ -10,6 +10,8 @@ data Gate : Set where
   pciDeviceModel dmaAndIommu msiAndIrq synchronization : Gate
   workqueuesAndTimers deviceAndDriverModel drmAndKms : Gate
   firmwareLoading moduleLifecycle : Gate
+  sharedAddressSpaceClone sharedDescriptorTable distinctThreadIdentity perThreadTls : Gate
+  privateFutexBlock clearChildTidWake : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -44,6 +46,23 @@ record NvidiaRuntimeCertificate : Set where
     firmwareLoadingEvidence : Measurement firmwareLoading
     moduleLifecycleEvidence : Measurement moduleLifecycle
 
+record ThreadWakeCertificate : Set where
+  constructor threadWakeCertificate
+  field
+    sharedAddressSpaceCloneEvidence : Measurement sharedAddressSpaceClone
+    sharedDescriptorTableEvidence : Measurement sharedDescriptorTable
+    distinctThreadIdentityEvidence : Measurement distinctThreadIdentity
+    perThreadTlsEvidence : Measurement perThreadTls
+    privateFutexBlockEvidence : Measurement privateFutexBlock
+    clearChildTidWakeEvidence : Measurement clearChildTidWake
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
+
+-- Futex wake qualification cannot be projected without the measured clone
+-- evidence that gives both tasks the same address-space identity.
+wakeRequiresSharedAddressSpace :
+  ThreadWakeCertificate -> Measurement sharedAddressSpaceClone
+wakeRequiresSharedAddressSpace certificate =
+  ThreadWakeCertificate.sharedAddressSpaceCloneEvidence certificate

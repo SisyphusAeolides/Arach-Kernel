@@ -113,6 +113,8 @@ pub fn take_clear_child_tid(owner: ProcessHandle) -> Option<u64> {
 mod tests {
     use super::*;
 
+    static TEST_SERIALIZATION: SpinLock<()> = SpinLock::new(());
+
     const OWNER: ProcessHandle = ProcessHandle {
         pid: 0x5101,
         generation: 3,
@@ -120,6 +122,7 @@ mod tests {
 
     #[test]
     fn registers_replaces_and_clears_one_exact_owner() {
+        let _serial = TEST_SERIALIZATION.lock();
         assert_eq!(set_tid_address(OWNER, 0x4000), Ok(OWNER.pid));
         assert_eq!(set_tid_address(OWNER, 0x5000), Ok(OWNER.pid));
         assert_eq!(take_clear_child_tid(OWNER), Some(0x5000));
@@ -129,6 +132,7 @@ mod tests {
 
     #[test]
     fn pid_generation_is_part_of_the_authority() {
+        let _serial = TEST_SERIALIZATION.lock();
         let recycled = ProcessHandle {
             pid: OWNER.pid,
             generation: OWNER.generation + 1,
@@ -140,6 +144,7 @@ mod tests {
 
     #[test]
     fn rejects_kernel_unaligned_overflowing_and_ownerless_addresses() {
+        let _serial = TEST_SERIALIZATION.lock();
         assert_eq!(
             set_tid_address(
                 ProcessHandle {

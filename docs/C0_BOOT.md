@@ -28,8 +28,12 @@ containing all of the following evidence from the same bundle:
 - Arach initialized interrupts, scheduling, ring 3, and syscall entry;
 - Push reached PID 1;
 - `ARACH_C0_RING3_SYSCALL_PASS` was emitted by the measured probe;
+- `ARACH_C1_THREAD_FUTEX_PASS` was emitted after shared descriptor access and
+  cross-thread clear-child-tid futex wake completed;
 - `ARACH_C1_LINUX_SYSCALL_PASS` was emitted after the Linux personality
-  exercised identity, anonymous memory, `brk`, and clean process exit.
+  exercised identity, anonymous memory, `brk`, shared-address-space clone,
+  shared descriptor access, private-futex block/wake, kernel clear-child-tid,
+  and clean thread/process exit.
 
 The execution gate is implemented in the Arach validation workflow: CI installs
 QEMU/OVMF, runs this helper against the freshly assembled image, and uploads

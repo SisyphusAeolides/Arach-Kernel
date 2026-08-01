@@ -24,10 +24,10 @@ Arach must provide the Linux interfaces libinput-rs and COSMIC observe:
 - touchpad, mouse, TrackPoint, keyboard, switch, tablet and tablet-pad devices.
 
 The current kernel bring-up provides the first bounded Linux wake object:
-process-owned `eventfd2` descriptors support counter and semaphore reads,
+thread-group-owned `eventfd2` descriptors support counter and semaphore reads,
 eight-byte writes, close, ownership validation, and non-sleeping `EAGAIN` on
 an empty read. `poll(2)` and level/edge `epoll(7)` are implemented over those
-eventfds. It also provides process-owned monotonic `timerfd_create`,
+eventfds. It also provides thread-group-owned monotonic `timerfd_create`,
 `timerfd_settime`, `timerfd_gettime`, eight-byte expiration reads, close,
 ownership validation, and lazy periodic expiry; poll and level/edge epoll
 observe timer readiness through the same bounded descriptor tables. Ordinary

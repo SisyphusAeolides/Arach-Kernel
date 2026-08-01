@@ -104,6 +104,16 @@ mappings, `mprotect`, and the dynamic linker remain gated. Every other decoded
 Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.
 
+The measured probe now also creates a bounded pthread-style clone sharing VM,
+filesystem context, descriptor ownership, signal-handler identity, and SysV
+semaphore adjustment state. The child has a distinct TID and saved context,
+inherits or explicitly installs FS-base TLS, writes through a descriptor
+created by the leader, and is scheduled only after the leader atomically
+blocks on a private futex. Child `exit` clears its generation-bound child-TID
+word, wakes the leader, and retires only the non-waitable TID slot. Fork-like
+clone modes, robust lists, signal delivery, leader exit with live peers, and
+multi-member `exit_group` remain fail-closed gates.
+
 ## Push PID 1 boundary
 
 Push stays in userspace. It can replace systemd as PID 1 only if it provides or

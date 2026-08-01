@@ -22,6 +22,12 @@ data Gate
   | DrmAndKms
   | FirmwareLoading
   | ModuleLifecycle
+  | SharedAddressSpaceClone
+  | SharedDescriptorTable
+  | DistinctThreadIdentity
+  | PerThreadTls
+  | PrivateFutexBlock
+  | ClearChildTidWake
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -58,7 +64,27 @@ record NvidiaRuntimeCertificate where
   firmwareLoading : Measurement FirmwareLoading
   moduleLifecycle : Measurement ModuleLifecycle
 
+||| Runtime evidence for the first bounded Linux thread-group slice. A wake
+||| certificate cannot omit clone identity, independent TLS, the blocking
+||| transition, or kernel-owned clear-child-tid publication.
+public export
+record ThreadWakeCertificate where
+  constructor MkThreadWakeCertificate
+  sharedAddressSpaceClone : Measurement SharedAddressSpaceClone
+  sharedDescriptorTable : Measurement SharedDescriptorTable
+  distinctThreadIdentity : Measurement DistinctThreadIdentity
+  perThreadTls : Measurement PerThreadTls
+  privateFutexBlock : Measurement PrivateFutexBlock
+  clearChildTidWake : Measurement ClearChildTidWake
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = certificate.build
+
+||| Cross-thread wake qualification structurally contains the shared-address-
+||| space admission evidence that makes one virtual futex address meaningful.
+public export
+wakeRequiresSharedAddressSpace :
+  ThreadWakeCertificate -> Measurement SharedAddressSpaceClone
+wakeRequiresSharedAddressSpace certificate = certificate.sharedAddressSpaceClone

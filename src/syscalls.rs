@@ -338,9 +338,24 @@ extern "C" fn arach_syscall_dispatch(frame: *mut SyscallFrame) {
     // Arach `yield`).
     let scheduled = if crate::process::lifecycle::current_execution_abi().is_linux() {
         match crate::process::abi::LinuxSyscall::from_number(number) {
-            Some(crate::process::abi::LinuxSyscall::Exit)
-            | Some(crate::process::abi::LinuxSyscall::ExitGroup) => {
-                schedule_exit_return(arguments[0] as isize)
+            Some(crate::process::abi::LinuxSyscall::Exit) => {
+                if crate::process::lifecycle::current_is_thread_group_leader()
+                    && crate::process::lifecycle::current_thread_group_member_count() != 1
+                {
+                    resume_linux_result(frame.dispatch.user, ERROR_NOT_IMPLEMENTED)
+                } else {
+                    schedule_exit_return(arguments[0] as isize)
+                }
+            }
+            Some(crate::process::abi::LinuxSyscall::ExitGroup) => {
+                if crate::process::lifecycle::current_thread_group_member_count() != 1 {
+                    resume_linux_result(frame.dispatch.user, ERROR_NOT_IMPLEMENTED)
+                } else {
+                    schedule_exit_return(arguments[0] as isize)
+                }
+            }
+            Some(crate::process::abi::LinuxSyscall::Clone) => {
+                schedule_linux_clone_return(frame.dispatch.user, arguments)
             }
             Some(crate::process::abi::LinuxSyscall::Futex) => {
                 schedule_linux_futex_return(frame.dispatch.user, arguments)
@@ -457,14 +472,22 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
             let _ = crate::linux_futex::wake_current(clear_child_tid, 1);
         }
     }
-    let _ = crate::linux_file::close_all(exiting);
-    let _ = crate::akashic_vfs::close_all(exiting);
+    if !crate::process::lifecycle::current_is_thread_group_leader() {
+        let decision = match crate::process::lifecycle::schedule_thread_exit() {
+            Ok(decision) => decision,
+            Err(_) => crate::arch::x86_64::halt(),
+        };
+        return complete_schedule_decision(decision);
+    }
+    let process_owner = crate::process::lifecycle::current_thread_group_handle().unwrap_or(exiting);
+    let _ = crate::linux_file::close_all(process_owner);
+    let _ = crate::akashic_vfs::close_all(process_owner);
     // Linux descriptors are process-owned. Reclaim the bounded eventfd set
     // before publishing the zombie transition so an exiting service cannot
     // leak wake objects into a later PID generation.
-    let _ = crate::linux_epoll::close_all(exiting.pid);
-    let _ = crate::linux_timerfd::close_all(exiting.pid);
-    let _ = crate::linux_eventfd::close_all(exiting.pid);
+    let _ = crate::linux_epoll::close_all(process_owner.pid);
+    let _ = crate::linux_timerfd::close_all(process_owner.pid);
+    let _ = crate::linux_eventfd::close_all(process_owner.pid);
     let decision = match crate::process::lifecycle::schedule_exit(exit_code) {
         Ok(decision) => decision,
         Err(_) => crate::arch::x86_64::halt(),
@@ -479,6 +502,94 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         Err(_) => crate::arch::x86_64::halt(),
     }
     complete_schedule_decision(decision)
+}
+
+#[cfg(target_os = "none")]
+fn schedule_linux_clone_return(
+    saved: crate::process::context::SavedUserContext,
+    arguments: [u64; 6],
+) -> crate::process::lifecycle::ScheduledProcess {
+    const CLONE_VM: u64 = 0x0000_0100;
+    const CLONE_FS: u64 = 0x0000_0200;
+    const CLONE_FILES: u64 = 0x0000_0400;
+    const CLONE_SIGHAND: u64 = 0x0000_0800;
+    const CLONE_THREAD: u64 = 0x0001_0000;
+    const CLONE_SYSVSEM: u64 = 0x0004_0000;
+    const CLONE_SETTLS: u64 = 0x0008_0000;
+    const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+    const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+    const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+    const EXIT_SIGNAL_MASK: u64 = 0xff;
+    const REQUIRED: u64 =
+        CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
+    const OPTIONAL: u64 =
+        CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
+
+    let flags = arguments[0];
+    if flags & EXIT_SIGNAL_MASK != 0
+        || flags & REQUIRED != REQUIRED
+        || flags & !(REQUIRED | OPTIONAL) != 0
+    {
+        return resume_linux_result(saved, ERROR_INVALID_ARGUMENT);
+    }
+    let child_stack = arguments[1];
+    if !crate::process::context::valid_user_address(child_stack) {
+        return resume_linux_result(saved, ERROR_INVALID_ARGUMENT);
+    }
+    let child_fs_base = if flags & CLONE_SETTLS != 0 {
+        arguments[4]
+    } else {
+        match crate::process::lifecycle::current_fs_base() {
+            Ok(value) => value,
+            Err(_) => return resume_linux_result(saved, ERROR_PERMISSION_DENIED),
+        }
+    };
+    if !crate::process::context::valid_user_tls_base(child_fs_base) {
+        return resume_linux_result(saved, ERROR_INVALID_ARGUMENT);
+    }
+    if flags & CLONE_PARENT_SETTID != 0
+        && validate_user_write_range(arguments[2], core::mem::size_of::<u32>()).is_err()
+        || flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID) != 0
+            && validate_user_write_range(arguments[3], core::mem::size_of::<u32>()).is_err()
+    {
+        return resume_linux_result(saved, ERROR_BAD_ADDRESS);
+    }
+
+    let (child, parent_return) =
+        match crate::process::lifecycle::clone_current_thread(saved, child_stack, child_fs_base) {
+            Ok(result) => result,
+            Err(crate::process::lifecycle::LifecycleError::Capacity) => {
+                return resume_linux_result(saved, ERROR_TRY_AGAIN);
+            }
+            Err(_) => return resume_linux_result(saved, ERROR_INVALID_ARGUMENT),
+        };
+
+    let mut publication_failed = false;
+    if flags & CLONE_CHILD_CLEARTID != 0
+        && crate::linux_thread::set_tid_address(child, arguments[3]).is_err()
+    {
+        publication_failed = true;
+    }
+    if !publication_failed
+        && flags & CLONE_PARENT_SETTID != 0
+        && copy_value_to_user(arguments[2], &child.pid).is_err()
+    {
+        publication_failed = true;
+    }
+    if !publication_failed
+        && flags & CLONE_CHILD_SETTID != 0
+        && copy_value_to_user(arguments[3], &child.pid).is_err()
+    {
+        publication_failed = true;
+    }
+    if publication_failed {
+        let _ = crate::linux_thread::take_clear_child_tid(child);
+        if crate::process::lifecycle::discard_runnable_thread(child).is_err() {
+            crate::arch::x86_64::halt();
+        }
+        return resume_linux_result(saved, ERROR_BAD_ADDRESS);
+    }
+    parent_return
 }
 
 #[cfg(target_os = "none")]
@@ -611,7 +722,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Poll) => linux_poll(arguments),
         Some(crate::process::abi::LinuxSyscall::Lseek) => linux_lseek(arguments),
         Some(crate::process::abi::LinuxSyscall::Getpid) => {
-            crate::process::lifecycle::current_pid() as isize
+            crate::process::lifecycle::current_thread_group() as isize
         }
         Some(crate::process::abi::LinuxSyscall::Gettid) => {
             crate::process::lifecycle::current_pid() as isize
@@ -704,7 +815,7 @@ fn linux_eventfd2(arguments: [u64; 6]) -> isize {
     let Ok(flags) = u32::try_from(arguments[1]) else {
         return ERROR_INVALID_ARGUMENT;
     };
-    let owner = crate::process::lifecycle::current_pid();
+    let owner = crate::process::lifecycle::current_thread_group();
     if owner == 0 {
         return -13;
     }
@@ -770,7 +881,7 @@ fn linux_timerfd_create(arguments: [u64; 6]) -> isize {
     let Ok(flags) = u32::try_from(arguments[1]) else {
         return ERROR_INVALID_ARGUMENT;
     };
-    let owner = crate::process::lifecycle::current_pid();
+    let owner = crate::process::lifecycle::current_thread_group();
     if owner == 0 {
         return -13;
     }
@@ -794,7 +905,7 @@ fn linux_timerfd_settime(arguments: [u64; 6]) -> isize {
         Ok(value) => value,
         Err(error) => return error,
     };
-    let owner = crate::process::lifecycle::current_pid();
+    let owner = crate::process::lifecycle::current_thread_group();
     let now = crate::interrupts::monotonic_nanoseconds();
     let old = match crate::linux_timerfd::settime(owner, fd, flags, new_value, now) {
         Ok(value) => value,
@@ -817,7 +928,7 @@ fn linux_timerfd_gettime(arguments: [u64; 6]) -> isize {
     let Ok(fd) = u32::try_from(arguments[0]) else {
         return ERROR_BAD_FILE_DESCRIPTOR;
     };
-    let owner = crate::process::lifecycle::current_pid();
+    let owner = crate::process::lifecycle::current_thread_group();
     let value = match crate::linux_timerfd::gettime(
         owner,
         fd,
@@ -1258,7 +1369,7 @@ fn linux_epoll_create1(arguments: [u64; 6]) -> isize {
     let Ok(flags) = u32::try_from(arguments[0]) else {
         return ERROR_INVALID_ARGUMENT;
     };
-    let owner = crate::process::lifecycle::current_pid();
+    let owner = crate::process::lifecycle::current_thread_group();
     if owner == 0 {
         return -13;
     }
@@ -1291,7 +1402,7 @@ fn linux_epoll_ctl(arguments: [u64; 6]) -> isize {
         events = u32::from_ne_bytes(encoded[0..4].try_into().unwrap());
         data = u64::from_ne_bytes(encoded[4..12].try_into().unwrap());
     }
-    let owner = crate::process::lifecycle::current_pid();
+    let owner = crate::process::lifecycle::current_thread_group();
     match crate::linux_epoll::ctl(owner, epfd, operation, fd, events, data) {
         Ok(()) => 0,
         Err(crate::linux_epoll::EpollError::BadFileDescriptor) => ERROR_BAD_FILE_DESCRIPTOR,
@@ -1313,7 +1424,7 @@ fn linux_epoll_wait(arguments: [u64; 6]) -> isize {
     if maxevents == 0 || maxevents > crate::linux_epoll::MAXIMUM_READY_EVENTS {
         return ERROR_INVALID_ARGUMENT;
     }
-    let owner = crate::process::lifecycle::current_pid();
+    let owner = crate::process::lifecycle::current_thread_group();
     let mut ready = [crate::linux_epoll::ReadyEvent { events: 0, data: 0 };
         crate::linux_epoll::MAXIMUM_READY_EVENTS];
     let count = match crate::linux_epoll::wait(owner, epfd, &mut ready[..maxevents]) {
@@ -1964,7 +2075,7 @@ fn map_akashic_error(error: crate::akashic_vfs::VfsError) -> isize {
 
 #[cfg(target_os = "none")]
 fn current_akashic_owner() -> Result<crate::process::lifecycle::ProcessHandle, isize> {
-    crate::process::lifecycle::current_handle().ok_or(ERROR_PERMISSION_DENIED)
+    crate::process::lifecycle::current_thread_group_handle().ok_or(ERROR_PERMISSION_DENIED)
 }
 
 #[cfg(target_os = "none")]

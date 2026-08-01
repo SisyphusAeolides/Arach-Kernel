@@ -119,6 +119,10 @@ impl ProcessHandle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessSnapshot {
     pub handle: ProcessHandle,
+    /// Linux thread-group identifier. Ordinary processes lead a group whose
+    /// identifier is their PID; shared-address-space clone children retain
+    /// distinct TIDs while naming the same process identity.
+    pub thread_group: u32,
     pub parent: u32,
     pub phase: ProcessPhase,
     pub launch: ProcessLaunch,
@@ -181,6 +185,7 @@ struct ProcessSlot {
     occupied: bool,
     generation: u32,
     pid: u32,
+    thread_group: u32,
     parent: u32,
     phase: ProcessPhase,
     launch: ProcessLaunch,
@@ -195,6 +200,7 @@ impl ProcessSlot {
         occupied: false,
         generation: 1,
         pid: 0,
+        thread_group: 0,
         parent: 0,
         phase: ProcessPhase::Free,
         launch: ProcessLaunch {
@@ -220,6 +226,7 @@ impl ProcessSlot {
                 pid: self.pid,
                 generation: self.generation,
             },
+            thread_group: self.thread_group,
             parent: self.parent,
             phase: self.phase,
             launch: self.launch,
@@ -349,6 +356,51 @@ pub fn current_pid() -> u32 {
     current_handle().map_or(NO_PID, |handle| handle.pid)
 }
 
+/// Returns the Linux process identity for the running task. This equals the
+/// task ID for an ordinary process and remains the leader PID for every
+/// member of a shared-address-space thread group.
+pub fn current_thread_group() -> u32 {
+    current_handle()
+        .and_then(snapshot_exact)
+        .map_or(NO_PID, |snapshot| snapshot.thread_group)
+}
+
+pub fn current_thread_group_member_count() -> usize {
+    let Some(current) = current_handle() else {
+        return 0;
+    };
+    let table = TABLE.lock();
+    let Some(group) = table.slot_by_handle(current).map(|slot| slot.thread_group) else {
+        return 0;
+    };
+    table
+        .slots
+        .iter()
+        .filter(|slot| slot.occupied && slot.thread_group == group)
+        .count()
+}
+
+/// Returns the exact leader generation that owns process-scoped resources.
+pub fn current_thread_group_handle() -> Option<ProcessHandle> {
+    let current = current_handle()?;
+    let table = TABLE.lock();
+    let group = table.slot_by_handle(current)?.thread_group;
+    table
+        .slots
+        .iter()
+        .find(|slot| slot.occupied && slot.pid == group && slot.thread_group == group)
+        .map(|slot| ProcessHandle {
+            pid: slot.pid,
+            generation: slot.generation,
+        })
+}
+
+pub fn current_is_thread_group_leader() -> bool {
+    current_handle().is_some_and(|handle| {
+        snapshot_exact(handle).is_some_and(|snapshot| handle.pid == snapshot.thread_group)
+    })
+}
+
 pub fn current_handle() -> Option<ProcessHandle> {
     ProcessHandle::decode(CURRENT_EXECUTION.load(Ordering::Acquire))
 }
@@ -458,6 +510,7 @@ pub fn register_init(launch: ProcessLaunch) -> Result<ProcessHandle, LifecycleEr
 
     slot.occupied = true;
     slot.pid = INIT_PID;
+    slot.thread_group = INIT_PID;
     slot.parent = NO_PID;
     slot.phase = ProcessPhase::Runnable;
     slot.launch = launch;
@@ -500,6 +553,7 @@ pub fn commit_child(parent: u32, launch: ProcessLaunch) -> Result<ProcessHandle,
             .checked_add(1)
             .ok_or(LifecycleError::Capacity)?;
         slot.pid = pid;
+        slot.thread_group = pid;
         slot.parent = parent;
         slot.phase = ProcessPhase::Runnable;
         slot.launch = launch;
@@ -511,6 +565,114 @@ pub fn commit_child(parent: u32, launch: ProcessLaunch) -> Result<ProcessHandle,
     };
 
     Ok(ProcessHandle { pid, generation })
+}
+
+/// Installs one Linux thread-group peer from the post-SYSCALL register image.
+///
+/// The child shares immutable launch authority, CR3, kernel entry stack, and
+/// process identity with the caller while owning an independent saved user
+/// context and FS base. The parent remains running and receives the child TID;
+/// the child is published runnable with a zero syscall result.
+pub fn clone_current_thread(
+    mut parent_context: SavedUserContext,
+    child_stack_pointer: u64,
+    child_fs_base: u64,
+) -> Result<(ProcessHandle, ScheduledProcess), LifecycleError> {
+    if !valid_user_address(child_stack_pointer) || !valid_user_tls_base(child_fs_base) {
+        return Err(LifecycleError::InvalidContext);
+    }
+    parent_context
+        .validate()
+        .map_err(|_| LifecycleError::InvalidContext)?;
+
+    let current = current_user_handle()?;
+    let mut table = TABLE.lock();
+    let current_index = table
+        .slots
+        .iter()
+        .position(|slot| {
+            slot.occupied && slot.pid == current.pid && slot.generation == current.generation
+        })
+        .ok_or(LifecycleError::InvalidHandle)?;
+    let parent_slot = table.slots[current_index];
+    if parent_slot.phase != ProcessPhase::Running || !parent_slot.launch.abi.is_linux() {
+        return Err(LifecycleError::InvalidTransition);
+    }
+
+    let pid = table.allocate_pid().ok_or(LifecycleError::Capacity)?;
+    let child_index = table
+        .slots
+        .iter()
+        .position(|slot| !slot.occupied && slot.generation != u32::MAX)
+        .ok_or(LifecycleError::Capacity)?;
+    let child_generation = table.slots[child_index]
+        .generation
+        .checked_add(1)
+        .ok_or(LifecycleError::Capacity)?;
+    let next_epoch = next_scheduler_epoch(table.scheduler_epoch)?;
+
+    let mut child_context = parent_context;
+    child_context.set_syscall_result(0);
+    child_context.stack_pointer = child_stack_pointer;
+    child_context
+        .validate()
+        .map_err(|_| LifecycleError::InvalidContext)?;
+    parent_context.set_syscall_result(pid as isize);
+    let parent_return = table.scheduled(current_index, parent_context, next_epoch);
+    parent_return
+        .context
+        .validate()
+        .map_err(|_| LifecycleError::InvalidContext)?;
+
+    table.slots[child_index] = ProcessSlot {
+        occupied: true,
+        generation: child_generation,
+        pid,
+        thread_group: parent_slot.thread_group,
+        parent: parent_slot.parent,
+        phase: ProcessPhase::Runnable,
+        launch: parent_slot.launch,
+        context: child_context,
+        fs_base: child_fs_base,
+        exit_code: 0,
+        wait_sequence: next_epoch,
+    };
+    table.slots[current_index].context = parent_context;
+    table.scheduler_epoch = next_epoch;
+    publish_scheduler_epoch(next_epoch);
+
+    Ok((
+        ProcessHandle {
+            pid,
+            generation: child_generation,
+        },
+        parent_return,
+    ))
+}
+
+/// Rolls back a clone that has not crossed a user-return boundary. This is
+/// used when publishing Linux parent/child TID metadata faults after the
+/// lifecycle slot was reserved.
+pub fn discard_runnable_thread(handle: ProcessHandle) -> Result<(), LifecycleError> {
+    let current = current_user_handle()?;
+    let mut table = TABLE.lock();
+    let current_group = table
+        .slot_by_handle(current)
+        .ok_or(LifecycleError::InvalidHandle)?
+        .thread_group;
+    let slot = table
+        .slot_by_handle_mut(handle)
+        .ok_or(LifecycleError::InvalidHandle)?;
+    if slot.phase != ProcessPhase::Runnable
+        || slot.thread_group != current_group
+        || slot.pid == slot.thread_group
+    {
+        return Err(LifecycleError::InvalidTransition);
+    }
+    let next_generation = slot.generation.checked_add(1).unwrap_or(u32::MAX);
+    *slot = ProcessSlot::EMPTY;
+    slot.generation = next_generation;
+    Ok(())
 }
 
 pub fn mark_running(handle: ProcessHandle) -> Result<ProcessSnapshot, LifecycleError> {
@@ -838,6 +1000,55 @@ pub fn schedule_exit(exit_code: isize) -> Result<ScheduleDecision, LifecycleErro
 
     if let Some((target_index, mut scheduled)) = target {
         scheduled.scheduler_epoch = next_epoch;
+        table.slots[target_index].phase = ProcessPhase::Running;
+        CURRENT_EXECUTION.store(scheduled.handle.encode(), Ordering::Release);
+        publish_scheduler_epoch(next_epoch);
+        Ok(ScheduleDecision::User(scheduled))
+    } else {
+        CURRENT_EXECUTION.store(PID0_IDENTITY, Ordering::Release);
+        publish_scheduler_epoch(next_epoch);
+        Ok(ScheduleDecision::Pid0(pid0_authority(next_epoch)))
+    }
+}
+
+/// Terminates a non-leader thread without publishing a waitable process
+/// zombie or reclaiming the shared process image. The exact TID generation is
+/// retired only after another runnable context has been validated.
+pub fn schedule_thread_exit() -> Result<ScheduleDecision, LifecycleError> {
+    let current = current_user_handle()?;
+    let mut table = TABLE.lock();
+    let current_index = table
+        .slots
+        .iter()
+        .position(|slot| {
+            slot.occupied && slot.pid == current.pid && slot.generation == current.generation
+        })
+        .ok_or(LifecycleError::InvalidHandle)?;
+    let current_slot = table.slots[current_index];
+    if current_slot.phase != ProcessPhase::Running || current_slot.pid == current_slot.thread_group
+    {
+        return Err(LifecycleError::InvalidTransition);
+    }
+
+    let next_epoch = next_scheduler_epoch(table.scheduler_epoch)?;
+    let target = table
+        .next_runnable_index(current_index)
+        .map(|target_index| {
+            (
+                target_index,
+                table.scheduled(target_index, table.slots[target_index].context, next_epoch),
+            )
+        });
+    if target.is_some_and(|(_, scheduled)| scheduled.context.validate().is_err()) {
+        return Err(LifecycleError::InvalidContext);
+    }
+
+    let next_generation = current_slot.generation.checked_add(1).unwrap_or(u32::MAX);
+    table.slots[current_index] = ProcessSlot::EMPTY;
+    table.slots[current_index].generation = next_generation;
+    table.scheduler_epoch = next_epoch;
+
+    if let Some((target_index, scheduled)) = target {
         table.slots[target_index].phase = ProcessPhase::Running;
         CURRENT_EXECUTION.store(scheduled.handle.encode(), Ordering::Release);
         publish_scheduler_epoch(next_epoch);
@@ -1208,6 +1419,57 @@ mod tests {
             Err(LifecycleError::InvalidContext),
         );
         assert_eq!(current_fs_base(), Ok(0x7000));
+    }
+
+    #[test]
+    fn linux_thread_clone_shares_process_identity_and_retires_only_the_tid() {
+        let _serial = TEST_SERIALIZATION.lock();
+        reset_lifecycle();
+
+        let mut linux_launch = launch(1);
+        linux_launch.abi = ExecutionAbi::LinuxX86_64;
+        let leader = register_init(linux_launch).unwrap();
+        mark_running(leader).unwrap();
+        set_current_fs_base(0x6000).unwrap();
+
+        let parent_context = saved(0x80);
+        let (thread, parent_return) = clone_current_thread(parent_context, 0x9000, 0x7000).unwrap();
+        assert_eq!(parent_return.context.user.rax, thread.pid as u64);
+        assert_eq!(current_pid(), leader.pid);
+        assert_eq!(current_thread_group(), leader.pid);
+        assert_eq!(current_thread_group_handle(), Some(leader));
+        assert_eq!(current_thread_group_member_count(), 2);
+
+        let thread_snapshot = snapshot_exact(thread).unwrap();
+        assert_eq!(thread_snapshot.thread_group, leader.pid);
+        assert_eq!(thread_snapshot.parent, NO_PID);
+        assert_eq!(
+            thread_snapshot.launch.address_space_root,
+            linux_launch.address_space_root
+        );
+
+        let selected = schedule_block(parent_context).unwrap();
+        let ScheduleDecision::User(selected) = selected else {
+            panic!("runnable cloned thread must be selected");
+        };
+        assert_eq!(selected.handle, thread);
+        assert_eq!(selected.context.user.rax, 0);
+        assert_eq!(selected.context.user.stack_pointer, 0x9000);
+        assert_eq!(selected.context.fs_base, 0x7000);
+        assert_eq!(current_pid(), thread.pid);
+        assert_eq!(current_thread_group(), leader.pid);
+        assert!(!current_is_thread_group_leader());
+
+        mark_runnable(leader).unwrap();
+        let exited = schedule_thread_exit().unwrap();
+        let ScheduleDecision::User(resumed) = exited else {
+            panic!("woken group leader must resume");
+        };
+        assert_eq!(resumed.handle, leader);
+        assert_eq!(snapshot_exact(thread), None);
+        assert_eq!(current_thread_group_handle(), Some(leader));
+        assert_eq!(current_thread_group_member_count(), 1);
+        assert!(current_is_thread_group_leader());
     }
 
     #[test]

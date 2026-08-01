@@ -2,8 +2,10 @@
 #![no_std]
 
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 const PASS: &[u8] = b"ARACH_C0_RING3_SYSCALL_PASS\n";
+const THREAD_PASS: &[u8] = b"ARACH_C1_THREAD_FUTEX_PASS\n";
 const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
 const PANIC: &[u8] = b"ARACH_C0_RING3_PANIC\n";
 
@@ -14,6 +16,8 @@ const SYS_MMAP: usize = 9;
 const SYS_MUNMAP: usize = 11;
 const SYS_BRK: usize = 12;
 const SYS_GETPID: usize = 39;
+const SYS_CLONE: usize = 56;
+const SYS_EXIT: usize = 60;
 const SYS_UNAME: usize = 63;
 const SYS_GETUID: usize = 102;
 const SYS_GETGID: usize = 104;
@@ -42,6 +46,100 @@ const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const MAP_PRIVATE: usize = 0x02;
 const MAP_ANONYMOUS: usize = 0x20;
+
+const CLONE_VM: usize = 0x0000_0100;
+const CLONE_FS: usize = 0x0000_0200;
+const CLONE_FILES: usize = 0x0000_0400;
+const CLONE_SIGHAND: usize = 0x0000_0800;
+const CLONE_THREAD: usize = 0x0001_0000;
+const CLONE_SYSVSEM: usize = 0x0004_0000;
+const CLONE_PARENT_SETTID: usize = 0x0010_0000;
+const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
+const CLONE_CHILD_SETTID: usize = 0x0100_0000;
+const THREAD_CLONE_FLAGS: usize = CLONE_VM
+    | CLONE_FS
+    | CLONE_FILES
+    | CLONE_SIGHAND
+    | CLONE_THREAD
+    | CLONE_SYSVSEM
+    | CLONE_PARENT_SETTID
+    | CLONE_CHILD_CLEARTID
+    | CLONE_CHILD_SETTID;
+
+const THREAD_STACK_BYTES: usize = 16 * 1024;
+
+#[repr(C, align(16))]
+struct ThreadStack([u8; THREAD_STACK_BYTES]);
+
+static mut THREAD_STACK: ThreadStack = ThreadStack([0; THREAD_STACK_BYTES]);
+static THREAD_TID: AtomicU32 = AtomicU32::new(0);
+static THREAD_OBSERVED_TID: AtomicU32 = AtomicU32::new(0);
+static THREAD_OBSERVED_PID: AtomicU32 = AtomicU32::new(0);
+static THREAD_EVENT_FD: AtomicU32 = AtomicU32::new(0);
+static THREAD_DESCRIPTOR_WRITE: AtomicU32 = AtomicU32::new(0);
+
+core::arch::global_asm!(
+    r#"
+    .global arach_clone_thread
+    .type arach_clone_thread,@function
+arach_clone_thread:
+    mov r10, rcx
+    mov eax, {clone_syscall}
+    syscall
+    test rax, rax
+    jnz 1f
+    xor ebp, ebp
+    call r9
+    mov rdi, rax
+    mov eax, {exit_syscall}
+    syscall
+    ud2
+1:
+    ret
+    .size arach_clone_thread, .-arach_clone_thread
+"#,
+    clone_syscall = const SYS_CLONE,
+    exit_syscall = const SYS_EXIT,
+);
+
+unsafe extern "C" {
+    fn arach_clone_thread(
+        flags: usize,
+        child_stack: usize,
+        parent_tid: *mut u32,
+        child_tid: *mut u32,
+        tls: usize,
+        child_entry: extern "C" fn() -> isize,
+    ) -> isize;
+}
+
+extern "C" fn thread_entry() -> isize {
+    // SAFETY: Identity syscalls have scalar-only Linux x86-64 arguments.
+    let tid = unsafe { linux_syscall1(SYS_GETTID, 0) };
+    let pid = unsafe { linux_syscall1(SYS_GETPID, 0) };
+    if tid <= 0 || pid <= 0 || tid == pid {
+        return 126;
+    }
+    THREAD_OBSERVED_TID.store(tid as u32, Ordering::Release);
+    THREAD_OBSERVED_PID.store(pid as u32, Ordering::Release);
+    let event_value = 1_u64;
+    let eventfd = THREAD_EVENT_FD.load(Ordering::Acquire);
+    let wrote = unsafe {
+        // SAFETY: The descriptor was created by the group leader before the
+        // clone, and event_value is live on the dedicated child stack.
+        linux_syscall3(
+            SYS_WRITE,
+            eventfd as usize,
+            &event_value as *const _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    };
+    if wrote != core::mem::size_of::<u64>() as isize {
+        return 125;
+    }
+    THREAD_DESCRIPTOR_WRITE.store(1, Ordering::Release);
+    0
+}
 
 #[repr(C)]
 struct LinuxTimespec {
@@ -284,9 +382,8 @@ pub extern "C" fn _start() -> ! {
         fail();
     }
 
-    // The measured single-process probe cannot manufacture a Linux thread
-    // group, but it can prove private-futex dispatch, atomic value comparison,
-    // and the empty wake path. A mismatched WAIT must never enqueue or block.
+    // A mismatched WAIT must never enqueue or block, and an empty wake must
+    // report that no generation was selected.
     let futex_word = 7_u32;
     if unsafe {
         linux_syscall6(
@@ -311,6 +408,100 @@ pub extern "C" fn _start() -> ! {
             )
         } != 0
     {
+        fail();
+    }
+
+    // Create one measured shared-address-space peer. The assembly trampoline
+    // ensures the child never returns through a Rust frame created on the
+    // parent's stack. Parent and child TID publication happen before either
+    // task can return to user mode.
+    THREAD_TID.store(0, Ordering::Release);
+    THREAD_OBSERVED_TID.store(0, Ordering::Release);
+    THREAD_OBSERVED_PID.store(0, Ordering::Release);
+    THREAD_DESCRIPTOR_WRITE.store(0, Ordering::Release);
+    let thread_eventfd = unsafe { linux_syscall3(SYS_EVENTFD2, 0, 0, 0) };
+    if thread_eventfd < 3 {
+        fail();
+    }
+    THREAD_EVENT_FD.store(thread_eventfd as u32, Ordering::Release);
+    let stack_top = unsafe {
+        // SAFETY: addr_of_mut creates no reference to the mutable static. The
+        // one-past-end pointer is 16-byte aligned and the first child push
+        // enters the dedicated writable stack object.
+        core::ptr::addr_of_mut!(THREAD_STACK.0)
+            .cast::<u8>()
+            .add(THREAD_STACK_BYTES) as usize
+    };
+    let tid_word = (&THREAD_TID as *const AtomicU32).cast_mut().cast::<u32>();
+    let cloned = unsafe {
+        // SAFETY: The trampoline obeys the Linux x86-64 clone register ABI;
+        // both TID pointers and the entire child stack are live writable
+        // objects in this shared address space.
+        arach_clone_thread(
+            THREAD_CLONE_FLAGS,
+            stack_top,
+            tid_word,
+            tid_word,
+            0,
+            thread_entry,
+        )
+    };
+    if cloned <= 0 || cloned == pid || THREAD_TID.load(Ordering::Acquire) != cloned as u32 {
+        fail();
+    }
+
+    // FUTEX_WAIT blocks the leader and is the only path that can schedule the
+    // new peer. SYS_EXIT clears the registered child TID and wakes this exact
+    // blocked generation before retiring the non-waitable TID slot.
+    loop {
+        let observed = THREAD_TID.load(Ordering::Acquire);
+        if observed == 0 {
+            break;
+        }
+        let waited = unsafe {
+            linux_syscall6(
+                SYS_FUTEX,
+                tid_word as usize,
+                FUTEX_WAIT_PRIVATE,
+                observed as usize,
+                0,
+                0,
+                0,
+            )
+        };
+        if waited != 0 && waited != -11 {
+            fail();
+        }
+    }
+    if THREAD_OBSERVED_TID.load(Ordering::Acquire) != cloned as u32
+        || THREAD_OBSERVED_PID.load(Ordering::Acquire) != pid as u32
+        || THREAD_DESCRIPTOR_WRITE.load(Ordering::Acquire) != 1
+    {
+        fail();
+    }
+    let mut thread_event_value = 0_u64;
+    if unsafe {
+        linux_syscall3(
+            SYS_READ,
+            thread_eventfd as usize,
+            &mut thread_event_value as *mut _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    } != core::mem::size_of::<u64>() as isize
+        || thread_event_value != 1
+        || unsafe { linux_syscall1(SYS_CLOSE, thread_eventfd as usize) } != 0
+    {
+        fail();
+    }
+    let wrote = unsafe {
+        linux_syscall3(
+            SYS_WRITE,
+            1,
+            THREAD_PASS.as_ptr() as usize,
+            THREAD_PASS.len(),
+        )
+    };
+    if wrote != THREAD_PASS.len() as isize {
         fail();
     }
 
