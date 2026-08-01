@@ -58,8 +58,8 @@ impl SlabPage {
         let slot_count = PAGE_SIZE / object_size;
         let word_count = slot_count.div_ceil(64);
         let mut mask = [0u64; BITMASK_WORDS];
-        for i in 0..word_count.min(BITMASK_WORDS) {
-            mask[i] = u64::MAX;
+        for word in mask.iter_mut().take(word_count.min(BITMASK_WORDS)) {
+            *word = u64::MAX;
         }
         // Mask out slots beyond slot_count
         if slot_count % 64 != 0 && word_count > 0 {
@@ -227,12 +227,21 @@ impl FixedHeapArena {
     }
 
     fn allocate_page(&self) -> Option<*mut u8> {
-        let page = self
-            .next_page
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (current < USER_HEAP_PAGES).then_some(current + 1)
-            })
-            .ok()?;
+        let mut current = self.next_page.load(Ordering::Acquire);
+        let page = loop {
+            if current >= USER_HEAP_PAGES {
+                return None;
+            }
+            match self.next_page.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(page) => break page,
+                Err(observed) => current = observed,
+            }
+        };
         // SAFETY: `page` was uniquely reserved by the atomic cursor. The
         // arena never hands this page out again and all callers initialize it
         // through the serialized slab state before publishing allocations.
@@ -279,6 +288,12 @@ impl GlobalSlabHeap {
             dealloc_count: 0,
             oom_count: 0,
         })
+    }
+}
+
+impl Default for GlobalSlabHeap {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

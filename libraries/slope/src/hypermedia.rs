@@ -44,6 +44,11 @@ pub struct TlsTrustAnchor {
 impl TlsTrustAnchor {
     /// Imports a trust decision made by the authenticated Boulder/Hermes
     /// broker. A zero fingerprint or generation is never a valid authority.
+    ///
+    /// # Safety
+    /// The caller must only pass values received from the authenticated broker
+    /// for the exact origin being admitted. In particular, callers must not
+    /// manufacture or substitute the certificate fingerprint or generation.
     pub unsafe fn from_broker(
         origin: HttpsOrigin,
         certificate_sha256: [u8; TLS_SHA256_BYTES],

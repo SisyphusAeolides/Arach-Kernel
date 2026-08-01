@@ -129,8 +129,19 @@ impl CoronalMatrix {
     }
 }
 
+impl Default for CoronalMatrix {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The kernel calls this. It dispatches into the matrix.
-/// # Safety: called from kernel context — no Rust stack unwinding.
+///
+/// # Safety
+/// The kernel must invoke this function with either two null pointers or with
+/// pointers to live, properly aligned `CoronalMatrix` and `DischargeEvent`
+/// values. The event and matrix must remain valid for the duration of the
+/// dispatch, and handlers must not unwind across the C ABI boundary.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _coronal_trampoline(
     matrix_ptr: *const CoronalMatrix,

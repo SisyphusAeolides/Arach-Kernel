@@ -189,6 +189,12 @@ impl OuroborosExecutor {
     }
 }
 
+impl Default for OuroborosExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ─── CEREBRAL SPAWNER ABI ───────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

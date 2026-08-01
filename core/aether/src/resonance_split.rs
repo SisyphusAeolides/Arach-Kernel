@@ -207,6 +207,12 @@ impl ResonanceIngressPage {
     }
 }
 
+impl Default for ResonanceIngressPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[repr(C, align(64))]
 struct ObservationCore {
     signature: AtomicU64,
@@ -340,6 +346,12 @@ impl ResonanceObservationPage {
 
     pub fn reply_publications(&self) -> u64 {
         self.core.reply_publications.load(Ordering::Acquire)
+    }
+}
+
+impl Default for ResonanceObservationPage {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

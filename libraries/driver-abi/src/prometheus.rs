@@ -226,7 +226,12 @@ impl ThunkPool {
     /// Returns pointer to thunk entry point (to be called with MS x64 convention).
     /// The thunk internally calls `target_sysv` using SysV ABI.
     ///
-    /// Safety: caller must ensure pool memory is executable before calling thunk.
+    /// # Safety
+    ///
+    /// `target_sysv` must be a valid non-null function pointer for a function
+    /// callable with the SysV AMD64 ABI and four arguments. The caller must
+    /// make the returned thunk storage executable before calling it and keep
+    /// this pool alive and unmoved for the lifetime of that call target.
     pub unsafe fn gen_msx64_to_sysv(
         &mut self,
         target_sysv: *const c_void,
@@ -296,7 +301,14 @@ impl ThunkPool {
         Some(unsafe { self.pool.as_ptr().add(base) } as *const c_void)
     }
 
-    /// Generate a SysV passthrough (no-op thunk) — used for already-compatible drivers
+    /// Generate a SysV passthrough (no-op thunk) — used for already-compatible drivers.
+    ///
+    /// # Safety
+    ///
+    /// `target` must be a valid non-null function pointer for a function
+    /// callable with the SysV AMD64 ABI. The caller must make the returned
+    /// thunk storage executable before calling it and keep this pool alive and
+    /// unmoved for the lifetime of that call target.
     pub unsafe fn gen_passthrough(&mut self, target: *const c_void) -> Option<*const c_void> {
         if target.is_null() || self.count as usize >= MAX_THUNKS {
             return None;
@@ -314,6 +326,12 @@ impl ThunkPool {
         self.count += 1;
         self.total_gen.fetch_add(1, Ordering::Relaxed);
         Some(unsafe { self.pool.as_ptr().add(base) } as *const c_void)
+    }
+}
+
+impl Default for ThunkPool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -349,7 +367,7 @@ pub fn scan_elf64_for_entry(blob: &[u8]) -> Option<SymbolInfo> {
     if blob.len() < 64 {
         return None;
     }
-    if &blob[0..4] != ELF_MAGIC {
+    if blob[0..4] != ELF_MAGIC {
         return None;
     }
     if blob[4] != 2 {
@@ -466,6 +484,13 @@ impl PrometheusEngine {
     ///
     /// The symbol value must identify its function bytes within `blob`. The
     /// returned pointer names emitted storage, not an executable mapping.
+    ///
+    /// # Safety
+    ///
+    /// `kernel_entry_sysv` must be a valid non-null function pointer for the
+    /// SysV AMD64 ABI with four arguments. The caller must validate the driver
+    /// image as an executable object and establish W^X-safe executable storage
+    /// for the generated thunk before invoking it.
     pub unsafe fn analyze_and_bridge(
         &mut self,
         blob: &[u8],
@@ -530,6 +555,12 @@ impl PrometheusEngine {
             entry_offset: sym.offset,
             thunk_ptr,
         }
+    }
+}
+
+impl Default for PrometheusEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -598,7 +629,7 @@ mod tests {
     }
 
     fn target() -> *const c_void {
-        1_usize as *const c_void
+        core::ptr::dangling::<c_void>()
     }
 
     #[test]

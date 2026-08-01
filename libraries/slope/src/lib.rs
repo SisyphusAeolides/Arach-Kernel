@@ -39,6 +39,12 @@ pub struct SyscallError(pub isize);
 /// Executes Sisyphus's six-register syscall ABI only in a native Sisyphus
 /// image. Host builds must never accidentally interpret these numbers as the
 /// host kernel's unrelated syscall table.
+///
+/// # Safety
+/// The caller must provide arguments valid for the selected Sisyphus syscall
+/// and must uphold every pointer and capability contract defined by that
+/// syscall. The native implementation transfers control to the kernel using
+/// the Sisyphus ABI and cannot validate Rust-side invariants for the caller.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub unsafe fn syscall(number: usize, arguments: [usize; 6]) -> Result<usize, SyscallError> {
     let result: isize;
@@ -64,6 +70,12 @@ pub unsafe fn syscall(number: usize, arguments: [usize; 6]) -> Result<usize, Sys
     }
 }
 
+/// Host-side fail-closed implementation of the Sisyphus syscall ABI.
+///
+/// # Safety
+/// This function has no unsafe host-side effects and always returns an
+/// unsupported-operation error. Callers must still uphold the syscall
+/// contract when the same code is compiled for a native Sisyphus target.
 #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
 pub unsafe fn syscall(_number: usize, _arguments: [usize; 6]) -> Result<usize, SyscallError> {
     Err(SyscallError(-38))

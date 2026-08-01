@@ -149,23 +149,25 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("none") {
         verify_formal_attestation(
             &workspace,
-            driver_digest,
-            package_digest,
-            crucible_digest,
-            aegis_digest,
-            argus_markup_digest,
-            granite_boot_digest,
-            hermes_authority_digest,
-            crest_shell_digest,
-            privilege_digest,
-            argus_layout_digest,
-            granite_layout_digest,
-            hermes_wire_digest,
-            crest_overlay_digest,
-            cosmic_compatibility_digest,
-            cosmic_stack_digest,
-            linux_contract_idris_digest,
-            linux_contract_agda_digest,
+            FormalAttestation {
+                driver_digest,
+                package_digest,
+                crucible_digest,
+                aegis_digest,
+                argus_markup_digest,
+                granite_boot_digest,
+                hermes_authority_digest,
+                crest_shell_digest,
+                privilege_digest,
+                argus_layout_digest,
+                granite_layout_digest,
+                hermes_wire_digest,
+                crest_overlay_digest,
+                cosmic_compatibility_digest,
+                cosmic_stack_digest,
+                linux_contract_idris_digest,
+                linux_contract_agda_digest,
+            },
         );
         let linker_script = PathBuf::from(
             env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
@@ -431,8 +433,7 @@ fn encode_sha256(digest: [u8; 32]) -> String {
     encoded
 }
 
-fn verify_formal_attestation(
-    workspace: &Path,
+struct FormalAttestation {
     driver_digest: [u8; 32],
     package_digest: [u8; 32],
     crucible_digest: [u8; 32],
@@ -450,7 +451,28 @@ fn verify_formal_attestation(
     cosmic_stack_digest: [u8; 32],
     linux_contract_idris_digest: [u8; 32],
     linux_contract_agda_digest: [u8; 32],
-) {
+}
+
+fn verify_formal_attestation(workspace: &Path, attestation: FormalAttestation) {
+    let FormalAttestation {
+        driver_digest,
+        package_digest,
+        crucible_digest,
+        aegis_digest,
+        argus_markup_digest,
+        granite_boot_digest,
+        hermes_authority_digest,
+        crest_shell_digest,
+        privilege_digest,
+        argus_layout_digest,
+        granite_layout_digest,
+        hermes_wire_digest,
+        crest_overlay_digest,
+        cosmic_compatibility_digest,
+        cosmic_stack_digest,
+        linux_contract_idris_digest,
+        linux_contract_agda_digest,
+    } = attestation;
     let path = workspace.join("formal/verified.lock");
     println!("cargo:rerun-if-changed={}", path.display());
     let actual = fs::read_to_string(&path).unwrap_or_else(|error| {

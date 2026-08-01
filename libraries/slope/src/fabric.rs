@@ -42,6 +42,12 @@ struct FiberArgs {
 // ─── TRAMPOLINE ────────────────────────────────────────────────────────────
 
 /// Called by the kernel on the new thread. Extracts args, runs F, exits.
+///
+/// # Safety
+/// The kernel must invoke this function with a non-null pointer to a valid,
+/// properly aligned [`FiberArgs`] value that remains live for the duration of
+/// the call. The entry pointer and closure pointer inside that value must have
+/// been produced by [`spawn`] for the same fiber stack.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _fabric_trampoline(args_ptr: *mut u8) -> ! {
     let args = unsafe { &*(args_ptr as *const FiberArgs) };
@@ -206,6 +212,12 @@ impl FabricWeave {
 
     pub const fn live_count(&self) -> usize {
         self.count
+    }
+}
+
+impl Default for FabricWeave {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
