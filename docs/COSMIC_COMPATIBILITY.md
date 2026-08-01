@@ -109,10 +109,13 @@ filesystem context, descriptor ownership, signal-handler identity, and SysV
 semaphore adjustment state. The child has a distinct TID and saved context,
 inherits or explicitly installs FS-base TLS, writes through a descriptor
 created by the leader, and is scheduled only after the leader atomically
-blocks on a private futex. Child `exit` clears its generation-bound child-TID
-word, wakes the leader, and retires only the non-waitable TID slot. Fork-like
-clone modes, robust lists, signal delivery, leader exit with live peers, and
-multi-member `exit_group` remain fail-closed gates.
+blocks on a private futex. Independent measured children prove both exit paths:
+one clears its generation-bound child-TID word and wakes the leader; the other
+registers a Linux x86-64 robust list, exits while owning a private futex, and
+causes the kernel to atomically publish `OWNER_DIED` and wake the leader. The
+walker is generation-bound and limited to 2,048 links. Fork-like clone modes,
+PI and process-shared robust futexes, signal delivery, leader exit with live
+peers, and multi-member `exit_group` remain fail-closed gates.
 
 ## Push PID 1 boundary
 

@@ -83,6 +83,7 @@ for marker in \
     "Granite: bounded Arach/Push/Crest preflight passed" \
     "ARACH_C0_RING3_SYSCALL_PASS" \
     "ARACH_C1_THREAD_FUTEX_PASS" \
+    "ARACH_C1_ROBUST_FUTEX_PASS" \
     "ARACH_C1_LINUX_SYSCALL_PASS"; do
     grep -F -- "$marker" "$log" >/dev/null || {
         echo "C0 serial evidence missing: $marker" >&2

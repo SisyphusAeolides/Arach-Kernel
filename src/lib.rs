@@ -52,6 +52,7 @@ pub mod linux_epoll;
 pub mod linux_eventfd;
 pub mod linux_file;
 pub mod linux_futex;
+pub mod linux_robust;
 pub mod linux_thread;
 pub mod linux_timerfd;
 pub mod manifold_orchestrator;

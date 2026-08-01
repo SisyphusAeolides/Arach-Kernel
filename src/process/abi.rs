@@ -83,6 +83,7 @@ pub enum LinuxSyscall {
     Futex,
     SetTidAddress,
     SetRobustList,
+    GetRobustList,
     OpenAt,
     UnlinkAt,
     Ppoll,
@@ -157,6 +158,7 @@ impl LinuxSyscall {
             271 => Some(Self::Ppoll),
             272 => Some(Self::Unshare),
             273 => Some(Self::SetRobustList),
+            274 => Some(Self::GetRobustList),
             281 => Some(Self::EpollPwait),
             283 => Some(Self::TimerfdCreate),
             286 => Some(Self::TimerfdSettime),
@@ -201,6 +203,14 @@ mod tests {
             Some(LinuxSyscall::ArchPrctl)
         );
         assert_eq!(LinuxSyscall::from_number(202), Some(LinuxSyscall::Futex));
+        assert_eq!(
+            LinuxSyscall::from_number(273),
+            Some(LinuxSyscall::SetRobustList)
+        );
+        assert_eq!(
+            LinuxSyscall::from_number(274),
+            Some(LinuxSyscall::GetRobustList)
+        );
         assert_eq!(LinuxSyscall::from_number(257), Some(LinuxSyscall::OpenAt));
         assert_eq!(
             LinuxSyscall::from_number(294),

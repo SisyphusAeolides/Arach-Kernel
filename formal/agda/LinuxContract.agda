@@ -12,6 +12,7 @@ data Gate : Set where
   firmwareLoading moduleLifecycle : Gate
   sharedAddressSpaceClone sharedDescriptorTable distinctThreadIdentity perThreadTls : Gate
   privateFutexBlock clearChildTidWake : Gate
+  robustListRegistration ownerDeathPublication robustFutexWake : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -56,6 +57,14 @@ record ThreadWakeCertificate : Set where
     privateFutexBlockEvidence : Measurement privateFutexBlock
     clearChildTidWakeEvidence : Measurement clearChildTidWake
 
+record RobustExitCertificate : Set where
+  constructor robustExitCertificate
+  field
+    threadWake : ThreadWakeCertificate
+    robustListRegistrationEvidence : Measurement robustListRegistration
+    ownerDeathPublicationEvidence : Measurement ownerDeathPublication
+    robustFutexWakeEvidence : Measurement robustFutexWake
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -66,3 +75,8 @@ wakeRequiresSharedAddressSpace :
   ThreadWakeCertificate -> Measurement sharedAddressSpaceClone
 wakeRequiresSharedAddressSpace certificate =
   ThreadWakeCertificate.sharedAddressSpaceCloneEvidence certificate
+
+-- Robust recovery cannot be projected without the prior clone, identity,
+-- blocking, and clear-child-tid wake evidence.
+robustExitRequiresThreadWake : RobustExitCertificate -> ThreadWakeCertificate
+robustExitRequiresThreadWake certificate = RobustExitCertificate.threadWake certificate

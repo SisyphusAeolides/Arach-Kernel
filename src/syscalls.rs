@@ -1,5 +1,7 @@
 #[cfg(target_os = "none")]
 use core::sync::atomic::AtomicBool;
+#[cfg(target_os = "none")]
+use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 pub mod spectral_router;
 #[cfg(target_os = "none")]
@@ -467,6 +469,7 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         None => crate::arch::x86_64::halt(),
     };
     let _ = crate::linux_futex::cancel_wait(exiting);
+    recover_exiting_robust_list(exiting);
     if let Some(clear_child_tid) = crate::linux_thread::take_clear_child_tid(exiting) {
         if copy_value_to_user(clear_child_tid, &0_u32).is_ok() {
             let _ = crate::linux_futex::wake_current(clear_child_tid, 1);
@@ -728,6 +731,8 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
             crate::process::lifecycle::current_pid() as isize
         }
         Some(crate::process::abi::LinuxSyscall::SetTidAddress) => linux_set_tid_address(arguments),
+        Some(crate::process::abi::LinuxSyscall::SetRobustList) => linux_set_robust_list(arguments),
+        Some(crate::process::abi::LinuxSyscall::GetRobustList) => linux_get_robust_list(arguments),
         Some(crate::process::abi::LinuxSyscall::Getppid) => {
             let Some(handle) = crate::process::lifecycle::current_handle() else {
                 return -3;
@@ -797,9 +802,9 @@ fn linux_arch_prctl(arguments: [u64; 6]) -> isize {
 
 #[cfg(target_os = "none")]
 fn linux_set_tid_address(arguments: [u64; 6]) -> isize {
-    let owner = match current_akashic_owner() {
-        Ok(owner) => owner,
-        Err(error) => return error,
+    let owner = match crate::process::lifecycle::current_handle() {
+        Some(owner) => owner,
+        None => return ERROR_PERMISSION_DENIED,
     };
     match crate::linux_thread::set_tid_address(owner, arguments[0]) {
         Ok(tid) => tid as isize,
@@ -807,6 +812,116 @@ fn linux_set_tid_address(arguments: [u64; 6]) -> isize {
         Err(crate::linux_thread::ThreadIdentityError::InvalidAddress) => ERROR_INVALID_ARGUMENT,
         Err(crate::linux_thread::ThreadIdentityError::Capacity) => ERROR_TRY_AGAIN,
     }
+}
+
+#[cfg(target_os = "none")]
+fn linux_set_robust_list(arguments: [u64; 6]) -> isize {
+    let owner = match crate::process::lifecycle::current_handle() {
+        Some(owner) => owner,
+        None => return ERROR_PERMISSION_DENIED,
+    };
+    match crate::linux_robust::set_robust_list(owner, arguments[0], arguments[1]) {
+        Ok(()) => 0,
+        Err(crate::linux_robust::RobustListError::InvalidOwner) => ERROR_PERMISSION_DENIED,
+        Err(crate::linux_robust::RobustListError::InvalidAddress)
+        | Err(crate::linux_robust::RobustListError::InvalidLength) => ERROR_INVALID_ARGUMENT,
+        Err(crate::linux_robust::RobustListError::Capacity) => ERROR_TRY_AGAIN,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_get_robust_list(arguments: [u64; 6]) -> isize {
+    let owner = match crate::process::lifecycle::current_handle() {
+        Some(owner) => owner,
+        None => return ERROR_PERMISSION_DENIED,
+    };
+    if arguments[0] != 0 && arguments[0] != owner.pid as u64 {
+        return -3;
+    }
+    if validate_user_write_range(arguments[1], core::mem::size_of::<u64>()).is_err()
+        || validate_user_write_range(arguments[2], core::mem::size_of::<u64>()).is_err()
+    {
+        return ERROR_BAD_ADDRESS;
+    }
+    let head = crate::linux_robust::robust_list(owner)
+        .map(|registration| registration.head)
+        .unwrap_or(0);
+    let length = crate::linux_robust::ROBUST_LIST_HEAD_BYTES;
+    if copy_value_to_user(arguments[1], &head).is_err()
+        || copy_value_to_user(arguments[2], &length).is_err()
+    {
+        ERROR_BAD_ADDRESS
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "none")]
+fn read_user_u64(address: u64) -> Result<u64, UserCopyError> {
+    let mut encoded = [0_u8; core::mem::size_of::<u64>()];
+    copy_from_user(address, &mut encoded)?;
+    Ok(u64::from_ne_bytes(encoded))
+}
+
+#[cfg(target_os = "none")]
+fn mark_robust_owner_died(
+    address: u64,
+    owner_tid: u32,
+) -> Result<crate::linux_robust::OwnerDeathResult, UserCopyError> {
+    if address % core::mem::align_of::<AtomicU32>() as u64 != 0 {
+        return Err(UserCopyError::InvalidRange);
+    }
+    // SAFETY: Exit runs at a serialized syscall boundary while the exiting
+    // address space is still active and retained.
+    let root = unsafe { active_page_table_root() };
+    let physical = translate_user_address_for_write(root, address, read_active_entry)?;
+    if physical
+        .checked_add(core::mem::size_of::<u32>() as u64)
+        .ok_or(UserCopyError::UnmappedPhysicalMemory)?
+        > EARLY_MAPPED_PHYSICAL_LIMIT
+    {
+        return Err(UserCopyError::UnmappedPhysicalMemory);
+    }
+    let pointer = direct_map_address(physical).ok_or(UserCopyError::UnmappedPhysicalMemory)?
+        as *const AtomicU32;
+    // SAFETY: The user address and translated physical address are u32
+    // aligned, the writable mapping covers the complete word, and its page is
+    // retained for this non-preemptible exit operation.
+    let word = unsafe { &*pointer };
+    let mut observed = word.load(Ordering::Acquire);
+    loop {
+        let Some(replacement) = crate::linux_robust::owner_died_replacement(observed, owner_tid)
+        else {
+            return Ok(crate::linux_robust::OwnerDeathResult::default());
+        };
+        match word.compare_exchange_weak(observed, replacement, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(previous) => {
+                let wake_requested = previous & crate::linux_robust::FUTEX_WAITERS != 0;
+                if wake_requested {
+                    let _ = crate::linux_futex::wake_current(address, 1);
+                }
+                return Ok(crate::linux_robust::OwnerDeathResult {
+                    recovered: true,
+                    wake_requested,
+                });
+            }
+            Err(updated) => observed = updated,
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+fn recover_exiting_robust_list(owner: crate::process::lifecycle::ProcessHandle) {
+    let Some(registration) = crate::linux_robust::take_robust_list(owner) else {
+        return;
+    };
+    let _ = crate::linux_robust::recover_robust_list(
+        registration,
+        owner.pid,
+        read_user_u64,
+        mark_robust_owner_died,
+    );
 }
 
 #[cfg(target_os = "none")]

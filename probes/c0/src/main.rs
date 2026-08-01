@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 const PASS: &[u8] = b"ARACH_C0_RING3_SYSCALL_PASS\n";
 const THREAD_PASS: &[u8] = b"ARACH_C1_THREAD_FUTEX_PASS\n";
+const ROBUST_PASS: &[u8] = b"ARACH_C1_ROBUST_FUTEX_PASS\n";
 const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
 const PANIC: &[u8] = b"ARACH_C0_RING3_PANIC\n";
 
@@ -25,6 +26,8 @@ const SYS_GETPPID: usize = 110;
 const SYS_ARCH_PRCTL: usize = 158;
 const SYS_GETTID: usize = 186;
 const SYS_FUTEX: usize = 202;
+const SYS_SET_ROBUST_LIST: usize = 273;
+const SYS_GET_ROBUST_LIST: usize = 274;
 const SYS_CLOCK_GETTIME: usize = 228;
 const SYS_EXIT_GROUP: usize = 231;
 const SYS_EVENTFD2: usize = 290;
@@ -39,6 +42,8 @@ const EPOLLIN: u32 = 0x001;
 const EPOLL_CTL_ADD: usize = 1;
 const FUTEX_WAIT_PRIVATE: usize = 128;
 const FUTEX_WAKE_PRIVATE: usize = 129;
+const FUTEX_WAITERS: u32 = 0x8000_0000;
+const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
 const ARCH_SET_FS: usize = 0x1002;
 const ARCH_GET_FS: usize = 0x1003;
 
@@ -77,6 +82,29 @@ static THREAD_OBSERVED_TID: AtomicU32 = AtomicU32::new(0);
 static THREAD_OBSERVED_PID: AtomicU32 = AtomicU32::new(0);
 static THREAD_EVENT_FD: AtomicU32 = AtomicU32::new(0);
 static THREAD_DESCRIPTOR_WRITE: AtomicU32 = AtomicU32::new(0);
+
+#[repr(C)]
+struct RobustListHead {
+    next: usize,
+    futex_offset: isize,
+    list_op_pending: usize,
+}
+
+#[repr(C)]
+struct RobustNode {
+    next: usize,
+    futex: AtomicU32,
+}
+
+static mut ROBUST_HEAD: RobustListHead = RobustListHead {
+    next: 0,
+    futex_offset: 0,
+    list_op_pending: 0,
+};
+static mut ROBUST_NODE: RobustNode = RobustNode {
+    next: 0,
+    futex: AtomicU32::new(0),
+};
 
 core::arch::global_asm!(
     r#"
@@ -122,11 +150,76 @@ extern "C" fn thread_entry() -> isize {
     }
     THREAD_OBSERVED_TID.store(tid as u32, Ordering::Release);
     THREAD_OBSERVED_PID.store(pid as u32, Ordering::Release);
+    let head = core::ptr::addr_of_mut!(ROBUST_HEAD);
+    let node = core::ptr::addr_of_mut!(ROBUST_NODE);
+    let futex = unsafe { core::ptr::addr_of_mut!((*node).futex) };
+    // SAFETY: The child is the only task mutating these list links. The parent
+    // only touches the atomic futex word before blocking, and the objects stay
+    // mapped until the child exit walk has completed.
+    unsafe {
+        core::ptr::addr_of_mut!((*head).next).write(node as usize);
+        core::ptr::addr_of_mut!((*head).futex_offset)
+            .write((futex as usize - node as usize) as isize);
+        core::ptr::addr_of_mut!((*head).list_op_pending).write(0);
+        core::ptr::addr_of_mut!((*node).next).write(head as usize);
+    }
+    if unsafe {
+        linux_syscall3(
+            SYS_SET_ROBUST_LIST,
+            head as usize,
+            core::mem::size_of::<RobustListHead>(),
+            0,
+        )
+    } != 0
+    {
+        return 124;
+    }
+    let mut reported_head = 0_usize;
+    let mut reported_length = 0_usize;
+    if unsafe {
+        linux_syscall3(
+            SYS_GET_ROBUST_LIST,
+            0,
+            &mut reported_head as *mut _ as usize,
+            &mut reported_length as *mut _ as usize,
+        )
+    } != 0
+        || reported_head != head as usize
+        || reported_length != core::mem::size_of::<RobustListHead>()
+    {
+        return 123;
+    }
     let event_value = 1_u64;
     let eventfd = THREAD_EVENT_FD.load(Ordering::Acquire);
     let wrote = unsafe {
         // SAFETY: The descriptor was created by the group leader before the
         // clone, and event_value is live on the dedicated child stack.
+        linux_syscall3(
+            SYS_WRITE,
+            eventfd as usize,
+            &event_value as *const _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    };
+    if wrote != core::mem::size_of::<u64>() as isize {
+        return 125;
+    }
+    THREAD_DESCRIPTOR_WRITE.store(1, Ordering::Release);
+    0
+}
+
+extern "C" fn clear_tid_thread_entry() -> isize {
+    // SAFETY: Identity syscalls have scalar-only Linux x86-64 arguments.
+    let tid = unsafe { linux_syscall1(SYS_GETTID, 0) };
+    let pid = unsafe { linux_syscall1(SYS_GETPID, 0) };
+    if tid <= 0 || pid <= 0 || tid == pid {
+        return 126;
+    }
+    THREAD_OBSERVED_TID.store(tid as u32, Ordering::Release);
+    THREAD_OBSERVED_PID.store(pid as u32, Ordering::Release);
+    let event_value = 1_u64;
+    let eventfd = THREAD_EVENT_FD.load(Ordering::Acquire);
+    let wrote = unsafe {
         linux_syscall3(
             SYS_WRITE,
             eventfd as usize,
@@ -419,6 +512,12 @@ pub extern "C" fn _start() -> ! {
     THREAD_OBSERVED_TID.store(0, Ordering::Release);
     THREAD_OBSERVED_PID.store(0, Ordering::Release);
     THREAD_DESCRIPTOR_WRITE.store(0, Ordering::Release);
+    let robust_futex = unsafe {
+        // SAFETY: Taking the raw address creates no reference to the mutable
+        // static; atomic accesses synchronize the parent with exit recovery.
+        &*core::ptr::addr_of!(ROBUST_NODE.futex)
+    };
+    robust_futex.store(0, Ordering::Release);
     let thread_eventfd = unsafe { linux_syscall3(SYS_EVENTFD2, 0, 0, 0) };
     if thread_eventfd < 3 {
         fail();
@@ -451,8 +550,81 @@ pub extern "C" fn _start() -> ! {
     }
 
     // FUTEX_WAIT blocks the leader and is the only path that can schedule the
-    // new peer. SYS_EXIT clears the registered child TID and wakes this exact
-    // blocked generation before retiring the non-waitable TID slot.
+    // new peer. The child registers a robust list and exits while owning this
+    // exact word. Exit atomically publishes OWNER_DIED, wakes the leader, then
+    // clears child_tid before retiring the non-waitable TID slot.
+    let owned_robust_word = FUTEX_WAITERS | cloned as u32;
+    robust_futex.store(owned_robust_word, Ordering::Release);
+    if unsafe {
+        linux_syscall6(
+            SYS_FUTEX,
+            robust_futex as *const _ as usize,
+            FUTEX_WAIT_PRIVATE,
+            owned_robust_word as usize,
+            0,
+            0,
+            0,
+        )
+    } != 0
+    {
+        fail();
+    }
+    if THREAD_OBSERVED_TID.load(Ordering::Acquire) != cloned as u32
+        || THREAD_OBSERVED_PID.load(Ordering::Acquire) != pid as u32
+        || THREAD_DESCRIPTOR_WRITE.load(Ordering::Acquire) != 1
+        || THREAD_TID.load(Ordering::Acquire) != 0
+        || robust_futex.load(Ordering::Acquire) != FUTEX_WAITERS | FUTEX_OWNER_DIED
+    {
+        fail();
+    }
+    let mut thread_event_value = 0_u64;
+    if unsafe {
+        linux_syscall3(
+            SYS_READ,
+            thread_eventfd as usize,
+            &mut thread_event_value as *mut _ as usize,
+            core::mem::size_of::<u64>(),
+        )
+    } != core::mem::size_of::<u64>() as isize
+        || thread_event_value != 1
+    {
+        fail();
+    }
+    let wrote = unsafe {
+        linux_syscall3(
+            SYS_WRITE,
+            1,
+            ROBUST_PASS.as_ptr() as usize,
+            ROBUST_PASS.len(),
+        )
+    };
+    if wrote != ROBUST_PASS.len() as isize {
+        fail();
+    }
+
+    // Reuse the now-retired child stack for an independent clear-child-tid
+    // wake. This preserves the original measured contract while ensuring the
+    // robust wake above is not mistaken for clear-child-tid behavior.
+    THREAD_TID.store(0, Ordering::Release);
+    THREAD_OBSERVED_TID.store(0, Ordering::Release);
+    THREAD_OBSERVED_PID.store(0, Ordering::Release);
+    THREAD_DESCRIPTOR_WRITE.store(0, Ordering::Release);
+    let clear_tid_child = unsafe {
+        arach_clone_thread(
+            THREAD_CLONE_FLAGS,
+            stack_top,
+            tid_word,
+            tid_word,
+            0,
+            clear_tid_thread_entry,
+        )
+    };
+    if clear_tid_child <= 0
+        || clear_tid_child == pid
+        || THREAD_TID.load(Ordering::Acquire) != clear_tid_child as u32
+    {
+        fail();
+    }
     loop {
         let observed = THREAD_TID.load(Ordering::Acquire);
         if observed == 0 {
@@ -473,13 +645,13 @@ pub extern "C" fn _start() -> ! {
             fail();
         }
     }
-    if THREAD_OBSERVED_TID.load(Ordering::Acquire) != cloned as u32
+    if THREAD_OBSERVED_TID.load(Ordering::Acquire) != clear_tid_child as u32
         || THREAD_OBSERVED_PID.load(Ordering::Acquire) != pid as u32
         || THREAD_DESCRIPTOR_WRITE.load(Ordering::Acquire) != 1
     {
         fail();
     }
-    let mut thread_event_value = 0_u64;
+    thread_event_value = 0;
     if unsafe {
         linux_syscall3(
             SYS_READ,

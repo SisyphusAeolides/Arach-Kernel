@@ -30,17 +30,20 @@ containing all of the following evidence from the same bundle:
 - `ARACH_C0_RING3_SYSCALL_PASS` was emitted by the measured probe;
 - `ARACH_C1_THREAD_FUTEX_PASS` was emitted after shared descriptor access and
   cross-thread clear-child-tid futex wake completed;
+- `ARACH_C1_ROBUST_FUTEX_PASS` was emitted after exact robust-list registration,
+  private-futex block, atomic `OWNER_DIED` publication, and exit-driven wake;
 - `ARACH_C1_LINUX_SYSCALL_PASS` was emitted after the Linux personality
   exercised identity, anonymous memory, `brk`, shared-address-space clone,
-  shared descriptor access, private-futex block/wake, kernel clear-child-tid,
-  and clean thread/process exit.
+  shared descriptor access, independent private robust-futex and
+  clear-child-tid block/wake paths, kernel owner-death publication, and clean
+  thread/process exit.
 
 The execution gate is implemented in the Arach validation workflow: CI installs
 QEMU/OVMF, runs this helper against the freshly assembled image, and uploads
 the serial transcript. Revision `b396d3a7fc6538eacc60058d7067bebe9de43537`
 is the last qualified release before the Linux-personality probe was added.
-The next release must pass the complete workflow, including both measured
-markers. Future releases must keep this workflow green for their exact revision;
+The next release must pass the complete workflow, including every measured
+marker. Future releases must keep this workflow green for their exact revision;
 a host build or a missing local QEMU installation never counts as qualification.
 
 The image and execution helpers are now available:

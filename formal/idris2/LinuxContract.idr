@@ -28,6 +28,9 @@ data Gate
   | PerThreadTls
   | PrivateFutexBlock
   | ClearChildTidWake
+  | RobustListRegistration
+  | OwnerDeathPublication
+  | RobustFutexWake
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -77,6 +80,18 @@ record ThreadWakeCertificate where
   privateFutexBlock : Measurement PrivateFutexBlock
   clearChildTidWake : Measurement ClearChildTidWake
 
+||| Exit recovery extends the measured thread wake contract with exact
+||| registration, owner-death publication, and wake evidence. It is therefore
+||| impossible to claim robust recovery without the underlying shared-address-
+||| space and blocking guarantees.
+public export
+record RobustExitCertificate where
+  constructor MkRobustExitCertificate
+  threadWake : ThreadWakeCertificate
+  robustListRegistration : Measurement RobustListRegistration
+  ownerDeathPublication : Measurement OwnerDeathPublication
+  robustFutexWake : Measurement RobustFutexWake
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -88,3 +103,9 @@ public export
 wakeRequiresSharedAddressSpace :
   ThreadWakeCertificate -> Measurement SharedAddressSpaceClone
 wakeRequiresSharedAddressSpace certificate = certificate.sharedAddressSpaceClone
+
+||| Robust exit recovery structurally retains the complete prior thread wake
+||| certificate.
+public export
+robustExitRequiresThreadWake : RobustExitCertificate -> ThreadWakeCertificate
+robustExitRequiresThreadWake certificate = certificate.threadWake

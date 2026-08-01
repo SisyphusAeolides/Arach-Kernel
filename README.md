@@ -54,6 +54,9 @@ The Linux personality currently covers:
 - generation- and address-space-bound private futex `WAIT`/`WAKE` queues with
   an atomic compare-to-block scheduler transition and measured cross-thread
   clear-child-tid wake;
+- generation-bound `set_robust_list`/current-thread `get_robust_list`, a
+  2,048-link exit bound, atomic `OWNER_DIED` publication, and measured wake of
+  a private robust-futex waiter;
 - generation- and epoch-bound x86-64 FS-base TLS with Linux `arch_prctl`
   `ARCH_SET_FS`/`ARCH_GET_FS`, clone inheritance or `CLONE_SETTLS`, and hardware
   readback before every user return.
@@ -63,13 +66,13 @@ block-backed filesystem, and the current Linux descriptor families are not yet
 one collision-free unified descriptor namespace. The bounded clone admission
 accepts the shared VM/FS/files/sighand/thread/sysvsem profile plus TLS and TID
 publication flags; fork-like clone modes, leader exit with live peers, and
-multi-member `exit_group` fail closed. Robust-list recovery and signal delivery
-and return remain future compatibility slices.
+multi-member `exit_group` fail closed. PI and process-shared robust futexes,
+signal delivery, and signal return remain future compatibility slices.
 
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
-| Linux userspace compatibility | Identity, memory, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, a shared-address-space clone profile, measured cross-thread private-futex clear/wake, and per-thread FS-base TLS are implemented and tested | Add robust-list exit recovery, signal delivery, complete thread-group exit semantics, a unified descriptor namespace, and persistent storage |
+| Linux userspace compatibility | Identity, memory, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, a shared-address-space clone profile, measured private robust-futex owner-death recovery and clear-child-tid wake, and per-thread FS-base TLS are implemented and tested | Add signal delivery, complete thread-group exit semantics, a unified descriptor namespace, and persistent storage |
 | System bootstrap | The pinned Granite/Arach/Push C0 bundle executes under QEMU/OVMF and emits measured ring-3 syscall evidence | Promote the measured bootstrap into a native Push service graph and qualified COSMIC login/session path |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -79,12 +82,10 @@ and return remain future compatibility slices.
 The current critical path is:
 
 1. Keep the measured C0 QEMU/OVMF path green.
-2. Complete robust-list exit recovery for the measured shared-address-space
-   thread group.
-3. Add signal delivery/return, then expand thread-group exit semantics without
+2. Add signal delivery/return, then expand thread-group exit semantics without
    weakening generation isolation or per-thread TLS ownership.
-4. Unify Linux descriptor ownership and add persistent block-backed storage.
-5. Connect qualified modules and the native Push service graph to a complete
+3. Unify Linux descriptor ownership and add persistent block-backed storage.
+4. Connect qualified modules and the native Push service graph to a complete
    COSMIC session.
 
 Every status statement is evidence-based. A source build or host unit test is
