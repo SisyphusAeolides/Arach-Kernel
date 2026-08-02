@@ -80,7 +80,8 @@ runpath_flags=(
     -L"$(dirname -- "$core_output")" --no-as-needed \
     -l:libarach-core.so
 "$ld_bin" -shared -nostdlib -Bsymbolic --hash-style=sysv -z noexecstack \
-    -z now "${runpath_flags[@]}" -soname libarach-probe.so \
+    -z now -z pack-relative-relocs "${runpath_flags[@]}" \
+    -soname libarach-probe.so \
     -fini arach_root_finish \
     --version-script="$root/probes/shared-object/root.map" \
     -T "$root/probes/shared-object/linker.ld" \
@@ -100,10 +101,14 @@ test -z "$(readelf -dW "$output" | awk '$2 == "(RPATH)" {print}')"
 mapfile -t root_dependencies < <(readelf -dW "$output" | awk '$2 == "(NEEDED)" {print $5}')
 test "${root_dependencies[*]}" = '[libarach-provider.so] [libarach-observer.so]'
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 5
-test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 2
+test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 0
+test "$(readelf -dW "$output" | awk '$2 == "(RELR)" {count++} END {print count + 0}')" -eq 1
+test "$(readelf -dW "$output" | awk '$2 == "(RELRSZ)" {print $3}')" -eq 16
+test "$(readelf -dW "$output" | awk '$2 == "(RELRENT)" {print $3}')" -eq 8
+test "$(readelf -rW "$output" | awk '$3 ~ /[.]relr[.]dyn/ {entries = $8; locations = $12} END {print entries, locations}')" = '2 2'
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_GLOB_DAT" {count++} END {print count + 0}')" -eq 3
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_64" {count++} END {print count + 0}')" -eq 4
-test -z "$(readelf -rW "$output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" && $3 != "R_X86_64_GLOB_DAT" && $3 != "R_X86_64_64" {print}')"
+test -z "$(readelf -rW "$output" | awk '$3 ~ /^R_X86_64_/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_GLOB_DAT" && $3 != "R_X86_64_64" {print}')"
 test "$(readelf -dW "$output" | awk '$2 == "(INIT_ARRAYSZ)" {print $3}')" -eq 8
 test "$(readelf -dW "$output" | awk '$2 == "(FINI_ARRAYSZ)" {print $3}')" -eq 8
 test "$(readelf -dW "$output" | awk '$2 == "(FINI)" {count++} END {print count + 0}')" -eq 1

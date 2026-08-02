@@ -103,6 +103,11 @@ data Gate
   | BoundedAbsoluteSymbolAddend
   | FirstDefinitionWeakAbsoluteBinding
   | UnresolvedWeakAbsoluteZero
+  | PackedRelativeRelocation
+  | BoundedPackedRelativeDecoding
+  | CanonicalPackedRelativeOrder
+  | DisjointPackedRelativeTargets
+  | ImmutablePackedRelativeTable
   | DirectoryCreation
   | CanonicalRunpath
   | RunpathDependencySearch
@@ -344,8 +349,9 @@ record MultiObjectGraphCertificate where
 ||| runpaths, direct-dependency search, one finite Variant-II TLS arena,
 ||| checked static and general-dynamic relocations, Linux-compatible weak
 ||| function and data binding, bounded eager global-data and absolute-symbol
-||| relocation, checked interior object addends, a bounded dynamic-thread
-||| vector, one exact resolver boundary, and dependency-first initialization.
+||| relocation, checked interior object addends, bounded canonical packed
+||| relative decoding with disjoint targets, a bounded dynamic-thread vector,
+||| one exact resolver boundary, and dependency-first initialization.
 public export
 record RuntimeInitializationCertificate where
   constructor MkRuntimeInitializationCertificate
@@ -363,6 +369,11 @@ record RuntimeInitializationCertificate where
   firstDefinitionWeakAbsoluteBinding :
     Measurement FirstDefinitionWeakAbsoluteBinding
   unresolvedWeakAbsoluteZero : Measurement UnresolvedWeakAbsoluteZero
+  packedRelativeRelocation : Measurement PackedRelativeRelocation
+  boundedPackedRelativeDecoding : Measurement BoundedPackedRelativeDecoding
+  canonicalPackedRelativeOrder : Measurement CanonicalPackedRelativeOrder
+  disjointPackedRelativeTargets : Measurement DisjointPackedRelativeTargets
+  immutablePackedRelativeTable : Measurement ImmutablePackedRelativeTable
   staticTlsLayout : Measurement StaticTlsLayout
   tlsRelocation : Measurement TlsRelocation
   dynamicTlsVector : Measurement DynamicTlsVector

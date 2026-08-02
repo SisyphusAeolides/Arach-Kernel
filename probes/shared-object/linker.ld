@@ -23,6 +23,7 @@ SECTIONS
     .gnu.version : { *(.gnu.version) } :rodata
     .gnu.version_d : { *(.gnu.version_d) } :rodata
     .gnu.version_r : { *(.gnu.version_r) } :rodata
+    .relr.dyn : { *(.relr.dyn) } :rodata
     .rela.dyn : { *(.rela.dyn) } :rodata
     .rela.plt : { *(.rela.plt) } :rodata
     .dynamic : { *(.dynamic) } :rodata :dynamic

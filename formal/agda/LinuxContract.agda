@@ -41,6 +41,9 @@ data Gate : Set where
   unresolvedWeakDataZero : Gate
   absoluteSymbolRelocation boundedAbsoluteSymbolAddend : Gate
   firstDefinitionWeakAbsoluteBinding unresolvedWeakAbsoluteZero : Gate
+  packedRelativeRelocation boundedPackedRelativeDecoding : Gate
+  canonicalPackedRelativeOrder disjointPackedRelativeTargets : Gate
+  immutablePackedRelativeTable : Gate
   directoryCreation canonicalRunpath runpathDependencySearch : Gate
   staticTlsLayout tlsRelocation dynamicTlsVector tlsResolver : Gate
   generalDynamicTlsAccess initializerOrder : Gate
@@ -236,6 +239,15 @@ record RuntimeInitializationCertificate : Set where
       Measurement firstDefinitionWeakAbsoluteBinding
     unresolvedWeakAbsoluteZeroEvidence :
       Measurement unresolvedWeakAbsoluteZero
+    packedRelativeRelocationEvidence : Measurement packedRelativeRelocation
+    boundedPackedRelativeDecodingEvidence :
+      Measurement boundedPackedRelativeDecoding
+    canonicalPackedRelativeOrderEvidence :
+      Measurement canonicalPackedRelativeOrder
+    disjointPackedRelativeTargetsEvidence :
+      Measurement disjointPackedRelativeTargets
+    immutablePackedRelativeTableEvidence :
+      Measurement immutablePackedRelativeTable
     staticTlsLayoutEvidence : Measurement staticTlsLayout
     tlsRelocationEvidence : Measurement tlsRelocation
     dynamicTlsVectorEvidence : Measurement dynamicTlsVector
@@ -366,8 +378,9 @@ multiObjectGraphRequiresDependencyGraph certificate =
 
 -- Runtime initialization structurally retains bounded closure, provider-first
 -- relocation, and deterministic process-global symbol scope before adding
--- directory, runpath, weak-function/data, eager global-data and checked
--- absolute-symbol relocation, TLS, resolver, and initializer evidence.
+-- directory, runpath, weak-function/data, eager global-data, checked
+-- absolute-symbol relocation, bounded packed-relative decoding, TLS,
+-- resolver, and initializer evidence.
 runtimeInitializationRequiresMultiObjectGraph :
   RuntimeInitializationCertificate -> MultiObjectGraphCertificate
 runtimeInitializationRequiresMultiObjectGraph certificate =

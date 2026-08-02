@@ -126,6 +126,8 @@ enum {
     MAXIMUM_RUNPATH_STRING_BYTES = 255,
     MAXIMUM_SYMBOL_NAME_BYTES = 127,
     MAXIMUM_RELOCATIONS = 64,
+    MAXIMUM_PACKED_RELOCATION_ENTRIES = 128,
+    MAXIMUM_PACKED_RELOCATIONS = 8192,
     MAXIMUM_INITIALIZERS = 16,
     MAXIMUM_VERSION_DEFINITIONS = 16,
     MAXIMUM_VERSION_REQUIREMENTS = 16,
@@ -157,6 +159,8 @@ static const char graph_marker[] = "ARACH_C2_DEPENDENCY_GRAPH_PASS\n";
 static const char multi_object_marker[] =
     "ARACH_C2_MULTI_OBJECT_GRAPH_PASS\n";
 static const char relocation_marker[] = "ARACH_C2_SHARED_RELOCATION_PASS\n";
+static const char packed_relative_marker[] =
+    "ARACH_C2_PACKED_RELATIVE_PASS\n";
 static const char symbol_scope_marker[] =
     "ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS\n";
 static const char weak_binding_marker[] = "ARACH_C2_WEAK_BINDING_PASS\n";
@@ -186,6 +190,8 @@ static const char shared_dynamic_failure[] = "ARACH_C2_LINKER_SHARED_DYNAMIC_FAI
 static const char shared_graph_failure[] = "ARACH_C2_LINKER_SHARED_GRAPH_FAIL\n";
 static const char shared_relocation_failure[] =
     "ARACH_C2_LINKER_SHARED_RELOCATION_FAIL\n";
+static const char shared_packed_relative_failure[] =
+    "ARACH_C2_LINKER_PACKED_RELATIVE_FAIL\n";
 static const char shared_external_failure[] =
     "ARACH_C2_LINKER_SHARED_EXTERNAL_FAIL\n";
 static const char shared_weak_binding_failure[] =
@@ -319,6 +325,7 @@ typedef struct {
     uintptr_t string_table;
     uintptr_t symbol_table;
     uintptr_t relocations;
+    uintptr_t packed_relocations;
     uintptr_t jump_relocations;
     uintptr_t plt_got;
     uintptr_t init_function;
@@ -330,6 +337,8 @@ typedef struct {
     uintptr_t version_requirements;
     size_t string_size;
     size_t relocation_size;
+    size_t packed_relocation_size;
+    size_t packed_relocation_entry_size;
     size_t jump_relocation_size;
     size_t relocation_entry_size;
     size_t symbol_entry_size;
@@ -398,6 +407,7 @@ typedef struct {
 
 typedef struct {
     size_t relative;
+    size_t packed_relative;
     size_t external;
     size_t data;
     size_t absolute;
@@ -976,6 +986,29 @@ static int mapped_range_contains(const MappedLoad *loads, size_t load_count,
     return 0;
 }
 
+static int mapped_range_is_immutable_data(const MappedLoad *loads,
+                                          size_t load_count,
+                                          uintptr_t address, size_t length) {
+    uintptr_t requested_end = 0;
+    if (!checked_range(address, length, &requested_end)) {
+        return 0;
+    }
+    for (size_t index = 0; index < load_count; ++index) {
+        uintptr_t load_end = 0;
+        if (!checked_range(loads[index].address, loads[index].memory_size,
+                           &load_end)) {
+            return 0;
+        }
+        if (address >= loads[index].address && requested_end <= load_end &&
+            (loads[index].flags & PROGRAM_READABLE) != 0 &&
+            (loads[index].flags &
+             (uint32_t)(PROGRAM_WRITABLE | PROGRAM_EXECUTABLE)) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int tls_program_matches_load(const LoadedObject *object,
                                     const Elf64ProgramHeader *tls) {
     for (size_t index = 0; index < object->header->program_header_count;
@@ -1064,6 +1097,7 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->string_table = 0;
     result->symbol_table = 0;
     result->relocations = 0;
+    result->packed_relocations = 0;
     result->jump_relocations = 0;
     result->plt_got = 0;
     result->init_function = 0;
@@ -1075,6 +1109,8 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->version_requirements = 0;
     result->string_size = 0;
     result->relocation_size = 0;
+    result->packed_relocation_size = 0;
+    result->packed_relocation_entry_size = 0;
     result->jump_relocation_size = 0;
     result->relocation_entry_size = 0;
     result->symbol_entry_size = 0;
@@ -1189,6 +1225,29 @@ static int parse_shared_dynamic(LoadedObject *object) {
                 return 0;
             }
             result->relocation_entry_size = (size_t)dynamic[index].value;
+            break;
+        case DYNAMIC_RELR:
+            if (result->packed_relocations != 0 ||
+                !checked_add(object->base, dynamic[index].value, &pointer)) {
+                return 0;
+            }
+            result->packed_relocations = pointer;
+            break;
+        case DYNAMIC_RELR_SIZE:
+            if (result->packed_relocation_size != 0 ||
+                dynamic[index].value == 0 || dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->packed_relocation_size =
+                (size_t)dynamic[index].value;
+            break;
+        case DYNAMIC_RELR_ENTRY:
+            if (result->packed_relocation_entry_size != 0 ||
+                dynamic[index].value == 0 || dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->packed_relocation_entry_size =
+                (size_t)dynamic[index].value;
             break;
         case DYNAMIC_SYMBOL_ENTRY:
             if (result->symbol_entry_size != 0 ||
@@ -1359,9 +1418,6 @@ static int parse_shared_dynamic(LoadedObject *object) {
         case DYNAMIC_RPATH:
         case DYNAMIC_PREINIT_ARRAY:
         case DYNAMIC_PREINIT_ARRAY_SIZE:
-        case DYNAMIC_RELR_SIZE:
-        case DYNAMIC_RELR:
-        case DYNAMIC_RELR_ENTRY:
             return 0;
         default:
             return 0;
@@ -1477,6 +1533,22 @@ static int parse_shared_dynamic(LoadedObject *object) {
     }
     if (result->has_relative_count &&
         result->relative_count > result->relocation_size / sizeof(Elf64Rela)) {
+        return 0;
+    }
+    int has_packed_relocations = result->packed_relocations != 0 ||
+                                 result->packed_relocation_size != 0 ||
+                                 result->packed_relocation_entry_size != 0;
+    if (has_packed_relocations &&
+        (result->packed_relocations == 0 ||
+         result->packed_relocation_size == 0 ||
+         result->packed_relocation_entry_size != sizeof(uintptr_t) ||
+         result->packed_relocations % _Alignof(uintptr_t) != 0 ||
+         result->packed_relocation_size % sizeof(uintptr_t) != 0 ||
+         result->packed_relocation_size / sizeof(uintptr_t) >
+             MAXIMUM_PACKED_RELOCATION_ENTRIES ||
+         !mapped_range_is_immutable_data(object->loads, object->load_count,
+                                         result->packed_relocations,
+                                         result->packed_relocation_size))) {
         return 0;
     }
     int has_jump_relocations = result->jump_relocations != 0 ||
@@ -2643,6 +2715,169 @@ static int install_static_tls(ObjectGraph *graph, StaticTlsLayout *layout) {
     return 1;
 }
 
+static int packed_relocation_metadata_valid(const LoadedObject *object,
+                                            int *present) {
+    const SharedDynamic *dynamic = &object->dynamic;
+    int has_packed_relocations = dynamic->packed_relocations != 0 ||
+                                 dynamic->packed_relocation_size != 0 ||
+                                 dynamic->packed_relocation_entry_size != 0;
+    *present = has_packed_relocations;
+    if (!has_packed_relocations) {
+        return 1;
+    }
+    return dynamic->packed_relocations != 0 &&
+           dynamic->packed_relocation_size != 0 &&
+           dynamic->packed_relocation_entry_size == sizeof(uintptr_t) &&
+           dynamic->packed_relocations % _Alignof(uintptr_t) == 0 &&
+           dynamic->packed_relocation_size % sizeof(uintptr_t) == 0 &&
+           dynamic->packed_relocation_size / sizeof(uintptr_t) <=
+               MAXIMUM_PACKED_RELOCATION_ENTRIES &&
+           mapped_range_is_immutable_data(object->loads, object->load_count,
+                                          dynamic->packed_relocations,
+                                          dynamic->packed_relocation_size);
+}
+
+static int packed_relocation_target_is_unique(const LoadedObject *object,
+                                              uint64_t offset) {
+    const SharedDynamic *dynamic = &object->dynamic;
+    if (dynamic->relocation_size % sizeof(Elf64Rela) != 0 ||
+        dynamic->jump_relocation_size % sizeof(Elf64Rela) != 0 ||
+        (dynamic->relocation_size != 0 && dynamic->relocations == 0) ||
+        (dynamic->jump_relocation_size != 0 &&
+         dynamic->jump_relocations == 0) ||
+        dynamic->relocation_size / sizeof(Elf64Rela) >
+            MAXIMUM_RELOCATIONS ||
+        dynamic->jump_relocation_size / sizeof(Elf64Rela) >
+            MAXIMUM_RELOCATIONS) {
+        return 0;
+    }
+    const Elf64Rela *relocations =
+        (const Elf64Rela *)dynamic->relocations;
+    size_t relocation_count =
+        dynamic->relocation_size / sizeof(Elf64Rela);
+    for (size_t index = 0; index < relocation_count; ++index) {
+        if (relocations[index].offset == offset) {
+            return 0;
+        }
+    }
+    const Elf64Rela *jump_relocations =
+        (const Elf64Rela *)dynamic->jump_relocations;
+    size_t jump_relocation_count =
+        dynamic->jump_relocation_size / sizeof(Elf64Rela);
+    for (size_t index = 0; index < jump_relocation_count; ++index) {
+        if (jump_relocations[index].offset == offset) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int process_packed_relative_target(const LoadedObject *object,
+                                          uint64_t offset, int apply,
+                                          size_t *decoded) {
+    uintptr_t target = 0;
+    if (*decoded == MAXIMUM_PACKED_RELOCATIONS ||
+        offset % sizeof(uintptr_t) != 0 ||
+        !packed_relocation_target_is_unique(object, offset) ||
+        !checked_add(object->base, offset, &target) ||
+        target % _Alignof(uintptr_t) != 0 ||
+        !mapped_range_contains(object->loads, object->load_count, target,
+                               sizeof(uintptr_t), PROGRAM_WRITABLE)) {
+        return 0;
+    }
+    uintptr_t addend = *(volatile const uintptr_t *)target;
+    uintptr_t value = 0;
+    if (!checked_add(object->base, (uint64_t)addend, &value) ||
+        !mapped_range_contains(object->loads, object->load_count, value, 1,
+                               0)) {
+        return 0;
+    }
+    if (apply) {
+        *(volatile uintptr_t *)target = value;
+        if (*(volatile const uintptr_t *)target != value) {
+            return 0;
+        }
+    }
+    ++*decoded;
+    return 1;
+}
+
+static int walk_packed_relative_relocations(const LoadedObject *object,
+                                            int apply, size_t *decoded) {
+    int present = 0;
+    *decoded = 0;
+    if (!packed_relocation_metadata_valid(object, &present) || !present) {
+        return !present;
+    }
+    const uintptr_t *entries =
+        (const uintptr_t *)object->dynamic.packed_relocations;
+    size_t entry_count =
+        object->dynamic.packed_relocation_size / sizeof(*entries);
+    uint64_t cursor = 0;
+    int has_cursor = 0;
+    for (size_t index = 0; index < entry_count; ++index) {
+        uint64_t entry = (uint64_t)entries[index];
+        if ((entry & UINT64_C(1)) == 0) {
+            if (entry % sizeof(uintptr_t) != 0 ||
+                (has_cursor && entry < cursor) ||
+                !process_packed_relative_target(object, entry, apply,
+                                                decoded) ||
+                entry > UINT64_MAX - sizeof(uintptr_t)) {
+                return 0;
+            }
+            cursor = entry + sizeof(uintptr_t);
+            has_cursor = 1;
+            continue;
+        }
+        uint64_t bitmap = entry >> 1;
+        if (!has_cursor || bitmap == 0) {
+            return 0;
+        }
+        for (size_t bit = 0; bit < 63; ++bit) {
+            if ((bitmap & (UINT64_C(1) << bit)) == 0) {
+                continue;
+            }
+            uint64_t delta = (uint64_t)bit * sizeof(uintptr_t);
+            uint64_t offset = 0;
+            if (delta > UINT64_MAX - cursor) {
+                return 0;
+            }
+            offset = cursor + delta;
+            if (!process_packed_relative_target(object, offset, apply,
+                                                decoded)) {
+                return 0;
+            }
+        }
+        uint64_t bitmap_span = UINT64_C(63) * sizeof(uintptr_t);
+        if (bitmap_span > UINT64_MAX - cursor) {
+            return 0;
+        }
+        cursor += bitmap_span;
+    }
+    return *decoded != 0;
+}
+
+static int apply_packed_relative_relocations(
+    const LoadedObject *object, RelocationEvidence *evidence) {
+    size_t validated = 0;
+    size_t applied = 0;
+    int present = 0;
+    if (!packed_relocation_metadata_valid(object, &present)) {
+        return 0;
+    }
+    if (!present) {
+        return 1;
+    }
+    if (!walk_packed_relative_relocations(object, 0, &validated) ||
+        !walk_packed_relative_relocations(object, 1, &applied) ||
+        validated != applied) {
+        return 0;
+    }
+    evidence->relative += applied;
+    evidence->packed_relative += applied;
+    return 1;
+}
+
 static int apply_object_relocations(ObjectGraph *graph, size_t object_index,
                                     const StaticTlsLayout *tls_layout,
                                     RelocationEvidence *evidence) {
@@ -2650,6 +2885,11 @@ static int apply_object_relocations(ObjectGraph *graph, size_t object_index,
         return 0;
     }
     const LoadedObject *object = &graph->objects[object_index];
+    size_t packed_relative_count = 0;
+    if (!walk_packed_relative_relocations(object, 0,
+                                          &packed_relative_count)) {
+        return 0;
+    }
     const Elf64Rela *relocations =
         (const Elf64Rela *)object->dynamic.relocations;
     size_t count = object->dynamic.relocation_size / sizeof(*relocations);
@@ -2947,7 +3187,7 @@ static int apply_object_relocations(ObjectGraph *graph, size_t object_index,
             ++evidence->versioned;
         }
     }
-    return 1;
+    return apply_packed_relative_relocations(object, evidence);
 }
 
 static int find_exported_symbol_versioned(
@@ -3225,6 +3465,7 @@ static int relocate_graph(ObjectGraph *graph,
                           const StaticTlsLayout *tls_layout,
                           RelocationEvidence *evidence) {
     evidence->relative = 0;
+    evidence->packed_relative = 0;
     evidence->external = 0;
     evidence->data = 0;
     evidence->absolute = 0;
@@ -3873,6 +4114,12 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
         !write_marker(relocation_marker, sizeof(relocation_marker) - 1)) {
         fail_with(shared_relocation_failure,
                   sizeof(shared_relocation_failure) - 1);
+    }
+    if (evidence.packed_relative != 2 ||
+        !write_marker(packed_relative_marker,
+                      sizeof(packed_relative_marker) - 1)) {
+        fail_with(shared_packed_relative_failure,
+                  sizeof(shared_packed_relative_failure) - 1);
     }
     if (!write_marker(symbol_scope_marker,
                       sizeof(symbol_scope_marker) - 1)) {

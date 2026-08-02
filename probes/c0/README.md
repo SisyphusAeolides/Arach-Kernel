@@ -59,7 +59,9 @@ with bounded argv and environment vectors. The interpreter emits
 `ARACH_C2_RUNTIME_LINKER_ENTER`, validates the Linux auxiliary vector,
 discovers the closure breadth-first, coalesces both middle dependencies onto
 one core snapshot, rejects cycles, applies provider-first relocation, and
-packs and installs one startup TLS template. It publishes a bounded
+decodes the root's canonical `DT_RELR` address/bitmap pair into two disjoint
+initializer/finalizer writes only after a bounded validation pass. It packs
+and installs one startup TLS template. It publishes a bounded
 dynamic-thread vector at `FS:8`, applies one real `R_X86_64_TPOFF64` plus one
 real `R_X86_64_DTPMOD64`/`R_X86_64_DTPOFF64` pair, and resolves seven
 exact-version external PLT symbols through deterministic global scope. One
@@ -86,6 +88,7 @@ It seals all objects and executes four dependency-first initializers. It
 emits `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_RUNPATH_PASS`,
 `ARACH_C2_SHARED_RELOCATION_PASS`,
+`ARACH_C2_PACKED_RELATIVE_PASS`,
 `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_WEAK_BINDING_PASS`,
 `ARACH_C2_GLOBAL_DATA_PASS`,
 `ARACH_C2_ABSOLUTE_SYMBOL_PASS`,
@@ -102,8 +105,7 @@ reaches the two-image replacement, and deferred reclamation does not destroy
 the new hierarchy. The admitted graph remains bounded to eight startup objects
 and does not claim late `dlopen` TLS allocation, TLSDESC, `DT_RPATH`,
 `$ORIGIN`, environment/cache/hwcaps search, weak TLS binding, broader data
-relocation forms, GNU-unique or IFUNC binding, packed relative relocation, or
-lazy binding.
+relocation forms, GNU-unique or IFUNC binding, or lazy binding.
 Directory admission is limited to the ephemeral Akashic namespace and an exact
 0755 request; general Unix mode persistence, ownership, ACLs, and umask
 semantics remain outside this gate.

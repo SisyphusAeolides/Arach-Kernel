@@ -89,8 +89,12 @@ The Linux personality currently covers:
   `R_X86_64_JUMP_SLOT` bindings through deterministic SysV symbol scope,
   including first-definition weak function lookup and unversioned unresolved
   weak references written as zero. The
-  measured four-object diamond applies nine real `R_X86_64_RELATIVE` writes,
-  installs one `R_X86_64_TPOFF64` and one
+  measured four-object diamond applies nine relative writes: seven explicit
+  `R_X86_64_RELATIVE` entries plus two root initializer/finalizer pointers
+  decoded from one canonical `DT_RELR` address/bitmap pair. Packed decoding is
+  two-pass and bounds entry count, expanded writes, ordering, overlap,
+  alignment, final-writable targets, mapped implicit addends, and arithmetic.
+  The graph installs one `R_X86_64_TPOFF64` and one
   `R_X86_64_DTPMOD64`/`R_X86_64_DTPOFF64` pair into a bounded Variant-II
   startup TLS arena, publishes a finite dynamic-thread vector at `FS:8`, and
   admits only the exact compiler-generated `__tls_get_addr` resolver edge.

@@ -211,6 +211,7 @@ The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_RUNPATH_PASS`,
 `ARACH_C2_SHARED_RELOCATION_PASS`,
+`ARACH_C2_PACKED_RELATIVE_PASS`,
 `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_WEAK_BINDING_PASS`,
 `ARACH_C2_GLOBAL_DATA_PASS`,
 `ARACH_C2_ABSOLUTE_SYMBOL_PASS`,
@@ -281,6 +282,20 @@ function with no definition is written as zero; an unresolved global or
 explicitly versioned weak reference fails the transaction. Every written slot
 is read back.
 
+An object may additionally carry one complete `DT_RELR`/`DT_RELRSZ`/
+`DT_RELRENT` triplet. The table must reside entirely in one immutable R-only
+load, is naturally aligned, contains at most 128 eight-byte entries, and may
+expand to at most 8,192 writes. Decoding requires
+an aligned address entry before any bitmap, rejects empty bitmaps, and admits
+only monotonically increasing canonical address/bitmap streams. A validation
+pass proves every expanded target is aligned and final-writable, every
+implicit addend produces a mapped in-object address under checked base
+addition, and no packed target overlaps another packed write, `.rela.dyn`, or
+`.rela.plt`. Only then does a second pass write and read back each value. A
+partial triplet, malformed size, overflow, descending stream, duplicate,
+unmapped addend, nonwritable target, or cross-table overlap fails closed before
+the first packed write.
+
 Eager `R_X86_64_GLOB_DAT` entries in `.rela.dyn` admit undefined
 default-visible global `STT_OBJECT` references and weak `STT_OBJECT` or GNU
 `STT_NOTYPE` references with zero addends. Definitions must be bounded,
@@ -344,7 +359,7 @@ one-shot finalization plan containing each optional `DT_FINI`, at most 16
 plan's callback in x86-64 process-entry register `RDX`. The main image invokes
 that callback once; objects run in reverse dependency order, each finalization
 array runs in reverse index order, and `DT_FINI` follows its array.
-Preinitializers, lazy binding, `DT_REL`, `DT_RELR`, text relocations,
+Preinitializers, lazy binding, `DT_REL`, text relocations,
 `DT_RPATH`, `$ORIGIN`, environment/cache/hwcaps search, weak TLS symbols,
 unresolved versioned weak symbols, `R_X86_64_COPY`, GNU-unique and IFUNC
 binding, version inheritance, and unknown dynamic tags remain rejected.
@@ -353,10 +368,12 @@ The measured fixture is the four-object diamond `libarach-probe.so` to
 `libarach-provider.so` and `libarach-observer.so`, with both middle objects
 depending on `libarach-core.so`. Breadth-first order is probe, provider,
 observer, core; the core is snapshotted once and relocation order is core,
-provider, observer, probe. The core contributes three relative relocations and
-one `R_X86_64_TPOFF64`; each other object contributes one initializer and one
-finalizer-array relocation. The middle objects contribute two versioned object
-PLT edges each and the root contributes three versioned plus two unversioned
+provider, observer, probe. The core contributes three explicit relative
+relocations and one `R_X86_64_TPOFF64`; each middle object contributes one
+initializer and one finalizer-array relocation. The root packs its initializer
+and finalizer-array pointers into one `DT_RELR` address/bitmap pair. The middle
+objects contribute two versioned object PLT edges each and the root contributes
+three versioned plus two unversioned
 weak edges; the provider adds the one unversioned resolver edge. The first weak
 edge selects the provider's earlier weak definition even though the observer
 exports a later strong definition. The second has no definition and is written
@@ -368,10 +385,10 @@ zero. Four root `R_X86_64_64` entries then bind one exact-version function
 pointer, one exact-version provider-vector pointer with an eight-byte interior
 addend, one weak object pointer through the earlier provider, and one
 unresolved weak `STT_NOTYPE` pointer as zero. Exact evidence therefore requires
-nine relative, three TLS, seventeen external, three global-data, four
-absolute-symbol, one bounded nonzero-addend, one resolved and one unresolved
-weak function, one resolved and one unresolved weak data, one resolved and one
-unresolved weak absolute edge, and thirteen versioned writes.
+nine relative, two packed-relative, three TLS, seventeen external, three
+global-data, four absolute-symbol, one bounded nonzero-addend, one resolved and
+one unresolved weak function, one resolved and one unresolved weak data, one
+resolved and one unresolved weak absolute edge, and thirteen versioned writes.
 
 After relocation, the linker changes every complete VMA to its declared R,
 RW, or RX permission and executes core, provider, observer, and root
@@ -402,14 +419,15 @@ function binding, unresolved weak-function-to-zero behavior, bounded global
 data relocation, first-definition weak-data binding, unresolved weak-data-zero
 behavior, bounded absolute-symbol relocation, interior-object addend bounds,
 first-definition weak absolute binding, unresolved weak-absolute-zero
-behavior, the finite startup TLS layout and DTV, checked TLS relocation and
-resolution, and initializer order while retaining the complete graph
-certificate. `RuntimeFinalizationCertificate` then requires bounded GNU
+behavior, bounded packed-relative relocation, canonical finite decoding,
+disjoint packed targets, immutable packed metadata, the finite startup TLS
+layout and DTV, checked TLS
+relocation and resolution, and initializer order while retaining the complete
+graph certificate. `RuntimeFinalizationCertificate` then requires bounded GNU
 version tables, exact version-and-provider resolution, the process-entry
 finalizer handoff, and reverse finalizer execution. This is not yet a general
 system linker: late dynamic TLS allocation, general search policy, weak TLS
-binding, GNU-unique and IFUNC binding, packed relative relocation, lazy
-binding, ASLR, general VMA
+binding, GNU-unique and IFUNC binding, lazy binding, ASLR, general VMA
 splitting, demand paging, and cryptographically qualified process entropy
 remain separate acceptance gates.
 

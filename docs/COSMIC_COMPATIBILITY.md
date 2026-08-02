@@ -139,9 +139,10 @@ exact bounded `DT_RUNPATH` entries load three providers from it while the root
 object remains at `/`. The measured diamond loads one consumer, two independent
 middle providers, and one coalesced core; it applies the core's real
 `R_X86_64_TPOFF64`, one real
-`R_X86_64_DTPMOD64`/`R_X86_64_DTPOFF64` pair, and nine real
-`R_X86_64_RELATIVE` writes. It resolves seven real exact-version object
-`R_X86_64_JUMP_SLOT` entries, the bounded `__tls_get_addr` edge, one
+`R_X86_64_DTPMOD64`/`R_X86_64_DTPOFF64` pair, seven explicit
+`R_X86_64_RELATIVE` writes, and two root relative writes decoded from a
+canonical `DT_RELR` address/bitmap pair. It resolves seven real exact-version
+object `R_X86_64_JUMP_SLOT` entries, the bounded `__tls_get_addr` edge, one
 first-definition weak-function edge, and one unresolved weak-function-to-zero
 edge. Three eager `R_X86_64_GLOB_DAT` writes bind one exact-version data
 object, select an earlier weak data definition over a later strong definition,
@@ -155,9 +156,8 @@ image later invokes the one-shot x86-64 finalizer callback, which executes four
 `DT_FINI_ARRAY` and four `DT_FINI` functions in reverse dependency order. The
 admitted slice remains single-threaded at exec and each Akashic file is bounded
 to 64 KiB. Late dynamic TLS allocation, `DT_RPATH`, `$ORIGIN`, environment or
-cache search, weak TLS, GNU-unique or IFUNC binding, packed relative
-relocation, lazy binding, general file mapping semantics, ASLR, and production
-entropy remain fail-closed.
+cache search, weak TLS, GNU-unique or IFUNC binding, lazy binding, general
+file mapping semantics, ASLR, and production entropy remain fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,
 filesystem context, descriptor ownership, signal-handler identity, and SysV

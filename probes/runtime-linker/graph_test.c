@@ -75,6 +75,16 @@ typedef struct {
 } AbsoluteRelocationFixture;
 
 typedef struct {
+    uint32_t hash[4];
+    Elf64Symbol symbols[1];
+    char strings[1];
+    uintptr_t packed_relocations[3];
+    Elf64Rela explicit_relocation;
+    uintptr_t targets[65];
+    uintptr_t destinations[5];
+} PackedRelativeFixture;
+
+typedef struct {
     uint32_t hash[5];
     Elf64Symbol symbols[2];
     char strings[64];
@@ -124,6 +134,7 @@ static int test_symbol_scope(void);
 static int test_weak_function_relocations(void);
 static int test_data_relocations(void);
 static int test_absolute_relocations(void);
+static int test_packed_relative_relocations(void);
 static int test_symbol_versions(void);
 static int test_tls_resolver_reference(void);
 static int test_weak_reference_version(void);
@@ -980,6 +991,325 @@ static int test_absolute_relocations(void) {
            consumer.targets[3] == UINTPTR_MAX;
 }
 
+static int prepare_packed_relative_object(LoadedObject *object,
+                                          PackedRelativeFixture *fixture) {
+    static const size_t target_indices[5] = {0, 1, 3, 63, 64};
+    zero_bytes((uint8_t *)object, sizeof(*object));
+    zero_bytes((uint8_t *)fixture, sizeof(*fixture));
+    fixture->hash[0] = 1;
+    fixture->hash[1] = 1;
+    for (size_t index = 0; index < 65; ++index) {
+        fixture->targets[index] = UINTPTR_MAX;
+    }
+    for (size_t index = 0; index < 5; ++index) {
+        fixture->destinations[index] =
+            UINT64_C(0x1111111111111111) * (index + 1);
+        fixture->targets[target_indices[index]] =
+            offsetof(PackedRelativeFixture, destinations) +
+            index * sizeof(fixture->destinations[0]);
+    }
+    fixture->packed_relocations[0] =
+        offsetof(PackedRelativeFixture, targets);
+    fixture->packed_relocations[1] = UINT64_C(1) |
+                                             (UINT64_C(1) << 1) |
+                                             (UINT64_C(1) << 3) |
+                                             (UINT64_C(1) << 63);
+    fixture->packed_relocations[2] =
+        offsetof(PackedRelativeFixture, targets) +
+        64 * sizeof(fixture->targets[0]);
+    object->base = (uintptr_t)fixture;
+    object->dynamic.hash = (uintptr_t)&fixture->hash[0];
+    object->dynamic.symbol_table = (uintptr_t)&fixture->symbols[0];
+    object->dynamic.string_table = (uintptr_t)&fixture->strings[0];
+    object->dynamic.string_size = sizeof(fixture->strings);
+    object->dynamic.packed_relocations =
+        (uintptr_t)&fixture->packed_relocations[0];
+    object->dynamic.packed_relocation_size =
+        sizeof(fixture->packed_relocations);
+    object->dynamic.packed_relocation_entry_size = sizeof(uintptr_t);
+    object->loads[0].address = (uintptr_t)fixture;
+    object->loads[0].memory_size =
+        offsetof(PackedRelativeFixture, packed_relocations);
+    object->loads[0].mapping_size = object->loads[0].memory_size;
+    object->loads[0].flags = PROGRAM_READABLE;
+    object->loads[1].address =
+        (uintptr_t)&fixture->packed_relocations[0];
+    object->loads[1].memory_size = sizeof(fixture->packed_relocations);
+    object->loads[1].mapping_size = object->loads[1].memory_size;
+    object->loads[1].flags = PROGRAM_READABLE;
+    object->loads[2].address = (uintptr_t)&fixture->explicit_relocation;
+    object->loads[2].memory_size = sizeof(fixture->explicit_relocation);
+    object->loads[2].mapping_size = object->loads[2].memory_size;
+    object->loads[2].flags = PROGRAM_READABLE;
+    object->loads[3].address = (uintptr_t)&fixture->targets[0];
+    object->loads[3].memory_size =
+        sizeof(fixture->targets) + sizeof(fixture->destinations);
+    object->loads[3].mapping_size = object->loads[3].memory_size;
+    object->loads[3].flags = PROGRAM_READABLE | PROGRAM_WRITABLE;
+    object->load_count = 4;
+    int present = 0;
+    return validate_dynamic_symbols(object) &&
+           packed_relocation_metadata_valid(object, &present) && present;
+}
+
+static int test_packed_relative_relocations(void) {
+    ObjectGraph graph;
+    LoadedObject object;
+    PackedRelativeFixture fixture;
+    StaticTlsLayout tls_layout;
+    RelocationEvidence evidence;
+    static const size_t target_indices[5] = {0, 1, 3, 63, 64};
+    zero_bytes((uint8_t *)&graph, sizeof(graph));
+    zero_bytes((uint8_t *)&tls_layout, sizeof(tls_layout));
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    graph.object_count = 1;
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    graph.objects[0] = object;
+    if (!apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        evidence.relative != 5 || evidence.packed_relative != 5 ||
+        evidence.external != 0) {
+        return 0;
+    }
+    for (size_t index = 0; index < 5; ++index) {
+        if (fixture.targets[target_indices[index]] !=
+            (uintptr_t)&fixture.destinations[index]) {
+            return 0;
+        }
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    fixture.explicit_relocation.offset =
+        offsetof(PackedRelativeFixture, targets) +
+        2 * sizeof(fixture.targets[0]);
+    fixture.explicit_relocation.information = RELOCATION_X86_64_RELATIVE;
+    fixture.explicit_relocation.addend =
+        (int64_t)(offsetof(PackedRelativeFixture, destinations) +
+                  4 * sizeof(fixture.destinations[0]));
+    fixture.targets[2] = UINTPTR_MAX;
+    object.dynamic.relocations =
+        (uintptr_t)&fixture.explicit_relocation;
+    object.dynamic.relocation_size = sizeof(fixture.explicit_relocation);
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (!apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[2] != (uintptr_t)&fixture.destinations[4] ||
+        evidence.relative != 6 || evidence.packed_relative != 5) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    uintptr_t original = fixture.targets[0];
+    fixture.packed_relocations[0] = UINT64_C(3);
+    object.dynamic.packed_relocation_size = sizeof(uintptr_t);
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    fixture.packed_relocations[1] = UINT64_C(1);
+    object.dynamic.packed_relocation_size = 2 * sizeof(uintptr_t);
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    fixture.packed_relocations[2] =
+        offsetof(PackedRelativeFixture, targets) +
+        2 * sizeof(fixture.targets[0]);
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    fixture.packed_relocations[1] = fixture.packed_relocations[0];
+    object.dynamic.packed_relocation_size = 2 * sizeof(uintptr_t);
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    fixture.packed_relocations[0] += 1;
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    fixture.packed_relocations[0] = sizeof(fixture);
+    object.dynamic.packed_relocation_size = sizeof(uintptr_t);
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    object.loads[3].flags = PROGRAM_READABLE;
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    object.loads[1].flags = PROGRAM_READABLE | PROGRAM_WRITABLE;
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    fixture.targets[0] = sizeof(fixture);
+    original = fixture.targets[0];
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    fixture.targets[0] = UINTPTR_MAX;
+    original = fixture.targets[0];
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    object.dynamic.packed_relocation_entry_size = sizeof(uint32_t);
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    object.dynamic.packed_relocation_size =
+        sizeof(fixture.packed_relocations) - 1;
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    object.dynamic.packed_relocation_size = 0;
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    object.dynamic.packed_relocations += 1;
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    fixture.explicit_relocation.offset =
+        offsetof(PackedRelativeFixture, targets);
+    fixture.explicit_relocation.information = RELOCATION_X86_64_RELATIVE;
+    fixture.explicit_relocation.addend =
+        (int64_t)offsetof(PackedRelativeFixture, destinations);
+    object.dynamic.relocations =
+        (uintptr_t)&fixture.explicit_relocation;
+    object.dynamic.relocation_size = sizeof(fixture.explicit_relocation);
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 0, &tls_layout, &evidence) ||
+        fixture.targets[0] != original) {
+        return 0;
+    }
+
+    if (!prepare_packed_relative_object(&object, &fixture)) {
+        return 0;
+    }
+    original = fixture.targets[0];
+    fixture.explicit_relocation.offset =
+        offsetof(PackedRelativeFixture, targets);
+    object.dynamic.jump_relocations =
+        (uintptr_t)&fixture.explicit_relocation;
+    object.dynamic.jump_relocation_size = sizeof(fixture.explicit_relocation);
+    graph.objects[0] = object;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    return !apply_object_relocations(&graph, 0, &tls_layout, &evidence) &&
+           fixture.targets[0] == original;
+}
+
 static int prepare_version_provider(LoadedObject *object,
                                     VersionProviderFixture *fixture,
                                     uintptr_t definition) {
@@ -1579,6 +1909,7 @@ int main(void) {
                    test_weak_function_relocations() &&
                    test_data_relocations() &&
                    test_absolute_relocations() &&
+                   test_packed_relative_relocations() &&
                    test_symbol_versions() &&
                    test_tls_resolver_reference() &&
                    test_weak_reference_version() &&

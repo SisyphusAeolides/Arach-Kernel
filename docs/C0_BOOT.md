@@ -85,9 +85,14 @@ containing all of the following evidence from the same bundle:
 - `ARACH_C2_RUNPATH_PASS` was emitted only after the probe created `/runpath`,
   three dependencies were opened from their exact nested paths through
   canonical direct-object `DT_RUNPATH` entries, and the root remained at `/`;
-- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after nine real relative
-  relocations, three real TLS relocations, and all seventeen eager external
-  relocations were written to final-writable targets and read back;
+- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after seven explicit and
+  two packed relative relocations, three real TLS relocations, and all
+  seventeen eager external relocations were written to final-writable targets
+  and read back;
+- `ARACH_C2_PACKED_RELATIVE_PASS` was emitted only after the root's canonical
+  `DT_RELR` address/bitmap pair expanded to exactly two disjoint writes, with
+  bounded two-pass decoding, checked implicit addends, and no overlap with
+  explicit or PLT relocation targets;
 - `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS` was emitted only after each undefined
   function was resolved through deterministic breadth-first SysV symbol scope;
 - `ARACH_C2_WEAK_BINDING_PASS` was emitted only after the first in-scope weak
