@@ -211,7 +211,7 @@ The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_RUNPATH_PASS`,
 `ARACH_C2_SHARED_RELOCATION_PASS`,
-`ARACH_C2_PACKED_RELATIVE_PASS`,
+`ARACH_C2_PACKED_RELATIVE_PASS`, `ARACH_C2_COPY_RELOCATION_PASS`,
 `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_WEAK_BINDING_PASS`,
 `ARACH_C2_GLOBAL_DATA_PASS`,
 `ARACH_C2_ABSOLUTE_SYMBOL_PASS`,
@@ -233,13 +233,23 @@ certificate.
 
 ### Bounded dependency and shared-object relocation
 
-The measured main PIE has exactly one `DT_NEEDED` root; the closure engine is
-bounded for up to eight roots and up to eight dependencies in each of eight
-shared objects. The main dynamic table may contain only `DT_NEEDED`,
-`DT_STRTAB`, `DT_STRSZ`, and `DT_NULL`. The runtime linker derives the main
-load bias from `AT_PHDR`, validates every dynamic pointer against a mapped
-main-image `PT_LOAD`, and accepts only canonical root-only SONAME components.
-It discovers the closure breadth-first, uses one object slot and immutable
+The measured main PIE has exactly one `DT_NEEDED` root and one versioned
+`R_X86_64_COPY`; the closure engine is bounded for up to eight roots and up to
+eight dependencies in each of eight shared objects. The runtime linker derives
+the main load bias from `AT_PHDR`, reconstructs the x86-64 ET_DYN header, and
+admits only `PT_LOAD`, `PT_PHDR`, the exact `PT_INTERP=/arach-ld.so`, and one
+R-only `PT_DYNAMIC`. At most eight disjoint page-aligned W^X load regions may
+occupy the first 64 KiB, and `AT_ENTRY` must lie in an executable region. The
+ELF header, program headers, and interpreter bytes must remain inside
+nonwritable main-image loads. The dynamic table, SysV hash, symbol/string
+tables, copy relocations, and optional GNU version requirement tables must
+remain inside nonwritable, non-executable loads. `DT_FLAGS_1` must be exactly
+`DF_1_PIE`;
+SONAME, runpath, symbolic, packed/PLT/relative relocation, initializer,
+finalizer, and version-definition state is rejected for the main image.
+
+Every main dependency is a canonical root-only SONAME component. The linker
+discovers the closure breadth-first, uses one object slot and immutable
 snapshot per SONAME, records every edge, and rejects duplicate edges within
 one object, capacity overflow, missing providers, SONAME mismatches,
 self-edges, and all other cycles. A bounded topological pass computes
@@ -295,6 +305,28 @@ addition, and no packed target overlaps another packed write, `.rela.dyn`, or
 partial triplet, malformed size, overflow, descending stream, duplicate,
 unmapped addend, nonwritable target, or cross-table overlap fails closed before
 the first packed write.
+
+The main executable's `.rela.dyn` may contain only `R_X86_64_COPY`. Dynamic
+symbol zero must be canonical; every other symbol must be one defined,
+default-visible global `STT_OBJECT` matched one-to-one with exactly one copy
+relocation at its own writable address. Individual extents are nonempty, all
+targets are pairwise disjoint, and their aggregate is bounded to 64 KiB.
+Unversioned symbols use ordinary process scope; an explicit GNU requirement
+must match both the provider SONAME and version definition. Resolution searches
+only the admitted shared-object graph and requires one readable provider object
+of exactly the same size. Source and destination ranges may not overlap. The
+linker resolves and bounds the complete batch before writing any byte, then
+copies and reads back each exact extent. Malformed metadata, a missing or
+wrong-sized provider, arithmetic overflow, overlapping targets, or source/
+destination aliasing therefore rejects the image before any copy byte is
+written.
+
+After the copy is installed, admitted main-executable copy objects precede
+ordinary shared objects in process-global data and absolute-object lookup. A
+requesting DSO carrying `DT_SYMBOLIC` still searches its own definitions first.
+The measured root uses that local preference to mutate its original provider
+object while the observer's new `GLOB_DAT` resolves to the independent main
+copy, making both the copy and its interposition visible at runtime.
 
 Eager `R_X86_64_GLOB_DAT` entries in `.rela.dyn` admit undefined
 default-visible global `STT_OBJECT` references and weak `STT_OBJECT` or GNU
@@ -361,8 +393,8 @@ that callback once; objects run in reverse dependency order, each finalization
 array runs in reverse index order, and `DT_FINI` follows its array.
 Preinitializers, lazy binding, `DT_REL`, text relocations,
 `DT_RPATH`, `$ORIGIN`, environment/cache/hwcaps search, weak TLS symbols,
-unresolved versioned weak symbols, `R_X86_64_COPY`, GNU-unique and IFUNC
-binding, version inheritance, and unknown dynamic tags remain rejected.
+unresolved versioned weak symbols, GNU-unique and IFUNC binding, version
+inheritance, and unknown dynamic tags remain rejected.
 
 The measured fixture is the four-object diamond `libarach-probe.so` to
 `libarach-provider.so` and `libarach-observer.so`, with both middle objects
@@ -381,14 +413,18 @@ as zero without being called. The root also contributes three `GLOB_DAT`
 edges: one exact-version provider object, one unversioned weak object that
 selects the provider's earlier weak definition over the observer's later
 strong definition, and one unresolved unversioned weak data slot written as
-zero. Four root `R_X86_64_64` entries then bind one exact-version function
+zero. The observer adds one `GLOB_DAT` reference to the root's 24-byte
+`arach_copy_source`; it resolves to the main executable's exact-version copy,
+while the `DT_SYMBOLIC` root retains its original definition. Four root
+`R_X86_64_64` entries then bind one exact-version function
 pointer, one exact-version provider-vector pointer with an eight-byte interior
 addend, one weak object pointer through the earlier provider, and one
 unresolved weak `STT_NOTYPE` pointer as zero. Exact evidence therefore requires
-nine relative, two packed-relative, three TLS, seventeen external, three
-global-data, four absolute-symbol, one bounded nonzero-addend, one resolved and
-one unresolved weak function, one resolved and one unresolved weak data, one
-resolved and one unresolved weak absolute edge, and thirteen versioned writes.
+nine relative, two packed-relative, one exact-size copy, three TLS, eighteen
+external, four global-data, four absolute-symbol, one bounded nonzero-addend,
+one resolved and one unresolved weak function, one resolved and one unresolved
+weak data, one resolved and one unresolved weak absolute edge, and fourteen
+versioned writes.
 
 After relocation, the linker changes every complete VMA to its declared R,
 RW, or RX permission and executes core, provider, observer, and root
@@ -397,9 +433,13 @@ four temporary mappings, resolves `arach_shared_probe` through the root's SysV
 table, and calls it. Execution measures the provider's first-scope weak result,
 crosses the callable root and middle-object PLT edges, consumes the provider's
 first-scope weak data, exact-version global data, relocated function pointer,
-and checked provider-vector interior pointer. It observes all three optional
-weak slots at zero before the core dereferences its relative-relocated pointer
-and FS-relative TLS word. Each dependent initializer
+checked provider-vector interior pointer, and the three-word executable copy.
+The root initializer mutates its `DT_SYMBOLIC` source only after the copy has
+been installed; the observer still reads the unchanged executable storage,
+which makes source/destination independence and main-object interposition
+observable. Execution also sees all three optional weak slots at zero before
+the core dereferences its relative-relocated pointer and FS-relative TLS word.
+Each dependent initializer
 records success only after observing its providers' state. After transfer to
 the main image, the callback executes root, observer, provider, and core
 finalizers; each array precedes that object's `DT_FINI`, and an eight-state TLS
@@ -420,7 +460,9 @@ data relocation, first-definition weak-data binding, unresolved weak-data-zero
 behavior, bounded absolute-symbol relocation, interior-object addend bounds,
 first-definition weak absolute binding, unresolved weak-absolute-zero
 behavior, bounded packed-relative relocation, canonical finite decoding,
-disjoint packed targets, immutable packed metadata, the finite startup TLS
+disjoint packed targets, immutable packed metadata, a bounded main-executable
+snapshot, exact copy relocation extents, disjoint copy targets and sources, a
+prevalidated copy batch, main-executable interposition, the finite startup TLS
 layout and DTV, checked TLS
 relocation and resolution, and initializer order while retaining the complete
 graph certificate. `RuntimeFinalizationCertificate` then requires bounded GNU

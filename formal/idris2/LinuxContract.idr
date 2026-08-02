@@ -108,6 +108,13 @@ data Gate
   | CanonicalPackedRelativeOrder
   | DisjointPackedRelativeTargets
   | ImmutablePackedRelativeTable
+  | BoundedMainExecutableSnapshot
+  | MainCopyRelocation
+  | ExactCopyExtent
+  | DisjointCopyTargets
+  | DisjointCopySource
+  | PrevalidatedCopyBatch
+  | MainExecutableInterposition
   | DirectoryCreation
   | CanonicalRunpath
   | RunpathDependencySearch
@@ -350,8 +357,10 @@ record MultiObjectGraphCertificate where
 ||| checked static and general-dynamic relocations, Linux-compatible weak
 ||| function and data binding, bounded eager global-data and absolute-symbol
 ||| relocation, checked interior object addends, bounded canonical packed
-||| relative decoding with disjoint targets, a bounded dynamic-thread vector,
-||| one exact resolver boundary, and dependency-first initialization.
+||| relative decoding with disjoint targets, one bounded immutable executable
+||| snapshot, exact non-aliasing copy relocation committed as one validated
+||| batch, executable-first interposition, a bounded dynamic-thread vector, one
+||| exact resolver boundary, and dependency-first initialization.
 public export
 record RuntimeInitializationCertificate where
   constructor MkRuntimeInitializationCertificate
@@ -374,6 +383,13 @@ record RuntimeInitializationCertificate where
   canonicalPackedRelativeOrder : Measurement CanonicalPackedRelativeOrder
   disjointPackedRelativeTargets : Measurement DisjointPackedRelativeTargets
   immutablePackedRelativeTable : Measurement ImmutablePackedRelativeTable
+  boundedMainExecutableSnapshot : Measurement BoundedMainExecutableSnapshot
+  mainCopyRelocation : Measurement MainCopyRelocation
+  exactCopyExtent : Measurement ExactCopyExtent
+  disjointCopyTargets : Measurement DisjointCopyTargets
+  disjointCopySource : Measurement DisjointCopySource
+  prevalidatedCopyBatch : Measurement PrevalidatedCopyBatch
+  mainExecutableInterposition : Measurement MainExecutableInterposition
   staticTlsLayout : Measurement StaticTlsLayout
   tlsRelocation : Measurement TlsRelocation
   dynamicTlsVector : Measurement DynamicTlsVector

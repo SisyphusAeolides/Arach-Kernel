@@ -1,6 +1,7 @@
 ARACH_PROBE_1.0 {
     global:
         arach_shared_probe;
+        arach_copy_source;
     local:
         *;
 };

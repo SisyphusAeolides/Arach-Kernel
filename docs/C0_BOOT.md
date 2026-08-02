@@ -87,27 +87,33 @@ containing all of the following evidence from the same bundle:
   canonical direct-object `DT_RUNPATH` entries, and the root remained at `/`;
 - `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after seven explicit and
   two packed relative relocations, three real TLS relocations, and all
-  seventeen eager external relocations were written to final-writable targets
+  eighteen eager external relocations were written to final-writable targets
   and read back;
 - `ARACH_C2_PACKED_RELATIVE_PASS` was emitted only after the root's canonical
   `DT_RELR` address/bitmap pair expanded to exactly two disjoint writes, with
   bounded two-pass decoding, checked implicit addends, and no overlap with
   explicit or PLT relocation targets;
+- `ARACH_C2_COPY_RELOCATION_PASS` was emitted only after the bounded main PIE,
+  its immutable symbol/version/relocation metadata, the exact 24-byte provider
+  extent, disjoint target and source ranges, and the complete copy batch were
+  validated before the versioned `R_X86_64_COPY` was written and read back;
 - `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS` was emitted only after each undefined
-  function was resolved through deterministic breadth-first SysV symbol scope;
+  function or data object was resolved through deterministic SysV scope,
+  including main-executable interposition and `DT_SYMBOLIC` local priority;
 - `ARACH_C2_WEAK_BINDING_PASS` was emitted only after the first in-scope weak
   function definition won over a later strong definition and a second,
   unversioned unresolved weak function slot was written and read back as zero;
-- `ARACH_C2_GLOBAL_DATA_PASS` was emitted only after three eager `GLOB_DAT`
+- `ARACH_C2_GLOBAL_DATA_PASS` was emitted only after four eager `GLOB_DAT`
   slots bound one exact-version global object, selected an earlier weak data
-  definition over a later strong definition, and wrote one unresolved
-  unversioned weak data reference as zero;
+  definition over a later strong definition, wrote one unresolved unversioned
+  weak data reference as zero, and interposed the main executable's independent
+  copy for the observer;
 - `ARACH_C2_ABSOLUTE_SYMBOL_PASS` was emitted only after four eager
   `R_X86_64_64` slots bound one exact-version function, one exact-version
   object at a checked eight-byte interior addend, one earlier weak object, and
   one unresolved unversioned weak reference written as zero;
 - `ARACH_C2_SYMBOL_VERSION_PASS` was emitted only after every GNU version
-  table passed its finite structural bounds and all thirteen versioned
+  table passed its finite structural bounds and all fourteen versioned
   relocations matched an exact version, including the importing dependency's
   SONAME;
 - `ARACH_C2_STATIC_TLS_PASS` was emitted only after the bounded initial TLS

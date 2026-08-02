@@ -33,11 +33,30 @@ shared_core_image="$build_root/shared-object/libarach-core.so"
     "$shared_observer_image" "$shared_core_image"
 runtime_linker_image="$build_root/runtime-linker/arach-ld.so"
 "$root/scripts/build-runtime-linker-probe.sh" "$runtime_linker_image"
-build_none "$root/probes/exec-target/Cargo.toml" "$build_root/exec-target"
+ARACH_SHARED_OBJECT_IMAGE="$shared_object_image" \
+    build_none "$root/probes/exec-target/Cargo.toml" "$build_root/exec-target"
 
 exec_target_image="$build_root/exec-target/x86_64-arach/release/arach-exec-target"
 test -s "$exec_target_image"
+test "$(stat -c %s -- "$exec_target_image")" -le 65536
+test "$(readelf -hW "$exec_target_image" | awk '/Number of program headers:/ {print $5}')" -eq 6
+test "$(readelf -lW "$exec_target_image" | awk '$1 == "LOAD" {count++} END {print count + 0}')" -eq 3
+test -z "$(readelf -lW "$exec_target_image" | awk '$1 == "LOAD" && / W / && / E / {print}')"
+test "$(readelf -lW "$exec_target_image" | awk '$1 == "PHDR" {count++} END {print count + 0}')" -eq 1
+test "$(readelf -lW "$exec_target_image" | awk '$1 == "INTERP" {count++} END {print count + 0}')" -eq 1
+readelf -lW "$exec_target_image" | grep -F '[Requesting program interpreter: /arach-ld.so]' >/dev/null
+test "$(readelf -lW "$exec_target_image" | awk '$1 == "DYNAMIC" {count++} END {print count + 0}')" -eq 1
 test "$(readelf -dW "$exec_target_image" | awk '$2 == "(NEEDED)" {print $5}')" = '[libarach-probe.so]'
+test "$(readelf -dW "$exec_target_image" | awk '$2 == "(NEEDED)" {count++} END {print count + 0}')" -eq 1
+test "$(readelf -dW "$exec_target_image" | awk '$2 == "(FLAGS_1)" && /PIE/ {count++} END {print count + 0}')" -eq 1
+test "$(readelf -dW "$exec_target_image" | awk '$2 == "(VERSYM)" {count++} END {print count + 0}')" -eq 1
+test "$(readelf -dW "$exec_target_image" | awk '$2 == "(VERNEEDNUM)" {print $3}')" -eq 1
+test -z "$(readelf -dW "$exec_target_image" | awk '$2 == "(SONAME)" || $2 == "(RUNPATH)" || $2 == "(RPATH)" {print}')"
+test "$(readelf -rW "$exec_target_image" | awk '$3 == "R_X86_64_COPY" {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -rW "$exec_target_image" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_COPY" {print}')"
+test "$(readelf -rW "$exec_target_image" | awk '$3 == "R_X86_64_COPY" && $5 ~ /^arach_copy_source@ARACH_PROBE_1[.]0$/ && $7 == "0" {count++} END {print count + 0}')" -eq 1
+test "$(readelf --dyn-syms -W "$exec_target_image" | awk '$1 ~ /^[0-9]+:/ {count++} END {print count + 0}')" -eq 2
+test "$(readelf --dyn-syms -W "$exec_target_image" | awk '$3 == 24 && $4 == "OBJECT" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" && $8 ~ /^arach_copy_source@ARACH_PROBE_1[.]0$/ {count++} END {print count + 0}')" -eq 1
 ARACH_EXEC_TARGET_IMAGE="$exec_target_image" \
 ARACH_RUNTIME_LINKER_IMAGE="$runtime_linker_image" \
 ARACH_SHARED_OBJECT_IMAGE="$shared_object_image" \

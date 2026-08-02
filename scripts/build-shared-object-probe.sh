@@ -130,6 +130,7 @@ test "$(readelf -dW "$output" | awk '$2 == "(VERNEEDNUM)" {print $3}')" -eq 2
 test "$(readelf -dW "$output" | awk '$2 == "(VERSYM)" {count++} END {print count + 0}')" -eq 1
 test -z "$(readelf -lW "$output" | awk '$1 == "TLS" {print}')"
 test "$(readelf --dyn-syms -W "$output" | awk '$8 ~ /^arach_shared_probe@@ARACH_PROBE_1[.]0$/ && $7 != "UND" {count++} END {print count + 0}')" -eq 1
+test "$(readelf --dyn-syms -W "$output" | awk '$3 == 24 && $4 == "OBJECT" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" && $8 ~ /^arach_copy_source@@ARACH_PROBE_1[.]0$/ {count++} END {print count + 0}')" -eq 1
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_JUMP_SLOT" && $5 ~ /@ARACH_/ {count++} END {print count + 0}')" -eq 3
 test "$(readelf --dyn-syms -W "$output" | awk '$4 == "FUNC" && $5 == "WEAK" && $7 == "UND" && $8 == "arach_scope_choice" {count++} END {print count + 0}')" -eq 1
 test "$(readelf --dyn-syms -W "$output" | awk '$4 == "NOTYPE" && $5 == "WEAK" && $7 == "UND" && $8 == "arach_optional_hook" {count++} END {print count + 0}')" -eq 1
@@ -182,7 +183,8 @@ test -z "$(readelf -dW "$observer_output" | awk '$2 == "(RPATH)" {print}')"
 test "$(readelf -dW "$observer_output" | awk '$2 == "(NEEDED)" {print $5}')" = '[libarach-core.so]'
 test "$(readelf -rW "$observer_output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 2
 test "$(readelf -rW "$observer_output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 2
-test -z "$(readelf -rW "$observer_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" {print}')"
+test "$(readelf -rW "$observer_output" | awk '$3 == "R_X86_64_GLOB_DAT" && $5 == "arach_copy_source" {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -rW "$observer_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" && $3 != "R_X86_64_GLOB_DAT" {print}')"
 test "$(readelf -dW "$observer_output" | awk '$2 == "(INIT_ARRAYSZ)" {print $3}')" -eq 8
 test "$(readelf -dW "$observer_output" | awk '$2 == "(FINI_ARRAYSZ)" {print $3}')" -eq 8
 test "$(readelf -dW "$observer_output" | awk '$2 == "(FINI)" {count++} END {print count + 0}')" -eq 1
@@ -191,6 +193,7 @@ test "$(readelf -dW "$observer_output" | awk '$2 == "(VERNEEDNUM)" {print $3}')"
 test "$(readelf -dW "$observer_output" | awk '$2 == "(VERSYM)" {count++} END {print count + 0}')" -eq 1
 test -z "$(readelf -lW "$observer_output" | awk '$1 == "TLS" {print}')"
 test "$(readelf --dyn-syms -W "$observer_output" | awk '$8 ~ /^arach_observer_value@@ARACH_OBSERVER_1[.]0$/ && $7 != "UND" {count++} END {print count + 0}')" -eq 1
+test "$(readelf --dyn-syms -W "$observer_output" | awk '$3 == 0 && $4 == "OBJECT" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 == "UND" && $8 == "arach_copy_source" {count++} END {print count + 0}')" -eq 1
 test "$(readelf --dyn-syms -W "$observer_output" | awk '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" && $8 == "arach_scope_choice" {count++} END {print count + 0}')" -eq 1
 test "$(readelf --dyn-syms -W "$observer_output" | awk '$3 == 8 && $4 == "OBJECT" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" && $8 == "arach_data_choice" {count++} END {print count + 0}')" -eq 1
 test "$(readelf -rW "$observer_output" | awk '$3 == "R_X86_64_JUMP_SLOT" && $5 ~ /@ARACH_CORE_1[.]0/ {count++} END {print count + 0}')" -eq 2

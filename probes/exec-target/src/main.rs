@@ -8,6 +8,8 @@ const EXEC_PASS: &[u8] = b"ARACH_C1_EXECVE_PASS\n";
 const EXIT_GROUP_ARMED: &[u8] = b"ARACH_C1_EXIT_GROUP_ARMED\n";
 const EXPECTED_ARG0: &[u8] = b"exec-target";
 const EXPECTED_ENV0: &[u8] = b"ARACH_EXEC_TRANSACTION=1";
+const EXPECTED_COPY_VALUE: u64 =
+    0x0123_4567_89ab_cdef ^ 0x1357_9bdf_2468_ace0 ^ 0xfedc_ba98_7654_3210;
 const SYS_READ: usize = 0;
 const SYS_WRITE: usize = 1;
 const SYS_CLOSE: usize = 3;
@@ -63,6 +65,19 @@ arach_exec_clone:
 
 core::arch::global_asm!(
     r#"
+    .global arach_exec_copy_probe
+    .type arach_exec_copy_probe,@function
+arach_exec_copy_probe:
+    mov rax, qword ptr [rip + arach_copy_source]
+    xor rax, qword ptr [rip + arach_copy_source + 8]
+    xor rax, qword ptr [rip + arach_copy_source + 16]
+    ret
+    .size arach_exec_copy_probe, .-arach_exec_copy_probe
+"#,
+);
+
+core::arch::global_asm!(
+    r#"
     .global _start
     .type _start,@function
 _start:
@@ -83,6 +98,7 @@ unsafe extern "C" {
         tls: usize,
         child_entry: extern "C" fn() -> isize,
     ) -> isize;
+    fn arach_exec_copy_probe() -> u64;
 }
 
 #[inline(always)]
@@ -182,6 +198,9 @@ extern "C" fn arach_exec_start(stack: *const usize, finalizer: usize) -> ! {
         || !unsafe { stack_string_matches(stack.add(3).read(), EXPECTED_ENV0) }
         || unsafe { stack.add(4).read() } != 0
     {
+        fail();
+    }
+    if unsafe { arach_exec_copy_probe() } != EXPECTED_COPY_VALUE {
         fail();
     }
     let mut inherited_value = 0_u64;

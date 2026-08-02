@@ -60,6 +60,29 @@ typedef struct {
     uint16_t versions[3];
     VersionRequirementFixture requirements[1];
     Elf64Rela relocations[2];
+    uint64_t targets[2];
+} CopyRelocationFixture;
+
+typedef struct {
+    uint32_t hash[6];
+    Elf64Symbol symbols[3];
+    char strings[112];
+    uint16_t versions[3];
+    VersionDefinitionFixture definitions[2];
+    uint64_t storage[2];
+} CopyProviderFixture;
+
+typedef struct {
+    _Alignas(PAGE_SIZE) uint8_t bytes[4 * PAGE_SIZE];
+} MainExecutableFixture;
+
+typedef struct {
+    uint32_t hash[6];
+    Elf64Symbol symbols[3];
+    char strings[112];
+    uint16_t versions[3];
+    VersionRequirementFixture requirements[1];
+    Elf64Rela relocations[2];
     uintptr_t targets[2];
 } DataRelocationFixture;
 
@@ -134,6 +157,8 @@ static int test_symbol_scope(void);
 static int test_weak_function_relocations(void);
 static int test_data_relocations(void);
 static int test_absolute_relocations(void);
+static int test_main_executable(void);
+static int test_copy_relocations(void);
 static int test_packed_relative_relocations(void);
 static int test_symbol_versions(void);
 static int test_tls_resolver_reference(void);
@@ -541,6 +566,684 @@ static int prepare_data_provider(LoadedObject *object,
     object->loads[0].flags = PROGRAM_READABLE;
     object->load_count = 1;
     return 1;
+}
+
+enum {
+    MAIN_TEST_PROGRAM_HEADER_OFFSET = sizeof(Elf64Header),
+    MAIN_TEST_INTERPRETER_OFFSET = 0x200,
+    MAIN_TEST_DYNAMIC_OFFSET = PAGE_SIZE + 0x20,
+    MAIN_TEST_HASH_OFFSET = PAGE_SIZE + 0x100,
+    MAIN_TEST_SYMBOL_OFFSET = PAGE_SIZE + 0x120,
+    MAIN_TEST_STRING_OFFSET = PAGE_SIZE + 0x180,
+    MAIN_TEST_RELOCATION_OFFSET = PAGE_SIZE + 0x1c0,
+    MAIN_TEST_SYMBOL_NAME_OFFSET = 32,
+    MAIN_TEST_PROGRAM_HEADER_COUNT = 7,
+    MAIN_TEST_DYNAMIC_COUNT = 11,
+};
+
+static int prepare_main_executable_fixture(MainExecutableFixture *fixture) {
+    const char needed_name[] = "libarach-probe.so";
+    const char symbol_name[] = "copy_alpha";
+    zero_bytes(&fixture->bytes[0], sizeof(fixture->bytes));
+    uintptr_t base = (uintptr_t)&fixture->bytes[0];
+    Elf64Header *header = (Elf64Header *)base;
+    Elf64ProgramHeader *headers =
+        (Elf64ProgramHeader *)(base + MAIN_TEST_PROGRAM_HEADER_OFFSET);
+    Elf64Dynamic *dynamic =
+        (Elf64Dynamic *)(base + MAIN_TEST_DYNAMIC_OFFSET);
+    uint32_t *hash = (uint32_t *)(base + MAIN_TEST_HASH_OFFSET);
+    Elf64Symbol *symbols =
+        (Elf64Symbol *)(base + MAIN_TEST_SYMBOL_OFFSET);
+    char *strings = (char *)(base + MAIN_TEST_STRING_OFFSET);
+    Elf64Rela *relocation =
+        (Elf64Rela *)(base + MAIN_TEST_RELOCATION_OFFSET);
+
+    header->identity[0] = 0x7f;
+    header->identity[1] = 'E';
+    header->identity[2] = 'L';
+    header->identity[3] = 'F';
+    header->identity[4] = ELF_CLASS_64;
+    header->identity[5] = ELF_DATA_LITTLE_ENDIAN;
+    header->identity[6] = ELF_VERSION_CURRENT;
+    header->type = ELF_TYPE_SHARED_OBJECT;
+    header->machine = ELF_MACHINE_X86_64;
+    header->version = ELF_VERSION_CURRENT;
+    header->entry = 2 * PAGE_SIZE;
+    header->program_header_offset = MAIN_TEST_PROGRAM_HEADER_OFFSET;
+    header->header_size = sizeof(*header);
+    header->program_header_size = sizeof(*headers);
+    header->program_header_count = MAIN_TEST_PROGRAM_HEADER_COUNT;
+
+    headers[0].type = PROGRAM_HEADERS;
+    headers[0].flags = PROGRAM_READABLE;
+    headers[0].offset = MAIN_TEST_PROGRAM_HEADER_OFFSET;
+    headers[0].virtual_address = MAIN_TEST_PROGRAM_HEADER_OFFSET;
+    headers[0].file_size =
+        MAIN_TEST_PROGRAM_HEADER_COUNT * sizeof(*headers);
+    headers[0].memory_size = headers[0].file_size;
+    headers[0].alignment = _Alignof(Elf64ProgramHeader);
+
+    headers[1].type = PROGRAM_INTERPRETER;
+    headers[1].flags = PROGRAM_READABLE;
+    headers[1].offset = MAIN_TEST_INTERPRETER_OFFSET;
+    headers[1].virtual_address = MAIN_TEST_INTERPRETER_OFFSET;
+    headers[1].file_size = sizeof(expected_interpreter);
+    headers[1].memory_size = sizeof(expected_interpreter);
+    headers[1].alignment = 1;
+
+    headers[2].type = PROGRAM_DYNAMIC;
+    headers[2].flags = PROGRAM_READABLE;
+    headers[2].offset = MAIN_TEST_DYNAMIC_OFFSET;
+    headers[2].virtual_address = MAIN_TEST_DYNAMIC_OFFSET;
+    headers[2].file_size = MAIN_TEST_DYNAMIC_COUNT * sizeof(*dynamic);
+    headers[2].memory_size = headers[2].file_size;
+    headers[2].alignment = _Alignof(Elf64Dynamic);
+
+    for (size_t index = 0; index < 4; ++index) {
+        headers[index + 3].type = PROGRAM_LOAD;
+        headers[index + 3].offset = index * PAGE_SIZE;
+        headers[index + 3].virtual_address = index * PAGE_SIZE;
+        headers[index + 3].file_size = PAGE_SIZE;
+        headers[index + 3].memory_size = PAGE_SIZE;
+        headers[index + 3].alignment = PAGE_SIZE;
+    }
+    headers[3].flags = PROGRAM_READABLE | PROGRAM_EXECUTABLE;
+    headers[4].flags = PROGRAM_READABLE;
+    headers[5].flags = PROGRAM_READABLE | PROGRAM_EXECUTABLE;
+    headers[6].flags = PROGRAM_READABLE | PROGRAM_WRITABLE;
+
+    copy_bytes(&fixture->bytes[MAIN_TEST_INTERPRETER_OFFSET],
+               (const uint8_t *)expected_interpreter,
+               sizeof(expected_interpreter));
+    if (!copy_fixture_string(strings, 64, 1, needed_name,
+                             sizeof(needed_name)) ||
+        !copy_fixture_string(strings, 64, MAIN_TEST_SYMBOL_NAME_OFFSET,
+                             symbol_name, sizeof(symbol_name))) {
+        return 0;
+    }
+    hash[0] = 1;
+    hash[1] = 2;
+    symbols[1].name = MAIN_TEST_SYMBOL_NAME_OFFSET;
+    symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_OBJECT);
+    symbols[1].other = SYMBOL_VISIBILITY_DEFAULT;
+    symbols[1].section_index = 1;
+    symbols[1].value = 3 * PAGE_SIZE;
+    symbols[1].size = sizeof(uint64_t);
+    relocation->offset = 3 * PAGE_SIZE;
+    relocation->information =
+        ((uint64_t)1 << 32) | RELOCATION_X86_64_COPY;
+
+    dynamic[0].tag = DYNAMIC_NEEDED;
+    dynamic[0].value = 1;
+    dynamic[1].tag = DYNAMIC_HASH;
+    dynamic[1].value = MAIN_TEST_HASH_OFFSET;
+    dynamic[2].tag = DYNAMIC_STRING_TABLE;
+    dynamic[2].value = MAIN_TEST_STRING_OFFSET;
+    dynamic[3].tag = DYNAMIC_SYMBOL_TABLE;
+    dynamic[3].value = MAIN_TEST_SYMBOL_OFFSET;
+    dynamic[4].tag = DYNAMIC_RELA;
+    dynamic[4].value = MAIN_TEST_RELOCATION_OFFSET;
+    dynamic[5].tag = DYNAMIC_STRING_SIZE;
+    dynamic[5].value = 64;
+    dynamic[6].tag = DYNAMIC_RELA_SIZE;
+    dynamic[6].value = sizeof(*relocation);
+    dynamic[7].tag = DYNAMIC_RELA_ENTRY;
+    dynamic[7].value = sizeof(*relocation);
+    dynamic[8].tag = DYNAMIC_SYMBOL_ENTRY;
+    dynamic[8].value = sizeof(*symbols);
+    dynamic[9].tag = DYNAMIC_FLAGS_1;
+    dynamic[9].value = DYNAMIC_FLAG_1_PIE;
+    dynamic[10].tag = DYNAMIC_NULL;
+    return 1;
+}
+
+static int main_executable_fixture_rejected(
+    MainExecutableFixture *fixture) {
+    LoadedObject object;
+    DependencyNames dependencies;
+    uintptr_t base = (uintptr_t)&fixture->bytes[0];
+    const Elf64ProgramHeader *headers =
+        (const Elf64ProgramHeader *)(base +
+                                     MAIN_TEST_PROGRAM_HEADER_OFFSET);
+    return !initialize_main_executable(
+        headers, MAIN_TEST_PROGRAM_HEADER_COUNT, base + 2 * PAGE_SIZE, &object,
+        &dependencies);
+}
+
+static int test_main_executable(void) {
+    MainExecutableFixture fixture;
+    LoadedObject object;
+    DependencyNames dependencies;
+    if (!prepare_main_executable_fixture(&fixture)) {
+        return 0;
+    }
+    uintptr_t base = (uintptr_t)&fixture.bytes[0];
+    Elf64Header *header = (Elf64Header *)base;
+    Elf64ProgramHeader *headers =
+        (Elf64ProgramHeader *)(base + MAIN_TEST_PROGRAM_HEADER_OFFSET);
+    Elf64Dynamic *dynamic =
+        (Elf64Dynamic *)(base + MAIN_TEST_DYNAMIC_OFFSET);
+    Elf64Symbol *symbols =
+        (Elf64Symbol *)(base + MAIN_TEST_SYMBOL_OFFSET);
+    Elf64Rela *relocation =
+        (Elf64Rela *)(base + MAIN_TEST_RELOCATION_OFFSET);
+    if (!initialize_main_executable(
+            headers, MAIN_TEST_PROGRAM_HEADER_COUNT, base + 2 * PAGE_SIZE,
+            &object, &dependencies) || object.base != base ||
+        object.load_count != 4 || !object.is_main_executable ||
+        dependencies.count != 1 ||
+        !object_name_equals_literal(&dependencies.names[0], expected_needed,
+                                    sizeof(expected_needed) - 1) ||
+        !validate_main_dynamic_symbols(&object)) {
+        return 0;
+    }
+
+    fixture.bytes[MAIN_TEST_INTERPRETER_OFFSET + 1] ^= UINT8_C(1);
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    fixture.bytes[MAIN_TEST_INTERPRETER_OFFSET + 1] ^= UINT8_C(1);
+
+    header->machine = 0;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    header->machine = ELF_MACHINE_X86_64;
+
+    headers[0].offset += sizeof(Elf64ProgramHeader);
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    headers[0].offset -= sizeof(Elf64ProgramHeader);
+
+    headers[1].type = PROGRAM_TLS;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    headers[1].type = PROGRAM_INTERPRETER;
+
+    headers[3].flags = PROGRAM_READABLE | PROGRAM_WRITABLE;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    headers[3].flags = PROGRAM_READABLE | PROGRAM_EXECUTABLE;
+
+    headers[5].flags = PROGRAM_READABLE | PROGRAM_WRITABLE |
+                       PROGRAM_EXECUTABLE;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    headers[5].flags = PROGRAM_READABLE | PROGRAM_EXECUTABLE;
+
+    headers[4].virtual_address = 0;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    headers[4].virtual_address = PAGE_SIZE;
+
+    header->entry = 3 * PAGE_SIZE;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    header->entry = 2 * PAGE_SIZE;
+
+    headers[6].virtual_address = MAXIMUM_SHARED_FILE_BYTES;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    headers[6].virtual_address = 3 * PAGE_SIZE;
+
+    dynamic[9].value = DYNAMIC_FLAG_1_NOW;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    dynamic[9].value = DYNAMIC_FLAG_1_PIE;
+
+    relocation->information =
+        ((uint64_t)1 << 32) | RELOCATION_X86_64_GLOB_DAT;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    relocation->information =
+        ((uint64_t)1 << 32) | RELOCATION_X86_64_COPY;
+
+    symbols[1].value += sizeof(uint64_t);
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    symbols[1].value -= sizeof(uint64_t);
+
+    dynamic[10].tag = DYNAMIC_TEXT_RELOCATION;
+    if (!main_executable_fixture_rejected(&fixture)) {
+        return 0;
+    }
+    dynamic[10].tag = DYNAMIC_NULL;
+    return initialize_main_executable(
+        headers, MAIN_TEST_PROGRAM_HEADER_COUNT, base + 2 * PAGE_SIZE, &object,
+        &dependencies);
+}
+
+static int prepare_copy_provider(LoadedObject *object,
+                                 CopyProviderFixture *fixture) {
+    const char first_name[] = "copy_alpha";
+    const char second_name[] = "copy_beta";
+    const char provider_name[] = "libcopy.so";
+    const char version_name[] = "COPY_1";
+    const char wrong_version[] = "COPY_BAD";
+    zero_bytes((uint8_t *)object, sizeof(*object));
+    zero_bytes((uint8_t *)fixture, sizeof(*fixture));
+    if (!set_name(&object->name, provider_name,
+                  sizeof(provider_name) - 1) ||
+        !copy_fixture_string(fixture->strings, sizeof(fixture->strings), 1,
+                             first_name, sizeof(first_name)) ||
+        !copy_fixture_string(fixture->strings, sizeof(fixture->strings), 24,
+                             second_name, sizeof(second_name)) ||
+        !copy_fixture_string(fixture->strings, sizeof(fixture->strings), 48,
+                             provider_name, sizeof(provider_name)) ||
+        !copy_fixture_string(fixture->strings, sizeof(fixture->strings), 64,
+                             version_name, sizeof(version_name)) ||
+        !copy_fixture_string(fixture->strings, sizeof(fixture->strings), 80,
+                             wrong_version, sizeof(wrong_version))) {
+        return 0;
+    }
+    fixture->hash[0] = 1;
+    fixture->hash[1] = 3;
+    for (size_t index = 0; index < 2; ++index) {
+        fixture->symbols[index + 1].name = index == 0 ? 1 : 24;
+        fixture->symbols[index + 1].information =
+            (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_OBJECT);
+        fixture->symbols[index + 1].other = SYMBOL_VISIBILITY_DEFAULT;
+        fixture->symbols[index + 1].section_index = 1;
+        fixture->symbols[index + 1].value =
+            offsetof(CopyProviderFixture, storage) +
+            index * sizeof(fixture->storage[0]);
+        fixture->symbols[index + 1].size = sizeof(fixture->storage[0]);
+        fixture->versions[index + 1] = 2;
+    }
+    fixture->definitions[0].definition.version = VERSION_CURRENT;
+    fixture->definitions[0].definition.flags = VERSION_FLAG_BASE;
+    fixture->definitions[0].definition.index = 1;
+    fixture->definitions[0].definition.auxiliary_count = 1;
+    fixture->definitions[0].definition.hash =
+        version_name_hash(provider_name, sizeof(provider_name) - 1);
+    fixture->definitions[0].definition.auxiliary =
+        sizeof(Elf64VersionDefinition);
+    fixture->definitions[0].definition.next =
+        sizeof(VersionDefinitionFixture);
+    fixture->definitions[0].auxiliary.name = 48;
+    fixture->definitions[1].definition.version = VERSION_CURRENT;
+    fixture->definitions[1].definition.index = 2;
+    fixture->definitions[1].definition.auxiliary_count = 1;
+    fixture->definitions[1].definition.hash =
+        version_name_hash(version_name, sizeof(version_name) - 1);
+    fixture->definitions[1].definition.auxiliary =
+        sizeof(Elf64VersionDefinition);
+    fixture->definitions[1].auxiliary.name = 64;
+    fixture->storage[0] = UINT64_C(0x1122334455667788);
+    fixture->storage[1] = UINT64_C(0x99aabbccddeeff00);
+    object->base = (uintptr_t)fixture;
+    object->dynamic.hash = (uintptr_t)&fixture->hash[0];
+    object->dynamic.symbol_table = (uintptr_t)&fixture->symbols[0];
+    object->dynamic.string_table = (uintptr_t)&fixture->strings[0];
+    object->dynamic.string_size = sizeof(fixture->strings);
+    object->dynamic.version_symbols = (uintptr_t)&fixture->versions[0];
+    object->dynamic.version_definitions =
+        (uintptr_t)&fixture->definitions[0];
+    object->dynamic.version_definition_count = 2;
+    object->dynamic.has_version_symbols = 1;
+    object->dynamic.has_version_definitions = 1;
+    object->dynamic.has_version_definition_count = 1;
+    object->loads[0].address = (uintptr_t)fixture;
+    object->loads[0].memory_size = sizeof(*fixture);
+    object->loads[0].mapping_size = sizeof(*fixture);
+    object->loads[0].flags = PROGRAM_READABLE;
+    object->load_count = 1;
+    return 1;
+}
+
+static int prepare_copy_main(LoadedObject *object,
+                             CopyRelocationFixture *fixture) {
+    const char first_name[] = "copy_alpha";
+    const char second_name[] = "copy_beta";
+    const char provider_name[] = "libcopy.so";
+    const char version_name[] = "COPY_1";
+    zero_bytes((uint8_t *)object, sizeof(*object));
+    zero_bytes((uint8_t *)fixture, sizeof(*fixture));
+    if (!copy_fixture_string(fixture->strings, sizeof(fixture->strings), 1,
+                             first_name, sizeof(first_name)) ||
+        !copy_fixture_string(fixture->strings, sizeof(fixture->strings), 24,
+                             second_name, sizeof(second_name)) ||
+        !copy_fixture_string(fixture->strings, sizeof(fixture->strings), 48,
+                             provider_name, sizeof(provider_name)) ||
+        !copy_fixture_string(fixture->strings, sizeof(fixture->strings), 64,
+                             version_name, sizeof(version_name))) {
+        return 0;
+    }
+    fixture->hash[0] = 1;
+    fixture->hash[1] = 3;
+    for (size_t index = 0; index < 2; ++index) {
+        fixture->symbols[index + 1].name = index == 0 ? 1 : 24;
+        fixture->symbols[index + 1].information =
+            (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_OBJECT);
+        fixture->symbols[index + 1].other = SYMBOL_VISIBILITY_DEFAULT;
+        fixture->symbols[index + 1].section_index = 1;
+        fixture->symbols[index + 1].value =
+            offsetof(CopyRelocationFixture, targets) +
+            index * sizeof(fixture->targets[0]);
+        fixture->symbols[index + 1].size = sizeof(fixture->targets[0]);
+        fixture->versions[index + 1] = 2;
+        fixture->relocations[index].offset =
+            offsetof(CopyRelocationFixture, targets) +
+            index * sizeof(fixture->targets[0]);
+        fixture->relocations[index].information =
+            ((uint64_t)(index + 1) << 32) | RELOCATION_X86_64_COPY;
+    }
+    fixture->requirements[0].requirement.version = VERSION_CURRENT;
+    fixture->requirements[0].requirement.auxiliary_count = 1;
+    fixture->requirements[0].requirement.file = 48;
+    fixture->requirements[0].requirement.auxiliary =
+        sizeof(Elf64VersionRequirement);
+    fixture->requirements[0].auxiliary.hash =
+        version_name_hash(version_name, sizeof(version_name) - 1);
+    fixture->requirements[0].auxiliary.other = 2;
+    fixture->requirements[0].auxiliary.name = 64;
+    object->base = (uintptr_t)fixture;
+    object->dynamic.hash = (uintptr_t)&fixture->hash[0];
+    object->dynamic.symbol_table = (uintptr_t)&fixture->symbols[0];
+    object->dynamic.string_table = (uintptr_t)&fixture->strings[0];
+    object->dynamic.string_size = sizeof(fixture->strings);
+    object->dynamic.relocations = (uintptr_t)&fixture->relocations[0];
+    object->dynamic.relocation_size = sizeof(fixture->relocations);
+    object->dynamic.needed_offsets[0] = 48;
+    object->dynamic.needed_count = 1;
+    object->dynamic.version_symbols = (uintptr_t)&fixture->versions[0];
+    object->dynamic.version_requirements =
+        (uintptr_t)&fixture->requirements[0];
+    object->dynamic.version_requirement_count = 1;
+    object->dynamic.has_version_symbols = 1;
+    object->dynamic.has_version_requirements = 1;
+    object->dynamic.has_version_requirement_count = 1;
+    object->loads[0].address = (uintptr_t)fixture;
+    object->loads[0].memory_size =
+        offsetof(CopyRelocationFixture, targets);
+    object->loads[0].mapping_size =
+        offsetof(CopyRelocationFixture, targets);
+    object->loads[0].flags = PROGRAM_READABLE;
+    object->loads[1].address = (uintptr_t)&fixture->targets[0];
+    object->loads[1].memory_size = sizeof(fixture->targets);
+    object->loads[1].mapping_size = sizeof(fixture->targets);
+    object->loads[1].flags = PROGRAM_READABLE | PROGRAM_WRITABLE;
+    object->load_count = 2;
+    object->is_main_executable = 1;
+    return 1;
+}
+
+static int rejected_copy_batch(CopyRelocationFixture *fixture,
+                               const LoadedObject *main_executable,
+                               const ObjectGraph *graph) {
+    const uint64_t first_sentinel = UINT64_C(0xfeedfacecafebeef);
+    const uint64_t second_sentinel = UINT64_C(0x0123456789abcdef);
+    RelocationEvidence evidence;
+    fixture->targets[0] = first_sentinel;
+    fixture->targets[1] = second_sentinel;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    return !apply_main_copy_relocations(main_executable, graph, &evidence) &&
+           fixture->targets[0] == first_sentinel &&
+           fixture->targets[1] == second_sentinel && evidence.copy == 0 &&
+           evidence.versioned == 0;
+}
+
+static int test_copy_relocations(void) {
+    ObjectGraph graph;
+    LoadedObject main_executable;
+    CopyRelocationFixture fixture;
+    CopyProviderFixture provider;
+    RelocationEvidence evidence;
+    SymbolVersionRequirement version_requirement;
+    DataSymbolResolution resolution;
+    const char first_name[] = "copy_alpha";
+    const char copy_version[] = "COPY_1";
+    const char wrong_version[] = "COPY_BAD";
+    zero_bytes((uint8_t *)&graph, sizeof(graph));
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    zero_bytes((uint8_t *)&version_requirement,
+               sizeof(version_requirement));
+    zero_bytes((uint8_t *)&resolution, sizeof(resolution));
+    if (!prepare_copy_main(&main_executable, &fixture) ||
+        !prepare_copy_provider(&graph.objects[0], &provider)) {
+        return 0;
+    }
+    graph.object_count = 1;
+    graph.main_executable = &main_executable;
+    if (!validate_main_dynamic_symbols(&main_executable) ||
+        !validate_dynamic_symbols(&graph.objects[0]) ||
+        !apply_main_copy_relocations(&main_executable, &graph, &evidence) ||
+        fixture.targets[0] != provider.storage[0] ||
+        fixture.targets[1] != provider.storage[1] || evidence.copy != 2 ||
+        evidence.versioned != 2 ||
+        !resolve_global_data_symbol_versioned(
+            &graph, 0, first_name, sizeof(first_name) - 1,
+            &version_requirement, &resolution) ||
+        resolution.address != (uintptr_t)&fixture.targets[0]) {
+        return 0;
+    }
+
+    graph.objects[0].dynamic.has_symbolic = 1;
+    zero_bytes((uint8_t *)&resolution, sizeof(resolution));
+    if (!resolve_global_data_symbol_versioned(
+            &graph, 0, first_name, sizeof(first_name) - 1,
+            &version_requirement, &resolution) ||
+        resolution.address != (uintptr_t)&provider.storage[0]) {
+        return 0;
+    }
+    graph.objects[0].dynamic.has_symbolic = 0;
+
+    fixture.relocations[0].information =
+        ((uint64_t)1 << 32) | RELOCATION_X86_64_GLOB_DAT;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.relocations[0].information =
+        ((uint64_t)1 << 32) | RELOCATION_X86_64_COPY;
+
+    fixture.relocations[1].addend = 1;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.relocations[1].addend = 0;
+
+    fixture.relocations[1].information =
+        ((uint64_t)3 << 32) | RELOCATION_X86_64_COPY;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.relocations[1].information =
+        ((uint64_t)2 << 32) | RELOCATION_X86_64_COPY;
+
+    fixture.symbols[0].size = 1;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.symbols[0].size = 0;
+
+    fixture.symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_WEAK << 4) | SYMBOL_OBJECT);
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_OBJECT);
+
+    fixture.symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_FUNCTION);
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_OBJECT);
+
+    fixture.symbols[1].other = SYMBOL_VISIBILITY_HIDDEN;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.symbols[1].other = SYMBOL_VISIBILITY_DEFAULT;
+
+    fixture.symbols[1].section_index = SYMBOL_UNDEFINED;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.symbols[1].section_index = 1;
+
+    fixture.symbols[1].size = 0;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.symbols[1].size = sizeof(fixture.targets[0]);
+
+    fixture.symbols[1].value =
+        offsetof(CopyRelocationFixture, targets) +
+        sizeof(fixture.targets[0]);
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.symbols[1].value =
+        offsetof(CopyRelocationFixture, targets);
+
+    main_executable.loads[0].flags =
+        PROGRAM_READABLE | PROGRAM_WRITABLE;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    main_executable.loads[0].flags = PROGRAM_READABLE;
+
+    MappedLoad complete_metadata = main_executable.loads[0];
+    main_executable.loads[0].memory_size = 2 * sizeof(uint32_t);
+    main_executable.loads[0].mapping_size = 2 * sizeof(uint32_t);
+    main_executable.loads[2].address = (uintptr_t)&fixture.hash[0];
+    main_executable.loads[2].memory_size = sizeof(fixture.hash);
+    main_executable.loads[2].mapping_size = sizeof(fixture.hash);
+    main_executable.loads[2].flags =
+        PROGRAM_READABLE | PROGRAM_WRITABLE;
+    main_executable.loads[3].address = (uintptr_t)&fixture.symbols[0];
+    main_executable.loads[3].memory_size =
+        (uintptr_t)&fixture.targets[0] -
+        (uintptr_t)&fixture.symbols[0];
+    main_executable.loads[3].mapping_size =
+        main_executable.loads[3].memory_size;
+    main_executable.loads[3].flags = PROGRAM_READABLE;
+    main_executable.load_count = 4;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    main_executable.loads[0] = complete_metadata;
+    main_executable.load_count = 2;
+
+    main_executable.loads[1].flags = PROGRAM_READABLE;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    main_executable.loads[1].flags =
+        PROGRAM_READABLE | PROGRAM_WRITABLE;
+
+    fixture.symbols[2].value =
+        offsetof(CopyRelocationFixture, targets);
+    fixture.relocations[1].offset =
+        offsetof(CopyRelocationFixture, targets);
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.symbols[2].value =
+        offsetof(CopyRelocationFixture, targets) +
+        sizeof(fixture.targets[0]);
+    fixture.relocations[1].offset =
+        offsetof(CopyRelocationFixture, targets) +
+        sizeof(fixture.targets[0]);
+
+    main_executable.dynamic.relocation_size = sizeof(Elf64Rela);
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    main_executable.dynamic.relocation_size = sizeof(fixture.relocations);
+
+    provider.symbols[2].size = sizeof(uint32_t);
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    provider.symbols[2].size = sizeof(provider.storage[1]);
+
+    provider.symbols[2].name = 1;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    provider.symbols[2].name = 24;
+
+    graph.objects[0].name.bytes[0] = 'x';
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    graph.objects[0].name.bytes[0] = 'l';
+
+    provider.definitions[1].auxiliary.name = 80;
+    provider.definitions[1].definition.hash =
+        version_name_hash(wrong_version, sizeof(wrong_version) - 1);
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    provider.definitions[1].auxiliary.name = 64;
+    provider.definitions[1].definition.hash =
+        version_name_hash(copy_version, sizeof(copy_version) - 1);
+
+    fixture.requirements[0].auxiliary.hash ^= UINT32_C(1);
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.requirements[0].auxiliary.hash ^= UINT32_C(1);
+
+    fixture.versions[1] |= VERSION_INDEX_HIDDEN;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    fixture.versions[1] &= VERSION_INDEX_MASK;
+
+    graph.objects[0].base = 0;
+    provider.symbols[1].value = (uintptr_t)&fixture.targets[0];
+    provider.symbols[2].value = (uintptr_t)&provider.storage[1];
+    graph.objects[0].loads[1].address =
+        (uintptr_t)&fixture.targets[0];
+    graph.objects[0].loads[1].memory_size = sizeof(fixture.targets[0]);
+    graph.objects[0].loads[1].mapping_size = sizeof(fixture.targets[0]);
+    graph.objects[0].loads[1].flags = PROGRAM_READABLE;
+    graph.objects[0].load_count = 2;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    graph.objects[0].base = (uintptr_t)&provider;
+    provider.symbols[1].value = offsetof(CopyProviderFixture, storage);
+    provider.symbols[2].value =
+        offsetof(CopyProviderFixture, storage) + sizeof(provider.storage[0]);
+    graph.objects[0].load_count = 1;
+
+    main_executable.is_main_executable = 0;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    main_executable.is_main_executable = 1;
+
+    graph.main_executable = NULL;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    graph.main_executable = &main_executable;
+
+    graph.object_count = 0;
+    if (!rejected_copy_batch(&fixture, &main_executable, &graph)) {
+        return 0;
+    }
+    graph.object_count = 1;
+
+    return validate_main_dynamic_symbols(&main_executable) &&
+           validate_dynamic_symbols(&graph.objects[0]);
 }
 
 static int test_data_relocations(void) {
@@ -1445,6 +2148,21 @@ static int test_symbol_versions(void) {
         !validate_dynamic_symbols(&graph.objects[1])) {
         return 0;
     }
+    uint64_t requirement_mask = 0;
+    graph.objects[0].is_main_executable = 1;
+    if (!validate_version_requirements(&graph.objects[0],
+                                       &requirement_mask) ||
+        requirement_mask != (UINT64_C(1) << 2)) {
+        return 0;
+    }
+    graph.objects[0].loads[0].flags =
+        PROGRAM_READABLE | PROGRAM_WRITABLE;
+    if (validate_version_requirements(&graph.objects[0],
+                                      &requirement_mask)) {
+        return 0;
+    }
+    graph.objects[0].loads[0].flags = PROGRAM_READABLE;
+    graph.objects[0].is_main_executable = 0;
     SymbolVersionRequirement requirement;
     FunctionSymbolResolution resolution;
     if (!symbol_version_requirement(&graph.objects[0], 1, &requirement) ||
@@ -1909,6 +2627,8 @@ int main(void) {
                    test_weak_function_relocations() &&
                    test_data_relocations() &&
                    test_absolute_relocations() &&
+                   test_main_executable() &&
+                   test_copy_relocations() &&
                    test_packed_relative_relocations() &&
                    test_symbol_versions() &&
                    test_tls_resolver_reference() &&

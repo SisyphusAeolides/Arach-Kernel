@@ -74,7 +74,14 @@ the unversioned optional hook has no provider and is written as zero. The eager
 data-binding proof adds three root `R_X86_64_GLOB_DAT` entries: one
 exact-version provider object, one weak object that selects the provider's
 earlier weak definition ahead of the observer's later strong definition, and
-one unversioned optional data reference written as zero. The absolute-symbol
+one unversioned optional data reference written as zero. A fourth observer
+entry resolves to the main executable's 24-byte `arach_copy_source`. The
+interpreter validates the bounded main ET_DYN image and all immutable SysV,
+GNU-version, and relocation metadata, resolves an exact-size versioned
+`R_X86_64_COPY`, proves disjoint targets and source, and prevalidates the whole
+copy batch before writing it. The root's `DT_SYMBOLIC` initializer later
+mutates only its original object, while the observer consumes the independent
+main copy. The absolute-symbol
 proof adds four root `R_X86_64_64` entries: one versioned
 function pointer, one versioned provider-vector pointer at a checked
 eight-byte addend, one earlier weak object pointer, and one unresolved weak
@@ -89,6 +96,7 @@ emits `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_RUNPATH_PASS`,
 `ARACH_C2_SHARED_RELOCATION_PASS`,
 `ARACH_C2_PACKED_RELATIVE_PASS`,
+`ARACH_C2_COPY_RELOCATION_PASS`,
 `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_WEAK_BINDING_PASS`,
 `ARACH_C2_GLOBAL_DATA_PASS`,
 `ARACH_C2_ABSOLUTE_SYMBOL_PASS`,

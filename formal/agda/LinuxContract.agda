@@ -44,6 +44,9 @@ data Gate : Set where
   packedRelativeRelocation boundedPackedRelativeDecoding : Gate
   canonicalPackedRelativeOrder disjointPackedRelativeTargets : Gate
   immutablePackedRelativeTable : Gate
+  boundedMainExecutableSnapshot mainCopyRelocation exactCopyExtent : Gate
+  disjointCopyTargets disjointCopySource prevalidatedCopyBatch : Gate
+  mainExecutableInterposition : Gate
   directoryCreation canonicalRunpath runpathDependencySearch : Gate
   staticTlsLayout tlsRelocation dynamicTlsVector tlsResolver : Gate
   generalDynamicTlsAccess initializerOrder : Gate
@@ -248,6 +251,15 @@ record RuntimeInitializationCertificate : Set where
       Measurement disjointPackedRelativeTargets
     immutablePackedRelativeTableEvidence :
       Measurement immutablePackedRelativeTable
+    boundedMainExecutableSnapshotEvidence :
+      Measurement boundedMainExecutableSnapshot
+    mainCopyRelocationEvidence : Measurement mainCopyRelocation
+    exactCopyExtentEvidence : Measurement exactCopyExtent
+    disjointCopyTargetsEvidence : Measurement disjointCopyTargets
+    disjointCopySourceEvidence : Measurement disjointCopySource
+    prevalidatedCopyBatchEvidence : Measurement prevalidatedCopyBatch
+    mainExecutableInterpositionEvidence :
+      Measurement mainExecutableInterposition
     staticTlsLayoutEvidence : Measurement staticTlsLayout
     tlsRelocationEvidence : Measurement tlsRelocation
     dynamicTlsVectorEvidence : Measurement dynamicTlsVector

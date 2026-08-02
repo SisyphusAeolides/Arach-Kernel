@@ -5,6 +5,14 @@ uint64_t arach_core_finalize_step(uint64_t expected, uint64_t replacement);
 uint64_t arach_observer_value(uint64_t input);
 uint64_t arach_scope_choice(uint64_t input);
 void arach_observer_finish(void);
+
+typedef struct {
+    uint64_t words[3];
+} ArachCopySource;
+
+extern const ArachCopySource arach_copy_source;
+__asm__(".type arach_copy_source, @object\n"
+        ".size arach_copy_source, 24");
 static uint64_t observer_stage;
 
 __attribute__((visibility("default"))) const uint64_t arach_data_choice =
@@ -22,7 +30,8 @@ static void __attribute__((constructor)) arach_observer_initialize(void) {
 __attribute__((visibility("default"))) uint64_t
 arach_observer_value(uint64_t input) {
     return arach_core_value(input ^ UINT64_C(0x0f0ff0f05a5aa5a5)) +
-           observer_stage;
+           observer_stage + arach_copy_source.words[0] +
+           arach_copy_source.words[1] + arach_copy_source.words[2];
 }
 
 __attribute__((visibility("default"))) uint64_t

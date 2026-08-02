@@ -37,6 +37,7 @@ enum {
     ELF_MACHINE_X86_64 = 62,
     PROGRAM_LOAD = 1,
     PROGRAM_DYNAMIC = 2,
+    PROGRAM_INTERPRETER = 3,
     PROGRAM_HEADERS = 6,
     PROGRAM_TLS = 7,
     PROGRAM_EXECUTABLE = 1,
@@ -89,7 +90,9 @@ enum {
     DYNAMIC_FLAG_BIND_NOW = 8,
     DYNAMIC_FLAG_STATIC_TLS = 16,
     DYNAMIC_FLAG_1_NOW = 1,
+    DYNAMIC_FLAG_1_PIE = 0x08000000,
     RELOCATION_X86_64_64 = 1,
+    RELOCATION_X86_64_COPY = 5,
     RELOCATION_X86_64_GLOB_DAT = 6,
     RELOCATION_X86_64_JUMP_SLOT = 7,
     RELOCATION_X86_64_RELATIVE = 8,
@@ -105,6 +108,7 @@ enum {
     SYMBOL_TLS = 6,
     SYMBOL_ABSOLUTE = 0xfff1,
     SYMBOL_VISIBILITY_DEFAULT = 0,
+    SYMBOL_VISIBILITY_HIDDEN = 2,
     VERSION_CURRENT = 1,
     VERSION_FLAG_BASE = 1,
     VERSION_INDEX_LOCAL = 0,
@@ -126,6 +130,7 @@ enum {
     MAXIMUM_RUNPATH_STRING_BYTES = 255,
     MAXIMUM_SYMBOL_NAME_BYTES = 127,
     MAXIMUM_RELOCATIONS = 64,
+    MAXIMUM_COPY_RELOCATION_BYTES = 64 * 1024,
     MAXIMUM_PACKED_RELOCATION_ENTRIES = 128,
     MAXIMUM_PACKED_RELOCATIONS = 8192,
     MAXIMUM_INITIALIZERS = 16,
@@ -140,6 +145,7 @@ enum {
 static const uintptr_t first_object_base = UINT64_C(0x30000000);
 static const uintptr_t object_address_stride = UINT64_C(0x01000000);
 static const char expected_path[] = "/exec-target";
+static const char expected_interpreter[] = "/arach-ld.so";
 static const char expected_needed[] = "libarach-probe.so";
 static const char expected_provider[] = "libarach-provider.so";
 static const char expected_observer[] = "libarach-observer.so";
@@ -161,6 +167,8 @@ static const char multi_object_marker[] =
 static const char relocation_marker[] = "ARACH_C2_SHARED_RELOCATION_PASS\n";
 static const char packed_relative_marker[] =
     "ARACH_C2_PACKED_RELATIVE_PASS\n";
+static const char copy_relocation_marker[] =
+    "ARACH_C2_COPY_RELOCATION_PASS\n";
 static const char symbol_scope_marker[] =
     "ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS\n";
 static const char weak_binding_marker[] = "ARACH_C2_WEAK_BINDING_PASS\n";
@@ -192,6 +200,8 @@ static const char shared_relocation_failure[] =
     "ARACH_C2_LINKER_SHARED_RELOCATION_FAIL\n";
 static const char shared_packed_relative_failure[] =
     "ARACH_C2_LINKER_PACKED_RELATIVE_FAIL\n";
+static const char shared_copy_relocation_failure[] =
+    "ARACH_C2_LINKER_COPY_RELOCATION_FAIL\n";
 static const char shared_external_failure[] =
     "ARACH_C2_LINKER_SHARED_EXTERNAL_FAIL\n";
 static const char shared_weak_binding_failure[] =
@@ -373,6 +383,7 @@ typedef struct {
     int has_version_definition_count;
     int has_version_requirements;
     int has_version_requirement_count;
+    int has_debug;
     SearchPath runpath;
 } SharedDynamic;
 
@@ -396,6 +407,7 @@ typedef struct {
     uintptr_t tls_instance;
     size_t tls_offset;
     size_t tls_module_id;
+    int is_main_executable;
 } LoadedObject;
 
 typedef struct {
@@ -403,11 +415,13 @@ typedef struct {
     size_t object_count;
     size_t relocation_order[MAXIMUM_LOADED_OBJECTS];
     size_t relocation_count;
+    const LoadedObject *main_executable;
 } ObjectGraph;
 
 typedef struct {
     size_t relative;
     size_t packed_relative;
+    size_t copy;
     size_t external;
     size_t data;
     size_t absolute;
@@ -423,6 +437,13 @@ typedef struct {
     size_t weak_absolute_definitions;
     size_t unresolved_weak_absolute;
 } RelocationEvidence;
+
+typedef struct {
+    uintptr_t target;
+    uintptr_t source;
+    size_t size;
+    int versioned;
+} CopyOperation;
 
 typedef struct {
     uintptr_t address;
@@ -523,6 +544,15 @@ extern void _start(void);
 uintptr_t arach_runtime_linker_start(const uintptr_t *stack);
 void arach_runtime_linker_finalize(void);
 static void *arach_tls_get_addr(const DynamicTlsIndex *index);
+static int parse_object_dynamic(LoadedObject *object);
+static int validate_main_dynamic_symbols(const LoadedObject *object);
+static int mapped_range_is_read_only(const MappedLoad *loads,
+                                     size_t load_count, uintptr_t address,
+                                     size_t length);
+static int mapped_range_is_immutable_data(const MappedLoad *loads,
+                                          size_t load_count,
+                                          uintptr_t address, size_t length);
+static void zero_bytes(uint8_t *bytes, size_t length);
 
 static long syscall6(uint64_t number, uint64_t first, uint64_t second,
                      uint64_t third, uint64_t fourth, uint64_t fifth,
@@ -865,11 +895,15 @@ static int main_range_contains(const Elf64ProgramHeader *headers,
     return 0;
 }
 
-static int discover_main_dependencies(const Elf64ProgramHeader *headers,
-                                      size_t header_count,
-                                      uintptr_t *main_base,
-                                      DependencyNames *dependencies) {
+static int initialize_main_executable(
+    const Elf64ProgramHeader *headers, size_t header_count,
+    uintptr_t executable_entry, LoadedObject *object,
+    DependencyNames *dependencies) {
+    zero_bytes((uint8_t *)object, sizeof(*object));
+    object->descriptor = -1;
+    object->is_main_executable = 1;
     const Elf64ProgramHeader *header_table = NULL;
+    const Elf64ProgramHeader *interpreter_program = NULL;
     const Elf64ProgramHeader *dynamic_program = NULL;
     for (size_t index = 0; index < header_count; ++index) {
         if (headers[index].type == PROGRAM_HEADERS) {
@@ -877,80 +911,169 @@ static int discover_main_dependencies(const Elf64ProgramHeader *headers,
                 return 0;
             }
             header_table = &headers[index];
+        } else if (headers[index].type == PROGRAM_INTERPRETER) {
+            if (interpreter_program != NULL) {
+                return 0;
+            }
+            interpreter_program = &headers[index];
         } else if (headers[index].type == PROGRAM_DYNAMIC) {
             if (dynamic_program != NULL) {
                 return 0;
             }
             dynamic_program = &headers[index];
+        } else if (headers[index].type != PROGRAM_LOAD) {
+            return 0;
         }
     }
-    if (header_table == NULL || dynamic_program == NULL ||
+    if (header_table == NULL || interpreter_program == NULL ||
+        dynamic_program == NULL ||
         header_table->virtual_address > (uintptr_t)headers ||
+        header_table->file_size != header_count * sizeof(*headers) ||
+        header_table->memory_size != header_table->file_size ||
+        header_table->flags != PROGRAM_READABLE ||
+        header_table->alignment != _Alignof(Elf64ProgramHeader) ||
+        interpreter_program->file_size != sizeof(expected_interpreter) ||
+        interpreter_program->memory_size != sizeof(expected_interpreter) ||
+        interpreter_program->flags != PROGRAM_READABLE ||
+        interpreter_program->alignment != 1 ||
         dynamic_program->memory_size < sizeof(Elf64Dynamic) ||
+        dynamic_program->file_size != dynamic_program->memory_size ||
+        dynamic_program->flags != PROGRAM_READABLE ||
         dynamic_program->memory_size % sizeof(Elf64Dynamic) != 0 ||
         dynamic_program->memory_size / sizeof(Elf64Dynamic) >
             MAXIMUM_DYNAMIC_ENTRIES) {
         return 0;
     }
-    *main_base = (uintptr_t)headers - header_table->virtual_address;
-
+    uintptr_t main_base =
+        (uintptr_t)headers - header_table->virtual_address;
+    const Elf64Header *header = (const Elf64Header *)main_base;
+    uintptr_t expected_headers = 0;
+    uintptr_t expected_entry = 0;
+    if (main_base == 0 || header->identity[0] != 0x7f ||
+        header->identity[1] != 'E' || header->identity[2] != 'L' ||
+        header->identity[3] != 'F' ||
+        header->identity[4] != ELF_CLASS_64 ||
+        header->identity[5] != ELF_DATA_LITTLE_ENDIAN ||
+        header->identity[6] != ELF_VERSION_CURRENT ||
+        header->type != ELF_TYPE_SHARED_OBJECT ||
+        header->machine != ELF_MACHINE_X86_64 ||
+        header->version != ELF_VERSION_CURRENT || header->entry == 0 ||
+        header->header_size != sizeof(Elf64Header) ||
+        header->program_header_size != sizeof(Elf64ProgramHeader) ||
+        header->program_header_count != header_count ||
+        header_table->offset != header->program_header_offset ||
+        !checked_add(main_base, header->program_header_offset,
+                     &expected_headers) ||
+        expected_headers != (uintptr_t)headers ||
+        !checked_add(main_base, header->entry, &expected_entry) ||
+        expected_entry != executable_entry ||
+        !copy_object_name(&expected_path[1], sizeof(expected_path) - 1,
+                          &object->name)) {
+        return 0;
+    }
+    object->base = main_base;
+    object->header = header;
+    object->headers = headers;
+    object->tls_program = NULL;
+    for (size_t index = 0; index < header_count; ++index) {
+        const Elf64ProgramHeader *program = &headers[index];
+        if (program->type != PROGRAM_LOAD) {
+            continue;
+        }
+        if (object->load_count == MAXIMUM_SHARED_LOADS ||
+            program->memory_size == 0 ||
+            program->file_size > program->memory_size ||
+            program->memory_size > SIZE_MAX || program->file_size > SIZE_MAX ||
+            program->offset % PAGE_SIZE != 0 ||
+            program->virtual_address % PAGE_SIZE != 0 ||
+            program->alignment != PAGE_SIZE ||
+            (program->flags &
+             ~(uint32_t)(PROGRAM_READABLE | PROGRAM_WRITABLE |
+                         PROGRAM_EXECUTABLE)) != 0 ||
+            (program->flags & PROGRAM_READABLE) == 0 ||
+            ((program->flags & PROGRAM_WRITABLE) != 0 &&
+             (program->flags & PROGRAM_EXECUTABLE) != 0)) {
+            return 0;
+        }
+        size_t mapping_size = 0;
+        uintptr_t address = 0;
+        uintptr_t mapping_end = 0;
+        uintptr_t object_end = 0;
+        if (!round_to_pages((size_t)program->memory_size, &mapping_size) ||
+            !checked_add(main_base, program->virtual_address, &address) ||
+            !checked_range(address, mapping_size, &mapping_end) ||
+            !checked_add(main_base, MAXIMUM_SHARED_FILE_BYTES, &object_end) ||
+            address < main_base || mapping_end > object_end) {
+            return 0;
+        }
+        for (size_t prior = 0; prior < object->load_count; ++prior) {
+            uintptr_t prior_end = 0;
+            if (!checked_range(object->loads[prior].address,
+                               object->loads[prior].mapping_size,
+                               &prior_end) ||
+                (address < prior_end &&
+                 object->loads[prior].address < mapping_end)) {
+                return 0;
+            }
+        }
+        MappedLoad *load = &object->loads[object->load_count];
+        load->address = address;
+        load->memory_size = (size_t)program->memory_size;
+        load->mapping_size = mapping_size;
+        load->flags = program->flags;
+        ++object->load_count;
+    }
+    uintptr_t interpreter = 0;
     uintptr_t dynamic_address = 0;
-    if (!checked_add(*main_base, dynamic_program->virtual_address,
+    if (object->load_count == 0 ||
+        !main_range_contains(headers, header_count, main_base, main_base,
+                             sizeof(*header)) ||
+        !mapped_range_is_read_only(
+            object->loads, object->load_count, main_base, sizeof(*header)) ||
+        !main_range_contains(headers, header_count, main_base,
+                             (uintptr_t)headers,
+                             header_count * sizeof(*headers)) ||
+        !mapped_range_is_read_only(
+            object->loads, object->load_count, (uintptr_t)headers,
+            header_count * sizeof(*headers)) ||
+        !checked_add(main_base, interpreter_program->virtual_address,
+                     &interpreter) ||
+        !main_range_contains(headers, header_count, main_base, interpreter,
+                             sizeof(expected_interpreter)) ||
+        !mapped_range_is_read_only(
+            object->loads, object->load_count, interpreter,
+            sizeof(expected_interpreter)) ||
+        !bytes_equal((const char *)interpreter, expected_interpreter,
+                     sizeof(expected_interpreter)) ||
+        !checked_add(main_base, dynamic_program->virtual_address,
                      &dynamic_address) ||
-        !main_range_contains(headers, header_count, *main_base, dynamic_address,
+        !main_range_contains(headers, header_count, main_base, dynamic_address,
                              (size_t)dynamic_program->memory_size)) {
         return 0;
     }
-    const Elf64Dynamic *dynamic = (const Elf64Dynamic *)dynamic_address;
-    size_t needed_offsets[MAXIMUM_NEEDED_ENTRIES];
-    size_t needed_count = 0;
-    size_t string_size = 0;
-    uintptr_t string_table = 0;
-    int has_terminator = 0;
-    size_t entries = (size_t)dynamic_program->memory_size / sizeof(*dynamic);
-    for (size_t index = 0; index < entries; ++index) {
-        switch (dynamic[index].tag) {
-        case DYNAMIC_NULL:
-            has_terminator = 1;
-            index = entries;
-            break;
-        case DYNAMIC_NEEDED:
-            if (needed_count == MAXIMUM_NEEDED_ENTRIES ||
-                dynamic[index].value > SIZE_MAX) {
-                return 0;
-            }
-            needed_offsets[needed_count] = (size_t)dynamic[index].value;
-            ++needed_count;
-            break;
-        case DYNAMIC_STRING_TABLE:
-            if (string_table != 0 ||
-                !checked_add(*main_base, dynamic[index].value,
-                             &string_table)) {
-                return 0;
-            }
-            break;
-        case DYNAMIC_STRING_SIZE:
-            if (string_size != 0 || dynamic[index].value > SIZE_MAX) {
-                return 0;
-            }
-            string_size = (size_t)dynamic[index].value;
-            break;
-        default:
-            return 0;
+    int executable_entry_mapped = 0;
+    for (size_t index = 0; index < object->load_count; ++index) {
+        if ((object->loads[index].flags & PROGRAM_EXECUTABLE) != 0 &&
+            executable_entry >= object->loads[index].address &&
+            executable_entry - object->loads[index].address <
+                object->loads[index].memory_size) {
+            executable_entry_mapped = 1;
         }
     }
-    if (!has_terminator || needed_count == 0 || string_table == 0 ||
-        string_size == 0 ||
-        !main_range_contains(headers, header_count, *main_base, string_table,
-                             string_size)) {
+    if (!executable_entry_mapped || !parse_object_dynamic(object) ||
+        !validate_main_dynamic_symbols(object) ||
+        object->dynamic.needed_count == 0) {
         return 0;
     }
     dependencies->count = 0;
-    for (size_t index = 0; index < needed_count; ++index) {
-        if (needed_offsets[index] >= string_size ||
+    for (size_t index = 0; index < object->dynamic.needed_count; ++index) {
+        if (object->dynamic.needed_offsets[index] >=
+                object->dynamic.string_size ||
             !copy_object_name(
-                (const char *)(string_table + needed_offsets[index]),
-                string_size - needed_offsets[index],
+                (const char *)(object->dynamic.string_table +
+                               object->dynamic.needed_offsets[index]),
+                object->dynamic.string_size -
+                    object->dynamic.needed_offsets[index],
                 &dependencies->names[dependencies->count])) {
             return 0;
         }
@@ -986,6 +1109,28 @@ static int mapped_range_contains(const MappedLoad *loads, size_t load_count,
     return 0;
 }
 
+static int mapped_range_is_read_only(const MappedLoad *loads,
+                                     size_t load_count, uintptr_t address,
+                                     size_t length) {
+    uintptr_t requested_end = 0;
+    if (!checked_range(address, length, &requested_end)) {
+        return 0;
+    }
+    for (size_t index = 0; index < load_count; ++index) {
+        uintptr_t load_end = 0;
+        if (!checked_range(loads[index].address, loads[index].memory_size,
+                           &load_end)) {
+            return 0;
+        }
+        if (address >= loads[index].address && requested_end <= load_end &&
+            (loads[index].flags & PROGRAM_READABLE) != 0 &&
+            (loads[index].flags & PROGRAM_WRITABLE) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int mapped_range_is_immutable_data(const MappedLoad *loads,
                                           size_t load_count,
                                           uintptr_t address, size_t length) {
@@ -1007,6 +1152,17 @@ static int mapped_range_is_immutable_data(const MappedLoad *loads,
         }
     }
     return 0;
+}
+
+static int mapped_dynamic_metadata_contains(const LoadedObject *object,
+                                            uintptr_t address,
+                                            size_t length) {
+    if (object->is_main_executable) {
+        return mapped_range_is_immutable_data(
+            object->loads, object->load_count, address, length);
+    }
+    return mapped_range_contains(object->loads, object->load_count, address,
+                                 length, 0);
 }
 
 static int tls_program_matches_load(const LoadedObject *object,
@@ -1065,7 +1221,7 @@ static void copy_bytes(uint8_t *destination, const uint8_t *source,
     }
 }
 
-static int parse_shared_dynamic(LoadedObject *object) {
+static int parse_object_dynamic(LoadedObject *object) {
     const Elf64ProgramHeader *dynamic_program = NULL;
     for (size_t index = 0; index < object->header->program_header_count;
          ++index) {
@@ -1086,7 +1242,11 @@ static int parse_shared_dynamic(LoadedObject *object) {
     uintptr_t address = 0;
     if (!checked_add(object->base, dynamic_program->virtual_address, &address) ||
         !mapped_range_contains(object->loads, object->load_count, address,
-                               (size_t)dynamic_program->memory_size, 0)) {
+                               (size_t)dynamic_program->memory_size, 0) ||
+        (object->is_main_executable &&
+         !mapped_range_is_immutable_data(
+             object->loads, object->load_count, address,
+             (size_t)dynamic_program->memory_size))) {
         return 0;
     }
     const Elf64Dynamic *dynamic = (const Elf64Dynamic *)address;
@@ -1147,6 +1307,7 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->has_version_definition_count = 0;
     result->has_version_requirements = 0;
     result->has_version_requirement_count = 0;
+    result->has_debug = 0;
     result->runpath.count = 0;
     for (size_t index = 0; index < entries; ++index) {
         uintptr_t pointer = 0;
@@ -1366,6 +1527,13 @@ static int parse_shared_dynamic(LoadedObject *object) {
             result->flags_1 = dynamic[index].value;
             result->has_flags_1 = 1;
             break;
+        case DYNAMIC_DEBUG:
+            if (!object->is_main_executable || result->has_debug ||
+                dynamic[index].value != 0) {
+                return 0;
+            }
+            result->has_debug = 1;
+            break;
         case DYNAMIC_VERSION_SYMBOL:
             if (result->has_version_symbols ||
                 !checked_add(object->base, dynamic[index].value, &pointer)) {
@@ -1413,7 +1581,6 @@ static int parse_shared_dynamic(LoadedObject *object) {
         case DYNAMIC_REL:
         case DYNAMIC_REL_SIZE:
         case DYNAMIC_REL_ENTRY:
-        case DYNAMIC_DEBUG:
         case DYNAMIC_TEXT_RELOCATION:
         case DYNAMIC_RPATH:
         case DYNAMIC_PREINIT_ARRAY:
@@ -1426,7 +1593,8 @@ static int parse_shared_dynamic(LoadedObject *object) {
     if (!terminator || result->hash == 0 || result->string_table == 0 ||
         result->symbol_table == 0 || result->string_size == 0 ||
         result->symbol_entry_size != sizeof(Elf64Symbol) ||
-        !result->has_soname ||
+        (object->is_main_executable ? result->has_soname
+                                    : !result->has_soname) ||
         result->soname_offset >= result->string_size ||
         !mapped_range_contains(object->loads, object->load_count, result->hash,
                                2 * sizeof(uint32_t), 0) ||
@@ -1435,7 +1603,11 @@ static int parse_shared_dynamic(LoadedObject *object) {
         result->flags &
                 ~(uint64_t)(DYNAMIC_FLAG_SYMBOLIC | DYNAMIC_FLAG_BIND_NOW |
                             DYNAMIC_FLAG_STATIC_TLS) ||
-        result->flags_1 & ~(uint64_t)DYNAMIC_FLAG_1_NOW ||
+        result->flags_1 &
+                ~(uint64_t)(DYNAMIC_FLAG_1_NOW |
+                            (object->is_main_executable
+                                 ? DYNAMIC_FLAG_1_PIE
+                                 : 0)) ||
         (result->has_symbolic !=
          ((result->flags & DYNAMIC_FLAG_SYMBOLIC) != 0)) ||
         ((result->flags & DYNAMIC_FLAG_STATIC_TLS) != 0 &&
@@ -1485,12 +1657,14 @@ static int parse_shared_dynamic(LoadedObject *object) {
              &result->runpath))) {
         return 0;
     }
-    ObjectName soname;
-    if (!copy_object_name(
-            (const char *)(result->string_table + result->soname_offset),
-            result->string_size - result->soname_offset, &soname) ||
-        !object_names_equal(&soname, &object->name)) {
-        return 0;
+    if (!object->is_main_executable) {
+        ObjectName soname;
+        if (!copy_object_name(
+                (const char *)(result->string_table + result->soname_offset),
+                result->string_size - result->soname_offset, &soname) ||
+            !object_names_equal(&soname, &object->name)) {
+            return 0;
+        }
     }
     for (size_t index = 0; index < result->needed_count; ++index) {
         ObjectName dependency;
@@ -1574,9 +1748,25 @@ static int parse_shared_dynamic(LoadedObject *object) {
                                    PROGRAM_WRITABLE)) {
             return 0;
         }
-    } else if (result->has_flags_1 ||
+    } else if ((result->flags_1 & DYNAMIC_FLAG_1_NOW) != 0 ||
                (result->flags & DYNAMIC_FLAG_BIND_NOW) != 0 ||
                result->has_bind_now) {
+        return 0;
+    }
+    if (object->is_main_executable &&
+        (!result->has_flags_1 || result->flags_1 != DYNAMIC_FLAG_1_PIE ||
+         result->has_soname || result->has_runpath || result->has_symbolic ||
+         result->has_relative_count || result->packed_relocations != 0 ||
+         result->packed_relocation_size != 0 ||
+         result->packed_relocation_entry_size != 0 ||
+         result->jump_relocations != 0 ||
+         result->jump_relocation_size != 0 || result->plt_got != 0 ||
+         result->has_plt_relocation_type || result->has_init_function ||
+         result->has_init_array || result->has_init_array_size ||
+         result->has_fini_function || result->has_fini_array ||
+         result->has_fini_array_size ||
+         result->has_version_definitions ||
+         result->has_version_definition_count)) {
         return 0;
     }
     return 1;
@@ -1839,6 +2029,15 @@ static int is_weak_data_reference(const Elf64Symbol *symbol) {
             (symbol_type == SYMBOL_NO_TYPE && symbol->size == 0));
 }
 
+static int is_unversioned_global_data_reference(
+    const Elf64Symbol *symbol) {
+    return symbol->section_index == SYMBOL_UNDEFINED &&
+           (symbol->information & 0x0f) == SYMBOL_OBJECT &&
+           (symbol->information >> 4) == SYMBOL_BIND_GLOBAL &&
+           symbol->other == SYMBOL_VISIBILITY_DEFAULT && symbol->value == 0 &&
+           symbol->size <= MAXIMUM_SHARED_FILE_BYTES;
+}
+
 static uint32_t version_name_hash(const char *name, size_t length) {
     uint32_t hash = 0;
     for (size_t index = 0; index < length; ++index) {
@@ -1979,8 +2178,8 @@ static int validate_version_requirements(const LoadedObject *object,
     for (size_t entry = 0;
          entry < object->dynamic.version_requirement_count; ++entry) {
         if (cursor % _Alignof(Elf64VersionRequirement) != 0 ||
-            !mapped_range_contains(object->loads, object->load_count, cursor,
-                                   sizeof(Elf64VersionRequirement), 0)) {
+            !mapped_dynamic_metadata_contains(
+                object, cursor, sizeof(Elf64VersionRequirement))) {
             return 0;
         }
         const Elf64VersionRequirement *requirement =
@@ -2016,9 +2215,9 @@ static int validate_version_requirements(const LoadedObject *object,
         for (size_t auxiliary_index = 0;
              auxiliary_index < requirement->auxiliary_count;
              ++auxiliary_index) {
-            if (!mapped_range_contains(
-                    object->loads, object->load_count, auxiliary_cursor,
-                    sizeof(Elf64VersionRequirementAuxiliary), 0)) {
+            if (!mapped_dynamic_metadata_contains(
+                    object, auxiliary_cursor,
+                    sizeof(Elf64VersionRequirementAuxiliary))) {
                 return 0;
             }
             const Elf64VersionRequirementAuxiliary *auxiliary =
@@ -2161,7 +2360,9 @@ static int validate_symbol_versions(const LoadedObject *object,
             if ((raw & VERSION_INDEX_HIDDEN) != 0 ||
                 (!is_tls_resolver_reference(object, &symbols[index]) &&
                  !is_weak_function_reference(&symbols[index]) &&
-                 !is_weak_data_reference(&symbols[index]))) {
+                 !is_weak_data_reference(&symbols[index]) &&
+                 !is_unversioned_global_data_reference(
+                     &symbols[index]))) {
                 return 0;
             }
             continue;
@@ -2317,6 +2518,210 @@ static int validate_dynamic_symbols(const LoadedObject *object) {
     return 1;
 }
 
+static size_t main_copy_relocation_references(
+    const LoadedObject *object, uint32_t symbol_index,
+    const Elf64Rela **matched_relocation) {
+    const Elf64Rela *relocations =
+        (const Elf64Rela *)object->dynamic.relocations;
+    size_t relocation_count =
+        object->dynamic.relocation_size / sizeof(*relocations);
+    size_t references = 0;
+    *matched_relocation = NULL;
+    for (size_t index = 0; index < relocation_count; ++index) {
+        if ((uint32_t)(relocations[index].information >> 32) ==
+            symbol_index) {
+            *matched_relocation = &relocations[index];
+            ++references;
+        }
+    }
+    return references;
+}
+
+static int validate_main_dynamic_symbols(const LoadedObject *object) {
+    uint32_t symbol_count = 0;
+    if (!object->is_main_executable ||
+        !dynamic_symbol_count(object, &symbol_count) || symbol_count < 2 ||
+        object->dynamic.relocations == 0 ||
+        object->dynamic.relocation_size == 0 ||
+        object->dynamic.relocation_size % sizeof(Elf64Rela) != 0 ||
+        object->dynamic.relocation_size / sizeof(Elf64Rela) !=
+            (size_t)symbol_count - 1 ||
+        !mapped_range_is_immutable_data(
+            object->loads, object->load_count, object->dynamic.hash,
+            2 * sizeof(uint32_t)) ||
+        !mapped_range_is_immutable_data(
+            object->loads, object->load_count,
+            object->dynamic.string_table, object->dynamic.string_size) ||
+        !mapped_range_is_immutable_data(
+            object->loads, object->load_count,
+            object->dynamic.symbol_table,
+            (size_t)symbol_count * sizeof(Elf64Symbol)) ||
+        !mapped_range_is_immutable_data(
+            object->loads, object->load_count,
+            object->dynamic.relocations,
+            object->dynamic.relocation_size)) {
+        return 0;
+    }
+    const uint32_t *hash = (const uint32_t *)object->dynamic.hash;
+    size_t hash_words = 2 + (size_t)hash[0] + (size_t)symbol_count;
+    if (!mapped_range_is_immutable_data(
+            object->loads, object->load_count, object->dynamic.hash,
+            hash_words * sizeof(uint32_t))) {
+        return 0;
+    }
+    const Elf64Symbol *symbols =
+        (const Elf64Symbol *)object->dynamic.symbol_table;
+    if (symbols[0].name != 0 || symbols[0].information != 0 ||
+        symbols[0].other != 0 ||
+        symbols[0].section_index != SYMBOL_UNDEFINED ||
+        symbols[0].value != 0 || symbols[0].size != 0) {
+        return 0;
+    }
+    uint64_t requirement_mask = 0;
+    uint64_t referenced_requirements = 0;
+    const uint16_t *versions = NULL;
+    if (object->dynamic.has_version_symbols) {
+        if (object->dynamic.has_version_definitions ||
+            !object->dynamic.has_version_requirements ||
+            object->dynamic.version_symbols % _Alignof(uint16_t) != 0 ||
+            !mapped_range_is_immutable_data(
+                object->loads, object->load_count,
+                object->dynamic.version_symbols,
+                (size_t)symbol_count * sizeof(uint16_t)) ||
+            !validate_version_requirements(object, &requirement_mask)) {
+            return 0;
+        }
+        versions = (const uint16_t *)object->dynamic.version_symbols;
+        if (versions[0] != VERSION_INDEX_LOCAL) {
+            return 0;
+        }
+    }
+    size_t total_bytes = 0;
+    for (uint32_t index = 1; index < symbol_count; ++index) {
+        const Elf64Symbol *symbol = &symbols[index];
+        const Elf64Rela *relocation = NULL;
+        uintptr_t symbol_address = 0;
+        uintptr_t relocation_target = 0;
+        const char *name = NULL;
+        size_t name_length = 0;
+        if (main_copy_relocation_references(object, index, &relocation) != 1 ||
+            relocation == NULL ||
+            (uint32_t)relocation->information != RELOCATION_X86_64_COPY ||
+            relocation->addend != 0 ||
+            (symbol->information & 0x0f) != SYMBOL_OBJECT ||
+            (symbol->information >> 4) != SYMBOL_BIND_GLOBAL ||
+            symbol->other != SYMBOL_VISIBILITY_DEFAULT ||
+            symbol->section_index == SYMBOL_UNDEFINED ||
+            symbol->section_index == SYMBOL_ABSOLUTE || symbol->size == 0 ||
+            symbol->size > MAXIMUM_COPY_RELOCATION_BYTES ||
+            !dynamic_symbol_name(object, symbol, &name, &name_length) ||
+            !checked_add(object->base, symbol->value, &symbol_address) ||
+            !checked_add(object->base, relocation->offset,
+                         &relocation_target) ||
+            symbol_address != relocation_target ||
+            !mapped_range_contains(object->loads, object->load_count,
+                                   relocation_target, (size_t)symbol->size,
+                                   PROGRAM_WRITABLE) ||
+            !checked_size_add(total_bytes, (size_t)symbol->size,
+                              &total_bytes) ||
+            total_bytes > MAXIMUM_COPY_RELOCATION_BYTES) {
+            return 0;
+        }
+        if (versions != NULL) {
+            uint16_t raw = versions[index];
+            uint16_t version_index = raw & VERSION_INDEX_MASK;
+            if ((raw & VERSION_INDEX_HIDDEN) != 0 ||
+                version_index == VERSION_INDEX_LOCAL ||
+                (version_index > VERSION_INDEX_GLOBAL &&
+                 (version_index >= 64 ||
+                  (requirement_mask &
+                   (UINT64_C(1) << version_index)) == 0))) {
+                return 0;
+            }
+            if (version_index > VERSION_INDEX_GLOBAL) {
+                referenced_requirements |=
+                    UINT64_C(1) << version_index;
+            }
+        }
+        const Elf64Rela *relocations =
+            (const Elf64Rela *)object->dynamic.relocations;
+        size_t relocation_count =
+            object->dynamic.relocation_size / sizeof(*relocations);
+        uintptr_t target_end = 0;
+        if (!checked_range(relocation_target, (size_t)symbol->size,
+                           &target_end)) {
+            return 0;
+        }
+        for (size_t prior = 0; prior < relocation_count; ++prior) {
+            if (&relocations[prior] == relocation) {
+                break;
+            }
+            uint32_t prior_symbol_index =
+                (uint32_t)(relocations[prior].information >> 32);
+            if (prior_symbol_index == 0 ||
+                prior_symbol_index >= symbol_count) {
+                return 0;
+            }
+            const Elf64Symbol *prior_symbol =
+                &symbols[prior_symbol_index];
+            uintptr_t prior_target = 0;
+            uintptr_t prior_end = 0;
+            if (!checked_add(object->base, relocations[prior].offset,
+                             &prior_target) ||
+                prior_symbol->size > SIZE_MAX ||
+                !checked_range(prior_target,
+                               (size_t)prior_symbol->size, &prior_end) ||
+                (relocation_target < prior_end &&
+                 prior_target < target_end)) {
+                return 0;
+            }
+        }
+    }
+    return total_bytes != 0 &&
+           referenced_requirements == requirement_mask;
+}
+
+static int main_copy_symbol_version_requirement(
+    const LoadedObject *object, uint32_t symbol_index,
+    SymbolVersionRequirement *requirement) {
+    zero_bytes((uint8_t *)requirement, sizeof(*requirement));
+    uint32_t symbol_count = 0;
+    if (!object->is_main_executable ||
+        !dynamic_symbol_count(object, &symbol_count) || symbol_index == 0 ||
+        symbol_index >= symbol_count) {
+        return 0;
+    }
+    const Elf64Rela *relocation = NULL;
+    if (main_copy_relocation_references(object, symbol_index, &relocation) !=
+            1 ||
+        relocation == NULL ||
+        (uint32_t)relocation->information != RELOCATION_X86_64_COPY) {
+        return 0;
+    }
+    if (!object->dynamic.has_version_symbols) {
+        return 1;
+    }
+    const uint16_t *versions =
+        (const uint16_t *)object->dynamic.version_symbols;
+    uint16_t raw = versions[symbol_index];
+    uint16_t version_index = raw & VERSION_INDEX_MASK;
+    if ((raw & VERSION_INDEX_HIDDEN) != 0 ||
+        version_index == VERSION_INDEX_LOCAL) {
+        return 0;
+    }
+    if (version_index == VERSION_INDEX_GLOBAL) {
+        return 1;
+    }
+    if (!find_version_requirement(
+            object, version_index, &requirement->name,
+            &requirement->name_length, &requirement->provider)) {
+        return 0;
+    }
+    requirement->explicit_version = 1;
+    requirement->has_provider = 1;
+    return 1;
+}
+
 static int symbol_version_requirement(
     const LoadedObject *object, uint32_t symbol_index,
     SymbolVersionRequirement *requirement) {
@@ -2342,7 +2747,9 @@ static int symbol_version_requirement(
         return (raw & VERSION_INDEX_HIDDEN) == 0 &&
                (is_tls_resolver_reference(object, &symbols[symbol_index]) ||
                 is_weak_function_reference(&symbols[symbol_index]) ||
-                is_weak_data_reference(&symbols[symbol_index]));
+                is_weak_data_reference(&symbols[symbol_index]) ||
+                is_unversioned_global_data_reference(
+                    &symbols[symbol_index]));
     }
     if (symbols[symbol_index].section_index == SYMBOL_UNDEFINED) {
         if (!find_version_requirement(
@@ -2401,6 +2808,23 @@ static int absolute_symbol_version_requirement(
 static int defined_symbol_matches_version(
     const LoadedObject *object, uint32_t symbol_index,
     const SymbolVersionRequirement *requirement) {
+    if (object->is_main_executable) {
+        SymbolVersionRequirement copied_version;
+        if (!main_copy_symbol_version_requirement(
+                object, symbol_index, &copied_version) ||
+            (requirement->explicit_version &&
+             (!copied_version.explicit_version ||
+              requirement->name_length != copied_version.name_length ||
+              !bytes_equal(requirement->name, copied_version.name,
+                           requirement->name_length))) ||
+            (requirement->has_provider &&
+             (!copied_version.has_provider ||
+              !object_names_equal(&requirement->provider,
+                                  &copied_version.provider)))) {
+            return 0;
+        }
+        return 1;
+    }
     if (requirement->has_provider &&
         !object_names_equal(&object->name, &requirement->provider)) {
         return 0;
@@ -2492,6 +2916,12 @@ static int resolve_global_data_symbol_versioned(
             requester, name, name_length, version_requirement, resolution)) {
         return 1;
     }
+    if (graph->main_executable != NULL &&
+        find_exported_data_symbol_versioned(
+            graph->main_executable, name, name_length,
+            version_requirement, resolution)) {
+        return 1;
+    }
     for (size_t index = 0; index < graph->object_count; ++index) {
         if ((!requester->dynamic.has_symbolic || index != requester_index) &&
             find_exported_data_symbol_versioned(
@@ -2578,6 +3008,12 @@ static int resolve_global_absolute_symbol_versioned(
     if (requester->dynamic.has_symbolic &&
         find_exported_absolute_symbol_versioned(
             requester, name, name_length, reference_type,
+            version_requirement, resolution)) {
+        return 1;
+    }
+    if (graph->main_executable != NULL &&
+        find_exported_absolute_symbol_versioned(
+            graph->main_executable, name, name_length, reference_type,
             version_requirement, resolution)) {
         return 1;
     }
@@ -3356,6 +3792,12 @@ static int resolve_global_symbol_versioned(
                                        version_requirement, resolution)) {
         return 1;
     }
+    if (graph->main_executable != NULL &&
+        find_exported_symbol_versioned(
+            graph->main_executable, name, name_length,
+            version_requirement, resolution)) {
+        return 1;
+    }
     for (size_t index = 0; index < graph->object_count; ++index) {
         if ((!requester->dynamic.has_symbolic || index != requester_index) &&
             find_exported_symbol_versioned(
@@ -3466,6 +3908,7 @@ static int relocate_graph(ObjectGraph *graph,
                           RelocationEvidence *evidence) {
     evidence->relative = 0;
     evidence->packed_relative = 0;
+    evidence->copy = 0;
     evidence->external = 0;
     evidence->data = 0;
     evidence->absolute = 0;
@@ -3492,6 +3935,93 @@ static int relocate_graph(ObjectGraph *graph,
         if (!apply_external_relocations(graph, graph->relocation_order[index],
                                         evidence)) {
             return 0;
+        }
+    }
+    return 1;
+}
+
+static int resolve_copy_source(
+    const ObjectGraph *graph, const char *name, size_t name_length,
+    const SymbolVersionRequirement *version_requirement,
+    DataSymbolResolution *resolution) {
+    if (name_length == 0 || name_length > MAXIMUM_SYMBOL_NAME_BYTES) {
+        return 0;
+    }
+    for (size_t index = 0; index < graph->object_count; ++index) {
+        if (find_exported_data_symbol_versioned(
+                &graph->objects[index], name, name_length,
+                version_requirement, resolution)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int apply_main_copy_relocations(
+    const LoadedObject *main_executable, const ObjectGraph *graph,
+    RelocationEvidence *evidence) {
+    if (main_executable == NULL || graph->main_executable != main_executable ||
+        !validate_main_dynamic_symbols(main_executable)) {
+        return 0;
+    }
+    const Elf64Rela *relocations =
+        (const Elf64Rela *)main_executable->dynamic.relocations;
+    size_t count =
+        main_executable->dynamic.relocation_size / sizeof(*relocations);
+    const Elf64Symbol *symbols =
+        (const Elf64Symbol *)main_executable->dynamic.symbol_table;
+    CopyOperation operations[MAXIMUM_RELOCATIONS];
+    if (count == 0 || count > MAXIMUM_RELOCATIONS) {
+        return 0;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        uint32_t symbol_index =
+            (uint32_t)(relocations[index].information >> 32);
+        const Elf64Symbol *symbol = &symbols[symbol_index];
+        const char *name = NULL;
+        size_t name_length = 0;
+        SymbolVersionRequirement version_requirement;
+        DataSymbolResolution resolution;
+        uintptr_t target = 0;
+        uintptr_t target_end = 0;
+        uintptr_t source_end = 0;
+        zero_bytes((uint8_t *)&version_requirement,
+                   sizeof(version_requirement));
+        zero_bytes((uint8_t *)&resolution, sizeof(resolution));
+        if (!dynamic_symbol_name(main_executable, symbol, &name,
+                                 &name_length) ||
+            !main_copy_symbol_version_requirement(
+                main_executable, symbol_index, &version_requirement) ||
+            !resolve_copy_source(graph, name, name_length,
+                                 &version_requirement, &resolution) ||
+            resolution.size != (size_t)symbol->size ||
+            !checked_add(main_executable->base,
+                         relocations[index].offset, &target) ||
+            !checked_range(target, resolution.size, &target_end) ||
+            !checked_range(resolution.address, resolution.size,
+                           &source_end) ||
+            (target < source_end && resolution.address < target_end)) {
+            return 0;
+        }
+        operations[index].target = target;
+        operations[index].source = resolution.address;
+        operations[index].size = resolution.size;
+        operations[index].versioned =
+            version_requirement.explicit_version;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        copy_bytes((uint8_t *)operations[index].target,
+                   (const uint8_t *)operations[index].source,
+                   operations[index].size);
+        for (size_t byte = 0; byte < operations[index].size; ++byte) {
+            if (*(volatile const uint8_t *)(operations[index].target + byte) !=
+                *(volatile const uint8_t *)(operations[index].source + byte)) {
+                return 0;
+            }
+        }
+        ++evidence->copy;
+        if (operations[index].versioned) {
+            ++evidence->versioned;
         }
     }
     return 1;
@@ -3737,7 +4267,7 @@ static void load_shared_object(const ObjectName *name,
             fail_with(shared_elf_failure, sizeof(shared_elf_failure) - 1);
         }
     }
-    if (!parse_shared_dynamic(object) || !validate_dynamic_symbols(object)) {
+    if (!parse_object_dynamic(object) || !validate_dynamic_symbols(object)) {
         fail_with(shared_dynamic_failure,
                   sizeof(shared_dynamic_failure) - 1);
     }
@@ -4072,11 +4602,12 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
     }
 
     DependencyNames roots;
-    uintptr_t main_base = 0;
-    if (!discover_main_dependencies(
+    LoadedObject main_executable;
+    if (!initialize_main_executable(
             (const Elf64ProgramHeader *)program_headers,
-            program_header_count, &main_base, &roots) ||
-        main_base == 0 || roots.count != 1 ||
+            program_header_count, executable_entry, &main_executable,
+            &roots) ||
+        roots.count != 1 ||
         !object_name_equals_literal(&roots.names[0], expected_needed,
                                     sizeof(expected_needed) - 1) ||
         !write_marker(needed_marker, sizeof(needed_marker) - 1)) {
@@ -4090,6 +4621,7 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
                       sizeof(multi_object_marker) - 1)) {
         fail_with(shared_graph_failure, sizeof(shared_graph_failure) - 1);
     }
+    graph.main_executable = &main_executable;
     if (!verify_probe_runpaths(&graph) ||
         !write_marker(runpath_marker, sizeof(runpath_marker) - 1)) {
         fail_with(shared_runpath_failure,
@@ -4109,7 +4641,7 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
     }
     RelocationEvidence evidence;
     if (!relocate_graph(&graph, &tls_layout, &evidence) ||
-        evidence.relative != 9 || evidence.external != 17 ||
+        evidence.relative != 9 || evidence.external != 18 ||
         evidence.tls != 3 ||
         !write_marker(relocation_marker, sizeof(relocation_marker) - 1)) {
         fail_with(shared_relocation_failure,
@@ -4120,6 +4652,14 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
                       sizeof(packed_relative_marker) - 1)) {
         fail_with(shared_packed_relative_failure,
                   sizeof(shared_packed_relative_failure) - 1);
+    }
+    if (!apply_main_copy_relocations(
+            &main_executable, &graph, &evidence) ||
+        evidence.copy != 1 ||
+        !write_marker(copy_relocation_marker,
+                      sizeof(copy_relocation_marker) - 1)) {
+        fail_with(shared_copy_relocation_failure,
+                  sizeof(shared_copy_relocation_failure) - 1);
     }
     if (!write_marker(symbol_scope_marker,
                       sizeof(symbol_scope_marker) - 1)) {
@@ -4132,7 +4672,7 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
         fail_with(shared_weak_binding_failure,
                   sizeof(shared_weak_binding_failure) - 1);
     }
-    if (evidence.data != 3 || evidence.weak_data_definitions != 1 ||
+    if (evidence.data != 4 || evidence.weak_data_definitions != 1 ||
         evidence.unresolved_weak_data != 1 ||
         !write_marker(global_data_marker,
                       sizeof(global_data_marker) - 1)) {
@@ -4148,7 +4688,7 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
         fail_with(shared_absolute_symbol_failure,
                   sizeof(shared_absolute_symbol_failure) - 1);
     }
-    if (evidence.versioned != 13 ||
+    if (evidence.versioned != 14 ||
         !write_marker(version_marker, sizeof(version_marker) - 1)) {
         fail_with(shared_version_failure,
                   sizeof(shared_version_failure) - 1);
@@ -4191,7 +4731,10 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
         UINT64_C(0x3333333333333333);
     const uint64_t observer =
         (input ^ UINT64_C(0x0f0ff0f05a5aa5a5)) + core +
-        UINT64_C(0x4444444444444444);
+        UINT64_C(0x4444444444444444) +
+        UINT64_C(0x0123456789abcdef) +
+        UINT64_C(0x13579bdf2468ace0) +
+        UINT64_C(0xfedcba9876543210);
     const uint64_t weak_choice =
         input + UINT64_C(0x13579bdf2468ace0);
     const uint64_t expected =

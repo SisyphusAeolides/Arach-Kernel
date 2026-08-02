@@ -130,11 +130,13 @@ linker, whose measured marker precedes its `AT_ENTRY` transfer to the Rust main
 image. Registry and lifecycle ownership exchange retains the PID generation;
 caught signal handlers and close-on-exec objects reset only after publication,
 and the former hierarchy is reclaimed only after CR3 points at the replacement.
-The interpreter now derives the main load bias from `AT_PHDR` and closes up to
-eight objects with eight dependencies each. It discovers objects breadth-first
-from canonical SONAMEs, snapshots each SONAME once, rejects cycles, derives a
-provider-first order, and uses deterministic load-order SysV symbol scope for
-eager PLT binding. The probe first creates an ephemeral `/runpath` directory;
+The interpreter now derives the main load bias from `AT_PHDR`, reconstructs and
+bounds the main PIE's immutable ELF/dynamic/symbol/version/relocation metadata,
+and closes up to eight objects with eight dependencies each. It discovers
+objects breadth-first from canonical SONAMEs, snapshots each SONAME once,
+rejects cycles, derives a provider-first order, and uses deterministic
+load-order SysV symbol scope for eager PLT binding. The probe first creates an
+ephemeral `/runpath` directory;
 exact bounded `DT_RUNPATH` entries load three providers from it while the root
 object remains at `/`. The measured diamond loads one consumer, two independent
 middle providers, and one coalesced core; it applies the core's real
@@ -144,9 +146,15 @@ middle providers, and one coalesced core; it applies the core's real
 canonical `DT_RELR` address/bitmap pair. It resolves seven real exact-version
 object `R_X86_64_JUMP_SLOT` entries, the bounded `__tls_get_addr` edge, one
 first-definition weak-function edge, and one unresolved weak-function-to-zero
-edge. Three eager `R_X86_64_GLOB_DAT` writes bind one exact-version data
+edge. Three root `R_X86_64_GLOB_DAT` writes bind one exact-version data
 object, select an earlier weak data definition over a later strong definition,
-and write one unresolved unversioned weak data slot as zero. Four bounded
+and write one unresolved unversioned weak data slot as zero. A fourth observer
+`GLOB_DAT` binds the main executable's independent 24-byte object. The
+executable's exact-version `R_X86_64_COPY` batch is prevalidated for exact
+extent, writable disjoint targets, readable source, and source/destination
+non-aliasing. Executable-first scope interposes that copy for the observer,
+while the root's `DT_SYMBOLIC` reference retains and later mutates the
+independent provider storage. Four bounded
 `R_X86_64_64` writes bind a versioned function pointer, a versioned object
 pointer at a checked eight-byte interior addend, an earlier weak object, and an
 unresolved weak slot as zero. The linker then seals all four objects R/RW/RX,
