@@ -2010,6 +2010,26 @@ fn map_epoll_error(error: crate::linux_epoll::EpollError) -> DescriptorError {
     }
 }
 
+/// Returns the number of bytes immediately available to read on `fd`.
+/// For object types that do not track precise byte counts the value is 1
+/// when data is ready and 0 when not ready.
+pub fn fionread(owner: ProcessHandle, fd: u32) -> Result<usize, DescriptorError> {
+    let lease = acquire_descriptor(owner, fd)?;
+    let ready = readiness_for_lease(lease, monotonic_now_ns(), false).map(|value| value.0)?;
+    Ok(if ready & crate::linux_eventfd::READY_IN != 0 { 1 } else { 0 })
+}
+
+/// Enable or disable `O_NONBLOCK` on the file description backing `fd`.
+pub fn set_nonblock(owner: ProcessHandle, fd: u32, enable: bool) -> Result<(), DescriptorError> {
+    let current = status_flags(owner, fd)?;
+    let updated = if enable {
+        current | crate::linux_file::O_NONBLOCK
+    } else {
+        current & !crate::linux_file::O_NONBLOCK
+    };
+    set_status_flags(owner, fd, updated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

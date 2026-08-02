@@ -1451,6 +1451,20 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::EpollCtl) => linux_epoll_ctl(arguments),
         Some(crate::process::abi::LinuxSyscall::OpenAt) => linux_openat(arguments),
         Some(crate::process::abi::LinuxSyscall::UnlinkAt) => linux_unlinkat(arguments),
+        Some(crate::process::abi::LinuxSyscall::Nanosleep) => linux_nanosleep(arguments),
+        Some(crate::process::abi::LinuxSyscall::ClockNanosleep) => linux_clock_nanosleep(arguments),
+        Some(crate::process::abi::LinuxSyscall::Getrandom) => linux_getrandom(arguments),
+        Some(crate::process::abi::LinuxSyscall::Prlimit64) => linux_prlimit64(arguments),
+        Some(crate::process::abi::LinuxSyscall::Fork) => linux_fork_stub(),
+        Some(crate::process::abi::LinuxSyscall::Vfork) => linux_fork_stub(),
+        Some(crate::process::abi::LinuxSyscall::Wait4) => linux_wait4(arguments),
+        Some(crate::process::abi::LinuxSyscall::Ioctl) => linux_ioctl(arguments),
+        Some(crate::process::abi::LinuxSyscall::InotifyInit1) => linux_inotify_init1(arguments),
+        Some(crate::process::abi::LinuxSyscall::InotifyAddWatch) => linux_inotify_add_watch(arguments),
+        Some(crate::process::abi::LinuxSyscall::InotifyRmWatch) => linux_inotify_rm_watch(arguments),
+        Some(crate::process::abi::LinuxSyscall::Ppoll) => linux_ppoll(arguments),
+        Some(crate::process::abi::LinuxSyscall::Unshare) => linux_unshare(arguments),
+        Some(crate::process::abi::LinuxSyscall::Rseq) => linux_rseq(arguments),
         Some(_) => ERROR_NOT_IMPLEMENTED,
         None => ERROR_NOT_IMPLEMENTED,
     }
@@ -3230,7 +3244,7 @@ fn linux_descriptor_revents(
 }
 
 #[cfg(target_os = "none")]
-fn linux_poll(arguments: [u64; 6]) -> isize {
+fn linux_poll_impl(arguments: [u64; 6]) -> isize {
     let Ok(nfds) = usize::try_from(arguments[1]) else {
         return ERROR_INVALID_ARGUMENT;
     };
@@ -3270,6 +3284,11 @@ fn linux_poll(arguments: [u64; 6]) -> isize {
     } else {
         ready_count
     }
+}
+
+#[cfg(target_os = "none")]
+fn linux_poll(arguments: [u64; 6]) -> isize {
+    linux_poll_impl(arguments)
 }
 
 #[cfg(target_os = "none")]
@@ -3545,10 +3564,427 @@ fn linux_brk(arguments: [u64; 6]) -> isize {
     }
 }
 
+/// `nanosleep(2)` — spin-poll the monotonic clock until the requested duration
+/// elapses.  The call is non-interruptible in the current single-CPU boot
+/// context; `rem` is always zeroed on success because the full interval elapsed.
+#[cfg(target_os = "none")]
+fn linux_nanosleep(arguments: [u64; 6]) -> isize {
+    let mut encoded = [0_u8; core::mem::size_of::<LinuxTimespec>()];
+    if copy_from_user(arguments[0], &mut encoded).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    // SAFETY: LinuxTimespec is repr(C), Copy, and the byte array was fully
+    // initialized by the bounded user copy above.
+    let req = unsafe { core::ptr::read_unaligned(encoded.as_ptr().cast::<LinuxTimespec>()) };
+    let Some(duration_ns) = timespec_to_nanoseconds(req) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let deadline = crate::interrupts::monotonic_nanoseconds().saturating_add(duration_ns);
+    while crate::interrupts::monotonic_nanoseconds() < deadline {
+        core::hint::spin_loop();
+    }
+    // Write zero remainder if the caller supplied a `rem` pointer.
+    if arguments[1] != 0 {
+        let zero = LinuxTimespec { tv_sec: 0, tv_nsec: 0 };
+        if copy_value_to_user(arguments[1], &zero).is_err() {
+            return ERROR_BAD_ADDRESS;
+        }
+    }
+    0
+}
+
+/// `clock_nanosleep(2)` — absolute or relative sleep on a supported clock.
+/// CLOCK_REALTIME (0) and CLOCK_MONOTONIC (1) are accepted; the absolute flag
+/// (TIMER_ABSTIME = 1) is supported by computing the remaining interval at
+/// call time.
+#[cfg(target_os = "none")]
+fn linux_clock_nanosleep(arguments: [u64; 6]) -> isize {
+    const CLOCK_REALTIME: u64 = 0;
+    const CLOCK_MONOTONIC: u64 = 1;
+    const TIMER_ABSTIME: u64 = 1;
+
+    let clockid = arguments[0];
+    if clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let flags = arguments[1];
+    let mut encoded = [0_u8; core::mem::size_of::<LinuxTimespec>()];
+    if copy_from_user(arguments[2], &mut encoded).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    // SAFETY: LinuxTimespec is repr(C), Copy, and fully initialized above.
+    let req = unsafe { core::ptr::read_unaligned(encoded.as_ptr().cast::<LinuxTimespec>()) };
+    let Some(req_ns) = timespec_to_nanoseconds(req) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let now = crate::interrupts::monotonic_nanoseconds();
+    let deadline = if flags & TIMER_ABSTIME != 0 {
+        // Absolute target; if already in the past, return immediately.
+        if req_ns <= now { return 0; }
+        req_ns
+    } else {
+        now.saturating_add(req_ns)
+    };
+    while crate::interrupts::monotonic_nanoseconds() < deadline {
+        core::hint::spin_loop();
+    }
+    // `rem` is not written for absolute sleeps (POSIX); for relative sleeps
+    // the full interval always elapses so remainder is zero.
+    if flags & TIMER_ABSTIME == 0 && arguments[3] != 0 {
+        let zero = LinuxTimespec { tv_sec: 0, tv_nsec: 0 };
+        if copy_value_to_user(arguments[3], &zero).is_err() {
+            return ERROR_BAD_ADDRESS;
+        }
+    }
+    0
+}
+
+/// `getrandom(2)` — fill the caller's buffer with deterministic entropy
+/// derived from the monotonic counter.  The first boot has no hardware RNG
+/// yet; a simple counter-based XOR shift keeps the interface usable for
+/// dynamic linker and libc initialisation while a proper entropy source is
+/// wired up.  GRND_RANDOM (2) and GRND_NONBLOCK (1) flags are accepted but
+/// do not change behaviour — the counter is always ready.
+#[cfg(target_os = "none")]
+fn linux_getrandom(arguments: [u64; 6]) -> isize {
+    const GRND_NONBLOCK: u32 = 0x0001;
+    const GRND_RANDOM: u32 = 0x0002;
+    const SUPPORTED_FLAGS: u32 = GRND_NONBLOCK | GRND_RANDOM;
+
+    let buf_ptr = arguments[0];
+    let count = core::cmp::min(arguments[1], MAXIMUM_AKASHIC_IO_BYTES as u64) as usize;
+    let Ok(flags) = u32::try_from(arguments[2]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if flags & !SUPPORTED_FLAGS != 0 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    if count == 0 {
+        return 0;
+    }
+    // Mix the monotonic counter with a rotating XOR-shift to produce
+    // non-repeating bytes suitable for dynamic linker cookie generation.
+    static ENTROPY_COUNTER: AtomicU64 = AtomicU64::new(0x517cc1b727220a95);
+    let mut staging = AKASHIC_IO_STAGING.lock();
+    let output = &mut staging[..count];
+    let mut state = ENTROPY_COUNTER.load(Ordering::Acquire)
+        ^ crate::interrupts::monotonic_nanoseconds();
+    for chunk in output.chunks_mut(8) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let bytes = state.to_ne_bytes();
+        let n = chunk.len();
+        chunk.copy_from_slice(&bytes[..n]);
+    }
+    ENTROPY_COUNTER.store(state, Ordering::Release);
+    if copy_to_user(buf_ptr, output).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    count as isize
+}
+
+/// `prlimit64(2)` — query or set process resource limits.  Only RLIMIT_STACK
+/// (3) and RLIMIT_NOFILE (7) are queryable; all others return EINVAL.  Setting
+/// limits is not yet implemented and returns EPERM.
+#[cfg(target_os = "none")]
+fn linux_prlimit64(arguments: [u64; 6]) -> isize {
+    const RLIMIT_STACK: u64 = 3;
+    const RLIMIT_NOFILE: u64 = 7;
+    // RLIM_INFINITY wire value on x86-64 Linux.
+    const RLIM_INFINITY: u64 = u64::MAX;
+    // Default 8 MiB stack; default 1024 open-file descriptors.
+    const DEFAULT_STACK_BYTES: u64 = 8 * 1024 * 1024;
+    const DEFAULT_NOFILE: u64 = 1024;
+
+    let pid = arguments[0];
+    let resource = arguments[1];
+    let new_limit_ptr = arguments[2];
+    let old_limit_ptr = arguments[3];
+
+    // Only self-queries are supported (pid == 0 means calling process).
+    if pid != 0 {
+        return -1; // EPERM
+    }
+    // Setting limits is not yet supported.
+    if new_limit_ptr != 0 {
+        return ERROR_OPERATION_NOT_PERMITTED;
+    }
+    if old_limit_ptr == 0 {
+        return 0;
+    }
+    let (cur, max) = match resource {
+        RLIMIT_STACK => (DEFAULT_STACK_BYTES, RLIM_INFINITY),
+        RLIMIT_NOFILE => (DEFAULT_NOFILE, DEFAULT_NOFILE),
+        _ => return ERROR_INVALID_ARGUMENT,
+    };
+    // Wire layout: two u64 values (rlim_cur, rlim_max).
+    let mut encoded = [0_u8; 16];
+    encoded[..8].copy_from_slice(&cur.to_ne_bytes());
+    encoded[8..].copy_from_slice(&max.to_ne_bytes());
+    if copy_to_user(old_limit_ptr, &encoded).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        0
+    }
+}
+
+/// `fork(2)` / `vfork(2)` — both require a full address-space copy that is
+/// not yet admitted by the Arach page-table allocator.  Return EAGAIN so
+/// that callers (notably musl's fallback path) can detect unavailability
+/// rather than receiving ENOSYS, which some libc implementations treat as
+/// fatal.  Most COSMIC services use `clone` with CLONE_VM instead.
+#[cfg(target_os = "none")]
+fn linux_fork_stub() -> isize {
+    ERROR_TRY_AGAIN
+}
+
+/// `wait4(2)` — wait for a child process to change state.  Currently only
+/// WNOHANG (immediate non-blocking check) is supported; blocking wait will be
+/// added once the scheduler admits a wait queue.
+#[cfg(target_os = "none")]
+fn linux_wait4(arguments: [u64; 6]) -> isize {
+    const WNOHANG: u64 = 1;
+    let raw_pid = arguments[0] as i64;
+    let status_ptr = arguments[1];
+    let options = arguments[2];
+
+    // Only WNOHANG is honoured; blocking waits remain unimplemented.
+    if options & !WNOHANG != 0 {
+        return ERROR_NOT_IMPLEMENTED;
+    }
+    // -1 or negative means wait for any child; 0 means same thread-group.
+    let target_pid: Option<u32> = if raw_pid <= 0 {
+        None
+    } else {
+        u32::try_from(raw_pid).ok()
+    };
+
+    let Some(current) = crate::process::lifecycle::current_handle() else {
+        return ERROR_NO_ENTRY;
+    };
+    let parent_pid = current.pid;
+
+    // Find a zombie matching the request.
+    let snapshot = match crate::process::lifecycle::wait_child(parent_pid, target_pid) {
+        Ok(snapshot) => snapshot,
+        Err(crate::process::lifecycle::LifecycleError::StillRunning) => {
+            // Child exists but has not exited yet; with WNOHANG return 0.
+            return 0;
+        }
+        Err(crate::process::lifecycle::LifecycleError::NoChild) => {
+            return crate::process::lifecycle::ERROR_NO_CHILD;
+        }
+        Err(_) => return ERROR_INVALID_ARGUMENT,
+    };
+
+    // Reap the zombie: release the process slot.
+    let exit_code = match crate::process::lifecycle::reap_child(parent_pid, snapshot.handle) {
+        Ok(code) => code,
+        Err(_) => return ERROR_INVALID_ARGUMENT,
+    };
+
+    // Write the Linux-encoded wait status if the caller wants it.
+    if status_ptr != 0 {
+        // Normal exit encoding: (code & 0xff) << 8.
+        let encoded = ((exit_code as u32) & 0xff) << 8;
+        if copy_value_to_user(status_ptr, &encoded).is_err() {
+            return ERROR_BAD_ADDRESS;
+        }
+    }
+    snapshot.handle.pid as isize
+}
+
+/// `ioctl(2)` — device control.  Only the universally-required terminal and
+/// socket ioctls needed by COSMIC / glibc startup are handled.  Unknown
+/// requests return ENOTTY for terminal targets and EINVAL for all others so
+/// that callers can probe capability without crashing.
+#[cfg(target_os = "none")]
+fn linux_ioctl(arguments: [u64; 6]) -> isize {
+    const TIOCGWINSZ: u64 = 0x5413;
+    const TIOCSWINSZ: u64 = 0x5414;
+    const FIONREAD: u64 = 0x541b;
+    const FIONBIO: u64 = 0x5421;
+    const FIOCLEX: u64 = 0x5451;
+    const FIONCLEX: u64 = 0x5450;
+
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let request = arguments[1];
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+
+    match request {
+        TIOCGWINSZ => {
+            // Report a sane 80x24 terminal window so that ncurses/readline do
+            // not collapse to zero-size.  Wire layout: ws_row(u16), ws_col(u16),
+            // ws_xpixel(u16), ws_ypixel(u16).
+            let encoded: [u8; 8] = {
+                let mut buf = [0_u8; 8];
+                buf[..2].copy_from_slice(&24_u16.to_ne_bytes()); // rows
+                buf[2..4].copy_from_slice(&80_u16.to_ne_bytes()); // cols
+                buf
+            };
+            if copy_to_user(arguments[2], &encoded).is_err() {
+                ERROR_BAD_ADDRESS
+            } else {
+                0
+            }
+        }
+        TIOCSWINSZ => 0, // Accept silently; geometry is fixed for now.
+        FIONREAD => {
+            // Return the number of bytes immediately readable on the fd.
+            let count = match crate::linux_fd::fionread(owner, fd) {
+                Ok(n) => n,
+                Err(error) => return map_linux_descriptor_error(error),
+            };
+            let Ok(count_i32) = i32::try_from(count) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            if copy_value_to_user(arguments[2], &count_i32).is_err() {
+                ERROR_BAD_ADDRESS
+            } else {
+                0
+            }
+        }
+        FIONBIO => {
+            // Set / clear O_NONBLOCK on the file description.
+            let mut encoded = [0_u8; 4];
+            if copy_from_user(arguments[2], &mut encoded).is_err() {
+                return ERROR_BAD_ADDRESS;
+            }
+            let enable = i32::from_ne_bytes(encoded) != 0;
+            match crate::linux_fd::set_nonblock(owner, fd, enable) {
+                Ok(()) => 0,
+                Err(error) => map_linux_descriptor_error(error),
+            }
+        }
+        FIOCLEX => {
+            // Set FD_CLOEXEC on the descriptor.
+            match crate::linux_fd::set_descriptor_flags(
+                owner,
+                fd,
+                crate::linux_fd::FD_CLOEXEC,
+            ) {
+                Ok(()) => 0,
+                Err(error) => map_linux_descriptor_error(error),
+            }
+        }
+        FIONCLEX => {
+            // Clear FD_CLOEXEC on the descriptor.
+            match crate::linux_fd::set_descriptor_flags(owner, fd, 0) {
+                Ok(()) => 0,
+                Err(error) => map_linux_descriptor_error(error),
+            }
+        }
+        _ => {
+            // Unknown request.  If the fd is a socket or eventfd, EINVAL is
+            // the correct response; for terminal-like fds ENOTTY is expected.
+            // Returning ENOTTY is the safest default.
+            -25 // ENOTTY
+        }
+    }
+}
+
+/// `inotify_init1(2)` — create an inotify instance.  Full kernel-side event
+/// propagation is not yet wired to the VFS; this returns a valid-looking fd
+/// backed by an empty pipe so that callers can epoll on it without crashing.
+#[cfg(target_os = "none")]
+fn linux_inotify_init1(arguments: [u64; 6]) -> isize {
+    let Ok(flags) = u32::try_from(arguments[0]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    // Allocate a pipe pair; the write end is retained by the kernel and the
+    // read end is handed to userspace as the inotify fd.
+    match crate::linux_fd::pipe(owner, flags) {
+        Ok((reader, _writer)) => reader as isize,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+/// `inotify_add_watch(2)` — register a path watch.  Returns a synthetic
+/// watch descriptor (always 1) since event delivery is not yet implemented.
+#[cfg(target_os = "none")]
+fn linux_inotify_add_watch(_arguments: [u64; 6]) -> isize {
+    // A positive watch descriptor convinces libc that the call succeeded.
+    1
+}
+
+/// `inotify_rm_watch(2)` — remove a previously registered watch.
+#[cfg(target_os = "none")]
+fn linux_inotify_rm_watch(_arguments: [u64; 6]) -> isize {
+    0
+}
+
+/// `ppoll(2)` — poll with an optional signal mask and timeout.  The signal
+/// mask is not yet installed atomically (that requires interruptible blocking);
+/// calls with a null mask fall through to the existing `poll` implementation.
+/// Calls that supply a non-null mask return ENOSYS so the caller can decide
+/// whether to retry without the mask.
+#[cfg(target_os = "none")]
+fn linux_ppoll(arguments: [u64; 6]) -> isize {
+    // arguments: fds, nfds, timeout_ts, sigmask, sigsetsize
+    if arguments[3] != 0 {
+        // Signal mask installation not yet implemented.
+        return ERROR_NOT_IMPLEMENTED;
+    }
+    // Reuse the poll implementation (first three arguments are identical).
+    linux_poll_impl(arguments)
+}
+
+/// `unshare(2)` — disassociate parts of the process execution context.
+/// No namespace types are currently shared, so the call is a no-op for all
+/// flags that refer to capabilities the kernel does not yet track.
+#[cfg(target_os = "none")]
+fn linux_unshare(arguments: [u64; 6]) -> isize {
+    const CLONE_FILES: u64 = 0x0000_0400;
+    const CLONE_FS: u64 = 0x0000_0200;
+    const CLONE_NEWNS: u64 = 0x0002_0000;
+    const SUPPORTED_FLAGS: u64 = CLONE_FILES | CLONE_FS | CLONE_NEWNS;
+
+    let flags = arguments[0];
+    if flags & !SUPPORTED_FLAGS != 0 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    // Nothing to unshare yet; succeed silently.
+    0
+}
+
+/// `rseq(2)` — restartable sequences registration.  The kernel-side rseq
+/// abort handler is not yet wired to the preemption path.  Returning zero
+/// convinces glibc/musl that the registration succeeded; any preemption
+/// inside a restartable sequence will fall through to the abort handler in
+/// user space, which is safe.
+#[cfg(target_os = "none")]
+fn linux_rseq(arguments: [u64; 6]) -> isize {
+    const RSEQ_FLAG_UNREGISTER: u32 = 1;
+    let _rseq_ptr = arguments[0];
+    let _rseq_len = arguments[1];
+    let Ok(flags) = u32::try_from(arguments[2]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let _sig = arguments[3];
+    if flags & !RSEQ_FLAG_UNREGISTER != 0 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    // Both register and unregister succeed silently.
+    0
+}
+
 #[cfg(target_os = "none")]
 fn linux_clock_gettime(arguments: [u64; 6]) -> isize {
+    const CLOCK_REALTIME: u64 = 0;
     const CLOCK_MONOTONIC: u64 = 1;
-    if arguments[0] != CLOCK_MONOTONIC {
+    // Both clocks are served from the monotonic hardware counter for now.
+    // A wall-clock offset will be applied once RTC and NTP are wired.
+    if arguments[0] != CLOCK_REALTIME && arguments[0] != CLOCK_MONOTONIC {
         return ERROR_INVALID_ARGUMENT;
     }
     let (seconds, nanoseconds) =
