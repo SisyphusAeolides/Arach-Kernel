@@ -21,7 +21,7 @@ compatibility the critical path:
 |---|---|---|
 | C0 | Reproducible Arach boot, allocator, interrupts, scheduler, Ring 3, syscall entry | QEMU serial transcript and deterministic image digest |
 | C1 | Static ELF processes, virtual memory, files, directories, clocks, signals, threads, TLS, futex, and an explicit Linux x86-64 syscall personality | libc ABI probes and Linux Test Project subset; an unimplemented Linux call must return `ENOSYS` and must never enter Aether dispatch |
-| C2 | Dynamic ELF, shared objects, `mmap`, `poll`, `epoll`, `eventfd`, `timerfd`, `inotify`, Unix sockets | unmodified dynamic Rust and C test programs |
+| C2 | Dynamic ELF, shared objects, private and memfd-backed shared `mmap`, `poll`, `epoll`, `eventfd`, `timerfd`, `inotify`, Unix sockets and descriptor passing | unmodified dynamic Rust and C test programs |
 | C3 | `/dev`, `/proc`, `/sys`, device numbers, uevents, permissions, seats | udev/libseat discovery tests |
 | C4 | evdev plus the libinput ioctl surface | libinput-rs running upstream libinput behavioral tests with uinput fixtures |
 | C5 | DRM/KMS atomic modesetting, render nodes, GEM, dma-buf, sync objects and fences | Mesa/GBM/EGL probes and kmscube |
@@ -108,14 +108,16 @@ expiration reads, ownership, close, periodic expiry accounting, and readiness
 generation for edge-triggered epoll. These are real wake primitives for early
 COSMIC services. The bounded `AF_UNIX` profile now implements stream
 `socket`/`socketpair`, pathname and abstract bind/listen/connect/accept,
-full-duplex reads and writes, data-only vector messages, peer names and root
-credentials, socket options, half-close, and poll/epoll readiness. The measured
-probe exercises both unnamed and named paths. Scheduler-backed blocking
-descriptor operations, `SIGPIPE`, filesystem socket nodes, ancillary rights,
-datagram/seqpacket sockets, general VMA split/merge, shared mappings, demand
-paging, and general multi-library linking remain gated. Every other decoded
-Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
-semantics are implemented and tested.
+full-duplex reads and writes, vector messages, `SCM_RIGHTS`, peer names and root
+credentials, socket options, half-close, and poll/epoll readiness. Bounded
+`memfd_create`, `ftruncate`, and shared physical mappings retain transferred
+buffers after descriptor close. The measured probe exercises unnamed and named
+socket paths plus a transferred, multiply mapped memfd. Scheduler-backed
+blocking descriptor operations, `SIGPIPE`, filesystem socket nodes, explicit
+credential messages, datagram/seqpacket sockets, general VMA split/merge,
+demand paging, and general multi-library linking remain gated. Every other
+decoded Linux syscall returns `ENOSYS` until its complete memory, signal, file,
+or IPC semantics are implemented and tested.
 
 The C0 probe now writes a PIE main executable, a separately built C runtime
 linker, and two ET_DYN shared objects into Akashic VFS before replacing its own

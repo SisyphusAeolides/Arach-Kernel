@@ -405,6 +405,66 @@ pub fn linux_mmap_file_current(
         .map_err(ProcessRuntimeError::Backend)
 }
 
+#[cfg(target_os = "none")]
+pub fn linux_shared_memory_create(identity: u32) -> Result<(), ProcessRuntimeError> {
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    runtime
+        .backend
+        .linux_shared_memory_create(identity)
+        .map_err(ProcessRuntimeError::Backend)
+}
+
+#[cfg(target_os = "none")]
+pub fn linux_shared_memory_resize(
+    identity: u32,
+    expected_size: usize,
+    size_bytes: usize,
+) -> Result<(), ProcessRuntimeError> {
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    runtime
+        .backend
+        .linux_shared_memory_resize(identity, expected_size, size_bytes)
+        .map_err(ProcessRuntimeError::Backend)
+}
+
+#[cfg(target_os = "none")]
+pub fn linux_shared_memory_close(identity: u32) -> Result<(), ProcessRuntimeError> {
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    runtime
+        .backend
+        .linux_shared_memory_close(identity)
+        .map_err(ProcessRuntimeError::Backend)
+}
+
+#[cfg(target_os = "none")]
+pub fn linux_mmap_shared_current(
+    identity: u32,
+    hint: u64,
+    length: usize,
+    offset: usize,
+    permissions: crate::process::install::MappingPermissions,
+) -> Result<u64, ProcessRuntimeError> {
+    let snapshot = crate::process::lifecycle::current_handle()
+        .and_then(crate::process::lifecycle::snapshot_exact)
+        .ok_or(ProcessRuntimeError::Unavailable)?;
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    runtime
+        .backend
+        .linux_mmap_shared_for_root(
+            snapshot.launch.address_space_root,
+            identity,
+            hint,
+            length,
+            offset,
+            permissions,
+        )
+        .map_err(ProcessRuntimeError::Backend)
+}
+
 /// Changes one complete private VMA for the exact lifecycle-published root.
 /// The architecture return gate reloads that root before Ring 3 resumes,
 /// flushing stale non-global translations after the page-table transaction.

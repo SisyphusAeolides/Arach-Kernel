@@ -52,7 +52,12 @@ containing all of the following evidence from the same bundle:
 - `ARACH_C1_UNIX_SOCKET_PASS` was emitted after generation-bound Unix stream
   socketpair and abstract-namespace paths completed connect, plain and flagged
   accept, full-duplex and vector transfer, peer identity, poll/epoll readiness,
-  duplicate lifetime, half-close HUP, and namespace reuse;
+  duplicate lifetime, half-close HUP, namespace reuse, and exact
+  `SCM_RIGHTS` control transfer with sender-close lifetime;
+- `ARACH_C1_SHARED_MEMORY_PASS` was emitted after a generation-bound memfd was
+  resized, transferred as an open description, mapped through two
+  `MAP_SHARED` aliases, retained after descriptor close, observed through both
+  aliases, and released through exact-range unmaps;
 - `ARACH_C1_EXIT_GROUP_ARMED` was emitted only after an independently
   scheduled cloned peer woke the leader and blocked; Push then emitted
   `[PID 1] child 2 exited with status 0` only after `exit_group` retired that
@@ -60,7 +65,7 @@ containing all of the following evidence from the same bundle:
 - `ARACH_C1_LINUX_SYSCALL_PASS` was emitted after the Linux personality
   exercised identity, anonymous and private file memory, `mprotect`, `brk`,
   shared-address-space clone, unified descriptor/open-object, pipe, and bounded
-  Unix stream-socket access,
+  Unix stream-socket, ancillary descriptor, and shared-memory access,
   independent private robust-futex and
   clear-child-tid block/wake paths, kernel owner-death publication, measured
   signal delivery/return, bounded whole-group exit, and clean supervisor reap;

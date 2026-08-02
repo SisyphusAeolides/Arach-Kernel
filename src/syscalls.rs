@@ -1015,7 +1015,6 @@ fn schedule_linux_execve_return(
             return resume_linux_result(saved, ERROR_TRY_AGAIN);
         }
     };
-
     if crate::process::runtime::defer_reap(previous).is_err() {
         crate::arch::x86_64::halt();
     }
@@ -1363,10 +1362,9 @@ fn schedule_linux_futex_return(
 #[cfg(target_os = "none")]
 fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
     match crate::process::abi::LinuxSyscall::from_number(number) {
-        // The bounded serial write has the same first three scalar arguments
-        // on x86-64 Linux and Arach. Eventfd is the first real Linux file
-        // descriptor object: it gives libc/COSMIC a wake primitive without
-        // claiming that ordinary path/socket descriptors already exist.
+        // Linux descriptors use a generation-bound namespace independent of
+        // the native Aether table, including path files, wake objects, pipes,
+        // local sockets, and shared memory files.
         Some(crate::process::abi::LinuxSyscall::Read) => linux_read(arguments),
         Some(crate::process::abi::LinuxSyscall::Write) => linux_write(arguments),
         Some(crate::process::abi::LinuxSyscall::Open) => linux_open(arguments),
@@ -1381,6 +1379,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Dup3) => linux_dup3(arguments),
         Some(crate::process::abi::LinuxSyscall::Pipe2) => linux_pipe(arguments, arguments[1]),
         Some(crate::process::abi::LinuxSyscall::Fcntl) => linux_fcntl(arguments),
+        Some(crate::process::abi::LinuxSyscall::Ftruncate) => linux_ftruncate(arguments),
         Some(crate::process::abi::LinuxSyscall::Socket) => linux_socket(arguments),
         Some(crate::process::abi::LinuxSyscall::Connect) => linux_connect(arguments),
         Some(crate::process::abi::LinuxSyscall::Accept) => linux_accept(arguments, 0),
@@ -1440,6 +1439,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Munmap) => linux_munmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Brk) => linux_brk(arguments),
         Some(crate::process::abi::LinuxSyscall::Eventfd2) => linux_eventfd2(arguments),
+        Some(crate::process::abi::LinuxSyscall::MemfdCreate) => linux_memfd_create(arguments),
         Some(crate::process::abi::LinuxSyscall::TimerfdCreate) => linux_timerfd_create(arguments),
         Some(crate::process::abi::LinuxSyscall::TimerfdSettime) => linux_timerfd_settime(arguments),
         Some(crate::process::abi::LinuxSyscall::TimerfdGettime) => linux_timerfd_gettime(arguments),
@@ -1759,6 +1759,49 @@ fn linux_eventfd2(arguments: [u64; 6]) -> isize {
     match crate::linux_fd::eventfd(owner, initial, flags) {
         Ok(fd) => fd as isize,
         Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_memfd_create(arguments: [u64; 6]) -> isize {
+    let Ok(flags) = u32::try_from(arguments[1]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let mut name = [0_u8; crate::linux_memfd::MAXIMUM_MEMFD_NAME_BYTES];
+    let name_length = match copy_linux_memfd_name(arguments[0], &mut name) {
+        Ok(length) => length,
+        Err(error) => return error,
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::memfd_create(owner, &name[..name_length], flags) {
+        Ok(fd) => fd as isize,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn copy_linux_memfd_name(pointer: u64, output: &mut [u8]) -> Result<usize, isize> {
+    if pointer == 0 {
+        return Err(ERROR_BAD_ADDRESS);
+    }
+    let mut length = 0;
+    loop {
+        let address = pointer
+            .checked_add(length as u64)
+            .ok_or(ERROR_BAD_ADDRESS)?;
+        let mut byte = [0_u8; 1];
+        copy_from_user(address, &mut byte).map_err(|_| ERROR_BAD_ADDRESS)?;
+        if byte[0] == 0 {
+            return Ok(length);
+        }
+        if length == output.len() {
+            return Err(ERROR_NAME_TOO_LONG);
+        }
+        output[length] = byte[0];
+        length += 1;
     }
 }
 
@@ -2082,6 +2125,28 @@ fn linux_fcntl(arguments: [u64; 6]) -> isize {
 }
 
 #[cfg(target_os = "none")]
+fn linux_ftruncate(arguments: [u64; 6]) -> isize {
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let signed_length = arguments[1] as i64;
+    if signed_length < 0 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let Ok(length) = usize::try_from(signed_length as u64) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::truncate(owner, fd, length) {
+        Ok(()) => 0,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
 fn read_user_u32(address: u64) -> Result<u32, UserCopyError> {
     let mut encoded = [0_u8; core::mem::size_of::<u32>()];
     copy_from_user(address, &mut encoded)?;
@@ -2381,7 +2446,7 @@ struct LinuxMessageHeader {
     name_length: u32,
     iovectors: u64,
     iovector_count: usize,
-    _control: u64,
+    control: u64,
     control_length: usize,
 }
 
@@ -2401,7 +2466,7 @@ fn read_linux_message_header(source: u64) -> Result<LinuxMessageHeader, isize> {
         name_length: u32::from_ne_bytes(encoded[8..12].try_into().unwrap()),
         iovectors: u64::from_ne_bytes(encoded[16..24].try_into().unwrap()),
         iovector_count,
-        _control: u64::from_ne_bytes(encoded[32..40].try_into().unwrap()),
+        control: u64::from_ne_bytes(encoded[32..40].try_into().unwrap()),
         control_length,
     })
 }
@@ -2424,6 +2489,120 @@ fn read_linux_iovec(source: u64, index: usize) -> Result<(u64, usize), isize> {
 }
 
 #[cfg(target_os = "none")]
+const LINUX_CMSG_HEADER_BYTES: usize = 16;
+#[cfg(target_os = "none")]
+const LINUX_SOL_SOCKET: u32 = 1;
+#[cfg(target_os = "none")]
+const LINUX_SCM_RIGHTS: u32 = 1;
+#[cfg(target_os = "none")]
+const LINUX_MSG_CTRUNC: u32 = 0x8;
+
+#[cfg(target_os = "none")]
+const fn linux_cmsg_space(payload_bytes: usize) -> usize {
+    (LINUX_CMSG_HEADER_BYTES + payload_bytes + 7) & !7
+}
+
+#[cfg(target_os = "none")]
+fn read_linux_scm_rights(
+    control: u64,
+    control_length: usize,
+    output: &mut [u32],
+) -> Result<usize, isize> {
+    if control_length == 0 {
+        return Ok(0);
+    }
+    let maximum = linux_cmsg_space(
+        crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS * core::mem::size_of::<u32>(),
+    );
+    if control == 0 || control_length > maximum {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let mut encoded = [0_u8;
+        linux_cmsg_space(
+            crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS * core::mem::size_of::<u32>(),
+        )];
+    copy_from_user(control, &mut encoded[..control_length]).map_err(|_| ERROR_BAD_ADDRESS)?;
+    if control_length < LINUX_CMSG_HEADER_BYTES {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let message_length = usize::try_from(u64::from_ne_bytes(encoded[..8].try_into().unwrap()))
+        .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+    let level = u32::from_ne_bytes(encoded[8..12].try_into().unwrap());
+    let kind = u32::from_ne_bytes(encoded[12..16].try_into().unwrap());
+    if message_length < LINUX_CMSG_HEADER_BYTES
+        || message_length > control_length
+        || linux_cmsg_space(message_length - LINUX_CMSG_HEADER_BYTES) != control_length
+        || level != LINUX_SOL_SOCKET
+        || kind != LINUX_SCM_RIGHTS
+    {
+        return Err(ERROR_NOT_SUPPORTED);
+    }
+    let payload_length = message_length - LINUX_CMSG_HEADER_BYTES;
+    if payload_length == 0
+        || payload_length % core::mem::size_of::<u32>() != 0
+        || payload_length / core::mem::size_of::<u32>() > output.len()
+    {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let count = payload_length / core::mem::size_of::<u32>();
+    for (index, destination) in output[..count].iter_mut().enumerate() {
+        let start = LINUX_CMSG_HEADER_BYTES + index * core::mem::size_of::<u32>();
+        let descriptor = i32::from_ne_bytes(encoded[start..start + 4].try_into().unwrap());
+        *destination = u32::try_from(descriptor).map_err(|_| ERROR_BAD_FILE_DESCRIPTOR)?;
+    }
+    Ok(count)
+}
+
+#[cfg(target_os = "none")]
+fn linux_scm_rights_capacity(control: u64, control_length: usize) -> Result<usize, isize> {
+    if control_length == 0 {
+        return Ok(0);
+    }
+    if control == 0 {
+        return Err(ERROR_BAD_ADDRESS);
+    }
+    let maximum_space = linux_cmsg_space(
+        crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS * core::mem::size_of::<u32>(),
+    );
+    let writable = control_length.min(maximum_space);
+    validate_user_write_range(control, writable).map_err(|_| ERROR_BAD_ADDRESS)?;
+    let mut count = 0;
+    while count < crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS
+        && linux_cmsg_space((count + 1) * core::mem::size_of::<u32>()) <= control_length
+    {
+        count += 1;
+    }
+    Ok(count)
+}
+
+#[cfg(target_os = "none")]
+fn write_linux_scm_rights(control: u64, descriptors: &[u32]) -> Result<usize, isize> {
+    if descriptors.is_empty() {
+        return Ok(0);
+    }
+    let payload_length = descriptors
+        .len()
+        .checked_mul(core::mem::size_of::<u32>())
+        .ok_or(ERROR_INVALID_ARGUMENT)?;
+    let message_length = LINUX_CMSG_HEADER_BYTES + payload_length;
+    let control_length = linux_cmsg_space(payload_length);
+    let mut encoded = [0_u8;
+        linux_cmsg_space(
+            crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS * core::mem::size_of::<u32>(),
+        )];
+    encoded[..8].copy_from_slice(&(message_length as u64).to_ne_bytes());
+    encoded[8..12].copy_from_slice(&LINUX_SOL_SOCKET.to_ne_bytes());
+    encoded[12..16].copy_from_slice(&LINUX_SCM_RIGHTS.to_ne_bytes());
+    for (index, descriptor) in descriptors.iter().copied().enumerate() {
+        let descriptor = i32::try_from(descriptor).map_err(|_| ERROR_INVALID_ARGUMENT)?;
+        let start = LINUX_CMSG_HEADER_BYTES + index * core::mem::size_of::<u32>();
+        encoded[start..start + 4].copy_from_slice(&descriptor.to_ne_bytes());
+    }
+    copy_to_user(control, &encoded[..control_length]).map_err(|_| ERROR_BAD_ADDRESS)?;
+    Ok(control_length)
+}
+
+#[cfg(target_os = "none")]
 fn linux_sendmsg(arguments: [u64; 6]) -> isize {
     let (Ok(fd), Ok(flags)) = (u32::try_from(arguments[0]), u32::try_from(arguments[2])) else {
         return ERROR_INVALID_ARGUMENT;
@@ -2432,9 +2611,15 @@ fn linux_sendmsg(arguments: [u64; 6]) -> isize {
         Ok(header) => header,
         Err(error) => return error,
     };
-    if header.name_length != 0 || header.control_length != 0 {
+    if header.name_length != 0 {
         return ERROR_NOT_SUPPORTED;
     }
+    let mut descriptors = [0_u32; crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS];
+    let descriptor_count =
+        match read_linux_scm_rights(header.control, header.control_length, &mut descriptors) {
+            Ok(count) => count,
+            Err(error) => return error,
+        };
     let mut staging = AKASHIC_IO_STAGING.lock();
     let mut total = 0;
     for index in 0..header.iovector_count {
@@ -2455,7 +2640,13 @@ fn linux_sendmsg(arguments: [u64; 6]) -> isize {
         Ok(owner) => owner,
         Err(error) => return error,
     };
-    match crate::linux_fd::send_socket(owner, fd, &staging[..total], flags) {
+    match crate::linux_fd::send_socket_with_rights(
+        owner,
+        fd,
+        &staging[..total],
+        flags,
+        &descriptors[..descriptor_count],
+    ) {
         Ok(written) => written as isize,
         Err(error) => map_linux_descriptor_error(error),
     }
@@ -2486,6 +2677,10 @@ fn linux_recvmsg(arguments: [u64; 6]) -> isize {
     let message_flags_pointer = match arguments[1].checked_add(48) {
         Some(pointer) => pointer,
         None => return ERROR_BAD_ADDRESS,
+    };
+    let control_capacity = match linux_scm_rights_capacity(header.control, header.control_length) {
+        Ok(capacity) => capacity,
+        Err(error) => return error,
     };
     if validate_user_write_range(control_length_pointer, core::mem::size_of::<u64>()).is_err()
         || validate_user_write_range(message_flags_pointer, core::mem::size_of::<u32>()).is_err()
@@ -2525,15 +2720,19 @@ fn linux_recvmsg(arguments: [u64; 6]) -> isize {
         Err(error) => return error,
     };
     let mut staging = AKASHIC_IO_STAGING.lock();
-    let copied = match crate::linux_fd::receive_socket(
+    let mut received_descriptors = [0_u32; crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS];
+    let received = match crate::linux_fd::receive_socket_with_rights(
         owner,
         fd,
         &mut staging[..capacity],
         flags & crate::linux_socket::RECEIVE_FLAGS,
+        flags & MSG_CMSG_CLOEXEC != 0,
+        &mut received_descriptors[..control_capacity],
     ) {
-        Ok(copied) => copied,
+        Ok(received) => received,
         Err(error) => return map_linux_descriptor_error(error),
     };
+    let copied = received.bytes;
     let mut consumed = 0;
     for index in 0..header.iovector_count {
         let length = lengths[index].min(copied.saturating_sub(consumed));
@@ -2560,8 +2759,24 @@ fn linux_recvmsg(arguments: [u64; 6]) -> isize {
             return ERROR_BAD_ADDRESS;
         }
     }
-    if copy_to_user(control_length_pointer, &0_u64.to_ne_bytes()).is_err()
-        || copy_to_user(message_flags_pointer, &0_u32.to_ne_bytes()).is_err()
+    let written_control = match write_linux_scm_rights(
+        header.control,
+        &received_descriptors[..received.descriptor_count],
+    ) {
+        Ok(length) => length,
+        Err(error) => return error,
+    };
+    let message_flags = if received.control_truncated {
+        LINUX_MSG_CTRUNC
+    } else {
+        0
+    };
+    if copy_to_user(
+        control_length_pointer,
+        &(written_control as u64).to_ne_bytes(),
+    )
+    .is_err()
+        || copy_to_user(message_flags_pointer, &message_flags.to_ne_bytes()).is_err()
     {
         return ERROR_BAD_ADDRESS;
     }
@@ -3106,6 +3321,7 @@ fn linux_epoll_pwait(arguments: [u64; 6]) -> isize {
 
 #[cfg(target_os = "none")]
 fn linux_mmap(arguments: [u64; 6]) -> isize {
+    const MAP_SHARED: u64 = 0x01;
     const MAP_PRIVATE: u64 = 0x02;
     const MAP_ANONYMOUS: u64 = 0x20;
     const MAP_STACK: u64 = 0x20_000;
@@ -3123,24 +3339,22 @@ fn linux_mmap(arguments: [u64; 6]) -> isize {
     else {
         return ERROR_INVALID_ARGUMENT;
     };
+    let mapping_kind = flags & (MAP_SHARED | MAP_PRIVATE);
     if length == 0
         || length > crate::process::x86_64::LINUX_MMAP_MAXIMUM_BYTES
-        || flags & MAP_PRIVATE == 0
-        || flags & !(MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_NORESERVE) != 0
+        || !matches!(mapping_kind, MAP_SHARED | MAP_PRIVATE)
+        || flags & !(MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_NORESERVE) != 0
     {
         return ERROR_INVALID_ARGUMENT;
     }
 
     let result = if flags & MAP_ANONYMOUS != 0 {
-        if fd != u64::MAX || offset != 0 {
+        if mapping_kind != MAP_PRIVATE || fd != u64::MAX || offset != 0 {
             return ERROR_INVALID_ARGUMENT;
         }
         crate::process::runtime::linux_mmap_current(hint, length, permissions)
     } else {
-        if flags & MAP_STACK != 0
-            || offset & (PAGE_SIZE as u64 - 1) != 0
-            || rounded_length > crate::akashic_vfs::MAXIMUM_FILE_BYTES
-        {
+        if flags & MAP_STACK != 0 || offset & (PAGE_SIZE as u64 - 1) != 0 {
             return ERROR_INVALID_ARGUMENT;
         }
         let Ok(fd) = u32::try_from(fd) else {
@@ -3153,38 +3367,61 @@ fn linux_mmap(arguments: [u64; 6]) -> isize {
             Ok(owner) => owner,
             Err(error) => return error,
         };
-        let mut staging = MMAP_FILE_STAGING.lock();
-        let snapshot = match crate::linux_fd::snapshot_range(
-            owner,
-            fd,
-            offset,
-            &mut staging[..rounded_length],
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) => return map_linux_descriptor_error(error),
-        };
-        let Some(remaining) = snapshot.file_bytes.checked_sub(offset) else {
-            return ERROR_INVALID_ARGUMENT;
-        };
-        let Some(file_span) = remaining
-            .checked_add(PAGE_SIZE - 1)
-            .map(|value| value & !(PAGE_SIZE - 1))
-        else {
-            return ERROR_INVALID_ARGUMENT;
-        };
-        if snapshot.inode_id == 0
-            || remaining == 0
-            || rounded_length > file_span
-            || snapshot.bytes != rounded_length.min(remaining)
-        {
-            return ERROR_INVALID_ARGUMENT;
+        if mapping_kind == MAP_SHARED {
+            let snapshot = match crate::linux_fd::shared_memory_snapshot(owner, fd) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return map_linux_descriptor_error(error),
+            };
+            if offset
+                .checked_add(length)
+                .is_none_or(|end| end > snapshot.size_bytes)
+            {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            crate::process::runtime::linux_mmap_shared_current(
+                snapshot.identity,
+                hint,
+                length,
+                offset,
+                permissions,
+            )
+        } else {
+            if rounded_length > crate::akashic_vfs::MAXIMUM_FILE_BYTES {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            let mut staging = MMAP_FILE_STAGING.lock();
+            let snapshot = match crate::linux_fd::snapshot_range(
+                owner,
+                fd,
+                offset,
+                &mut staging[..rounded_length],
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return map_linux_descriptor_error(error),
+            };
+            let Some(remaining) = snapshot.file_bytes.checked_sub(offset) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            let Some(file_span) = remaining
+                .checked_add(PAGE_SIZE - 1)
+                .map(|value| value & !(PAGE_SIZE - 1))
+            else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            if snapshot.inode_id == 0
+                || remaining == 0
+                || rounded_length > file_span
+                || snapshot.bytes != rounded_length.min(remaining)
+            {
+                return ERROR_INVALID_ARGUMENT;
+            }
+            crate::process::runtime::linux_mmap_file_current(
+                hint,
+                length,
+                permissions,
+                &staging[..snapshot.bytes],
+            )
         }
-        crate::process::runtime::linux_mmap_file_current(
-            hint,
-            length,
-            permissions,
-            &staging[..snapshot.bytes],
-        )
     };
     match result {
         Ok(address) => isize::try_from(address).unwrap_or(-75),
@@ -3699,8 +3936,10 @@ extern "C" fn arach_syscall_activate(frame: *const SyscallFrame) {
     if scheduled.authorized_return() != authority || activate_machine_dispatch(authority).is_err() {
         crate::arch::x86_64::halt();
     }
-    if crate::process::runtime::reap_after_root_switch().is_err() {
-        crate::arch::x86_64::halt();
+    match crate::process::runtime::reap_after_root_switch() {
+        Ok(true) => {}
+        Ok(false) => {}
+        Err(_) => crate::arch::x86_64::halt(),
     }
 }
 

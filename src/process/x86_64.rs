@@ -51,6 +51,8 @@ pub const INITIAL_USER_STACK_POINTER: u64 = INITIAL_USER_STACK_BASE + PAGE_SIZE 
 /// canonical user limit; the allocator still checks every existing mapping.
 pub const LINUX_MMAP_BASE: u64 = 0x0000_4000_0000;
 pub const LINUX_MMAP_MAXIMUM_BYTES: usize = 16 * 1024 * 1024;
+const MAXIMUM_SHARED_BACKINGS: usize = 32;
+const MAXIMUM_SHARED_PAGES: usize = crate::linux_memfd::MAXIMUM_MEMFD_BYTES / PAGE_SIZE;
 /// Initial program break for the Linux personality.  Keeping the heap below
 /// the mmap arena gives libc a stable, non-overlapping brk region while still
 /// leaving the fixed image/stack addresses untouched.
@@ -317,6 +319,8 @@ struct MappingRecord {
     first_page: u16,
     page_count: u16,
     permissions: MappingPermissions,
+    shared_identity: u32,
+    shared_page_offset: u16,
 }
 
 impl MappingRecord {
@@ -335,7 +339,54 @@ impl MappingRecord {
             writable: false,
             executable: false,
         },
+        shared_identity: 0,
+        shared_page_offset: 0,
     };
+}
+
+struct SharedBacking {
+    occupied: bool,
+    descriptor_open: bool,
+    identity: u32,
+    size_bytes: usize,
+    allocated_pages: u16,
+    mapping_references: u16,
+    frames: [PhysicalAddress; MAXIMUM_SHARED_PAGES],
+}
+
+impl SharedBacking {
+    const EMPTY: Self = Self {
+        occupied: false,
+        descriptor_open: false,
+        identity: 0,
+        size_bytes: 0,
+        allocated_pages: 0,
+        mapping_references: 0,
+        frames: [PhysicalAddress::new(0); MAXIMUM_SHARED_PAGES],
+    };
+
+    fn initialize(&mut self, identity: u32) {
+        debug_assert!(!self.occupied);
+        self.occupied = true;
+        self.descriptor_open = true;
+        self.identity = identity;
+        self.size_bytes = 0;
+        self.allocated_pages = 0;
+        self.mapping_references = 0;
+        self.frames.fill(PhysicalAddress::new(0));
+    }
+
+    fn reset(&mut self) {
+        debug_assert_eq!(self.allocated_pages, 0);
+        debug_assert_eq!(self.mapping_references, 0);
+        self.occupied = false;
+        self.descriptor_open = false;
+        self.identity = 0;
+        self.size_bytes = 0;
+        self.allocated_pages = 0;
+        self.mapping_references = 0;
+        self.frames.fill(PhysicalAddress::new(0));
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -358,7 +409,6 @@ enum SpacePhase {
     Committed,
 }
 
-#[derive(Clone, Copy)]
 struct FrameBackedSlot {
     phase: SpacePhase,
     root: Option<PhysicalAddress>,
@@ -412,6 +462,7 @@ pub struct FrameBackedAddressSpace<Memory: ProcessFrameMemory> {
     kernel_root: PhysicalAddress,
     active_slot: Option<u16>,
     slots: [FrameBackedSlot; MAXIMUM_RETAINED_PROCESSES],
+    shared: [SharedBacking; MAXIMUM_SHARED_BACKINGS],
 }
 
 impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
@@ -424,7 +475,8 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             memory,
             kernel_root,
             active_slot: None,
-            slots: [FrameBackedSlot::EMPTY; MAXIMUM_RETAINED_PROCESSES],
+            slots: [const { FrameBackedSlot::EMPTY }; MAXIMUM_RETAINED_PROCESSES],
+            shared: [const { SharedBacking::EMPTY }; MAXIMUM_SHARED_BACKINGS],
         }
     }
 
@@ -439,6 +491,124 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
 
     pub fn memory_mut(&mut self) -> &mut Memory {
         &mut self.memory
+    }
+
+    pub fn linux_shared_memory_create(
+        &mut self,
+        identity: u32,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        if identity == 0
+            || self
+                .shared
+                .iter()
+                .any(|backing| backing.identity == identity)
+        {
+            return Err(FrameBackedError::InvalidHandle);
+        }
+        let index = self
+            .shared
+            .iter()
+            .position(|backing| !backing.occupied)
+            .ok_or(FrameBackedError::CapacityExceeded)?;
+        self.shared[index].initialize(identity);
+        Ok(())
+    }
+
+    pub fn linux_shared_memory_resize(
+        &mut self,
+        identity: u32,
+        expected_size: usize,
+        size_bytes: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        if size_bytes > crate::linux_memfd::MAXIMUM_MEMFD_BYTES {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        let index = self
+            .shared
+            .iter()
+            .position(|backing| {
+                backing.occupied && backing.descriptor_open && backing.identity == identity
+            })
+            .ok_or(FrameBackedError::InvalidHandle)?;
+        if self.shared[index].size_bytes != expected_size {
+            return Err(FrameBackedError::InvalidState);
+        }
+        if size_bytes < expected_size && self.shared[index].mapping_references != 0 {
+            return Err(FrameBackedError::InvalidState);
+        }
+        let retained_pages = size_bytes.div_ceil(PAGE_SIZE);
+        while usize::from(self.shared[index].allocated_pages) > retained_pages {
+            let frame_index = usize::from(self.shared[index].allocated_pages) - 1;
+            let frame = self.shared[index].frames[frame_index];
+            self.memory
+                .release(frame)
+                .map_err(FrameBackedError::Memory)?;
+            self.shared[index].frames[frame_index] = PhysicalAddress::new(0);
+            self.shared[index].allocated_pages -= 1;
+        }
+        self.shared[index].size_bytes = size_bytes;
+        Ok(())
+    }
+
+    pub fn linux_shared_memory_close(
+        &mut self,
+        identity: u32,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let index = self
+            .shared
+            .iter()
+            .position(|backing| {
+                backing.occupied && backing.descriptor_open && backing.identity == identity
+            })
+            .ok_or(FrameBackedError::InvalidHandle)?;
+        if self.shared[index].mapping_references == 0 {
+            self.release_shared_backing(index)
+        } else {
+            self.shared[index].descriptor_open = false;
+            Ok(())
+        }
+    }
+
+    fn release_shared_backing(
+        &mut self,
+        index: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        while self.shared[index].allocated_pages != 0 {
+            let frame_index = usize::from(self.shared[index].allocated_pages) - 1;
+            let frame = self.shared[index].frames[frame_index];
+            self.memory
+                .release(frame)
+                .map_err(FrameBackedError::Memory)?;
+            self.shared[index].frames[frame_index] = PhysicalAddress::new(0);
+            self.shared[index].allocated_pages -= 1;
+        }
+        self.shared[index].reset();
+        Ok(())
+    }
+
+    fn drop_shared_mapping_reference(
+        &mut self,
+        identity: u32,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let index = self
+            .shared
+            .iter()
+            .position(|backing| backing.occupied && backing.identity == identity)
+            .ok_or(FrameBackedError::CorruptHierarchy)?;
+        let references = self.shared[index].mapping_references;
+        let remaining = references
+            .checked_sub(1)
+            .ok_or(FrameBackedError::CorruptHierarchy)?;
+        if remaining == 0 && !self.shared[index].descriptor_open {
+            self.shared[index].mapping_references = remaining;
+            if let Err(error) = self.release_shared_backing(index) {
+                self.shared[index].mapping_references = references;
+                return Err(error);
+            }
+        } else {
+            self.shared[index].mapping_references = remaining;
+        }
+        Ok(())
     }
 
     pub const fn owned_frame_count(&self) -> usize {
@@ -784,6 +954,8 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             first_page,
             page_count,
             permissions,
+            shared_identity: 0,
+            shared_page_offset: 0,
         };
         self.slots[slot_index].mapping_count =
             self.slots[slot_index].mapping_count.max(mapping_index + 1);
@@ -792,6 +964,191 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             .max(page_start + pages_needed);
         self.slots[slot_index].process_info.owned_frames = self.slots[slot_index].owned_frame_count;
         Ok(base)
+    }
+
+    pub fn linux_mmap_shared(
+        &mut self,
+        process: &ProcessImageHandle,
+        identity: u32,
+        hint: u64,
+        length: usize,
+        offset: usize,
+        permissions: MappingPermissions,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        let slot_index = self.process_slot(process)?;
+        if self.active_slot.is_some()
+            || identity == 0
+            || length == 0
+            || length > crate::linux_memfd::MAXIMUM_MEMFD_BYTES
+            || offset & (PAGE_SIZE - 1) != 0
+            || !permissions.readable
+            || permissions.writable && permissions.executable
+        {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        let backing_index = self
+            .shared
+            .iter()
+            .position(|backing| {
+                backing.occupied && backing.descriptor_open && backing.identity == identity
+            })
+            .ok_or(FrameBackedError::InvalidHandle)?;
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > self.shared[backing_index].size_bytes)
+        {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        let mapping_references = self.shared[backing_index]
+            .mapping_references
+            .checked_add(1)
+            .ok_or(FrameBackedError::CapacityExceeded)?;
+        let length = length
+            .checked_add(PAGE_SIZE - 1)
+            .map(|value| value & !(PAGE_SIZE - 1))
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let pages_needed = length / PAGE_SIZE;
+        let shared_page_offset = offset / PAGE_SIZE;
+        let required_shared_pages = shared_page_offset
+            .checked_add(pages_needed)
+            .ok_or(FrameBackedError::InvalidRange)?;
+        if required_shared_pages > MAXIMUM_SHARED_PAGES {
+            return Err(FrameBackedError::CapacityExceeded);
+        }
+        self.ensure_shared_frames(backing_index, required_shared_pages)?;
+
+        let mapping_index = (0..self.slots[slot_index].mapping_count)
+            .find(|index| !self.slots[slot_index].mappings[*index].occupied)
+            .unwrap_or(self.slots[slot_index].mapping_count);
+        if mapping_index >= self.slots[slot_index].mappings.len() || pages_needed == 0 {
+            return Err(FrameBackedError::CapacityExceeded);
+        }
+        let page_start = self
+            .free_page_run(slot_index, pages_needed)
+            .ok_or(FrameBackedError::CapacityExceeded)?;
+        let first_page =
+            u16::try_from(page_start).map_err(|_| FrameBackedError::CapacityExceeded)?;
+        let page_count =
+            u16::try_from(pages_needed).map_err(|_| FrameBackedError::CapacityExceeded)?;
+        let shared_page_offset =
+            u16::try_from(shared_page_offset).map_err(|_| FrameBackedError::CapacityExceeded)?;
+        let base = self.find_linux_mmap_base(slot_index, hint, length)?;
+
+        let mut mapped = 0;
+        for page in 0..pages_needed {
+            let virtual_address = match base.checked_add((page * PAGE_SIZE) as u64) {
+                Some(address) => address,
+                None => {
+                    self.rollback_shared_mapping_pages(slot_index, page_start, mapped)?;
+                    return Err(FrameBackedError::InvalidRange);
+                }
+            };
+            let (table, index) = match self.ensure_leaf_slot(slot_index, virtual_address) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.rollback_shared_mapping_pages(slot_index, page_start, mapped)?;
+                    return Err(error);
+                }
+            };
+            let frame = self.shared[backing_index].frames[usize::from(shared_page_offset) + page];
+            if let Err(error) =
+                self.memory
+                    .write_entry(table, index, user_mapping_entry(frame, permissions))
+            {
+                self.rollback_shared_mapping_pages(slot_index, page_start, mapped)?;
+                return Err(FrameBackedError::Memory(error));
+            }
+            self.slots[slot_index].pages[page_start + page] = PageRecord {
+                frame,
+                virtual_address,
+            };
+            mapped += 1;
+        }
+
+        self.shared[backing_index].mapping_references = mapping_references;
+        self.slots[slot_index].mappings[mapping_index] = MappingRecord {
+            occupied: true,
+            sealed: true,
+            releasable: true,
+            heap: false,
+            generation: self.slots[slot_index].generation,
+            virtual_address: base,
+            memory_size: length,
+            first_page,
+            page_count,
+            permissions,
+            shared_identity: identity,
+            shared_page_offset,
+        };
+        self.slots[slot_index].mapping_count =
+            self.slots[slot_index].mapping_count.max(mapping_index + 1);
+        self.slots[slot_index].page_count = self.slots[slot_index]
+            .page_count
+            .max(page_start + pages_needed);
+        Ok(base)
+    }
+
+    fn ensure_shared_frames(
+        &mut self,
+        backing_index: usize,
+        required_pages: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let allocated_before = usize::from(self.shared[backing_index].allocated_pages);
+        while usize::from(self.shared[backing_index].allocated_pages) < required_pages {
+            let frame = match self.memory.allocate_zeroed() {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.rollback_shared_frames(backing_index, allocated_before)?;
+                    return Err(FrameBackedError::Memory(error));
+                }
+            };
+            if !frame.is_page_aligned() || frame.as_u64() & !PAGE_ADDRESS_MASK != 0 {
+                self.memory
+                    .release(frame)
+                    .map_err(FrameBackedError::Memory)?;
+                self.rollback_shared_frames(backing_index, allocated_before)?;
+                return Err(FrameBackedError::InvalidPhysicalFrame);
+            }
+            let index = usize::from(self.shared[backing_index].allocated_pages);
+            self.shared[backing_index].frames[index] = frame;
+            self.shared[backing_index].allocated_pages += 1;
+        }
+        Ok(())
+    }
+
+    fn rollback_shared_frames(
+        &mut self,
+        backing_index: usize,
+        retained_pages: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        while usize::from(self.shared[backing_index].allocated_pages) > retained_pages {
+            let index = usize::from(self.shared[backing_index].allocated_pages) - 1;
+            let frame = self.shared[backing_index].frames[index];
+            self.memory
+                .release(frame)
+                .map_err(FrameBackedError::Memory)?;
+            self.shared[backing_index].frames[index] = PhysicalAddress::new(0);
+            self.shared[backing_index].allocated_pages -= 1;
+        }
+        Ok(())
+    }
+
+    fn rollback_shared_mapping_pages(
+        &mut self,
+        slot_index: usize,
+        page_start: usize,
+        mapped: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        for page in (0..mapped).rev() {
+            let page_index = page_start + page;
+            let record = self.slots[slot_index].pages[page_index];
+            let (table, index) = self.leaf_slot(slot_index, record.virtual_address)?;
+            self.memory
+                .write_entry(table, index, 0)
+                .map_err(FrameBackedError::Memory)?;
+            self.slots[slot_index].pages[page_index] = PageRecord::EMPTY;
+        }
+        Ok(())
     }
 
     /// Resolve a lifecycle-published address-space root to the backend's
@@ -839,7 +1196,30 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         self.linux_mmap_file_private(&process, hint, length, permissions, initialized)
     }
 
-    /// Changes one complete private mapping while preserving W^X. Partial
+    pub fn linux_mmap_shared_for_root(
+        &mut self,
+        address_space_root: u64,
+        identity: u32,
+        hint: u64,
+        length: usize,
+        offset: usize,
+        permissions: MappingPermissions,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        let process = self
+            .slots
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| {
+                slot.phase == SpacePhase::Committed
+                    && slot.generation != 0
+                    && slot.process_info.address_space_root == Some(address_space_root)
+            })
+            .map(|(index, slot)| ProcessImageHandle::new(index as u16, slot.generation))
+            .ok_or(FrameBackedError::InvalidHandle)?;
+        self.linux_mmap_shared(&process, identity, hint, length, offset, permissions)
+    }
+
+    /// Changes one complete runtime mapping while preserving W^X. Partial
     /// ranges are rejected until VMA split/merge bookkeeping is admitted.
     /// Every leaf is preflighted before mutation, and a failed write restores
     /// all leaves already changed before the mapping record can be updated.
@@ -949,7 +1329,7 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         self.linux_mprotect(&process, virtual_address, length, permissions)
     }
 
-    /// Remove one complete private mapping. Partial unmaps are intentionally
+    /// Remove one complete runtime mapping. Partial unmaps are intentionally
     /// rejected until the VMA split/merge bookkeeping is implemented.
     pub fn linux_munmap(
         &mut self,
@@ -990,8 +1370,13 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             self.memory
                 .write_entry(table, index, 0)
                 .map_err(FrameBackedError::Memory)?;
-            self.release_owned_frame(slot_index, page_record.frame)?;
+            if mapping.shared_identity == 0 {
+                self.release_owned_frame(slot_index, page_record.frame)?;
+            }
             self.slots[slot_index].pages[page_index] = PageRecord::EMPTY;
+        }
+        if mapping.shared_identity != 0 {
+            self.drop_shared_mapping_reference(mapping.shared_identity)?;
         }
         self.slots[slot_index].mappings[mapping_index] = MappingRecord::EMPTY;
         self.slots[slot_index].process_info.owned_frames = self.slots[slot_index].owned_frame_count;
@@ -1194,6 +1579,8 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
                     writable: true,
                     executable: false,
                 },
+                shared_identity: 0,
+                shared_page_offset: 0,
             };
             self.slots[slot_index].mapping_count =
                 self.slots[slot_index].mapping_count.max(index + 1);
@@ -1816,6 +2203,21 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         };
     }
 
+    fn drop_slot_shared_mappings(
+        &mut self,
+        slot_index: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let mapping_count = self.slots[slot_index].mapping_count;
+        for index in 0..mapping_count {
+            let identity = self.slots[slot_index].mappings[index].shared_identity;
+            if self.slots[slot_index].mappings[index].occupied && identity != 0 {
+                self.drop_shared_mapping_reference(identity)?;
+                self.slots[slot_index].mappings[index].shared_identity = 0;
+            }
+        }
+        Ok(())
+    }
+
     fn initialize_root(
         &mut self,
         slot_index: usize,
@@ -1925,11 +2327,27 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         if page >= usize::from(mapping.page_count) {
             return Err(FrameBackedError::InvalidRange);
         }
-        self.slots[slot_index]
+        let frame = self.slots[slot_index]
             .pages
             .get(usize::from(mapping.first_page) + page)
             .map(|record| record.frame)
-            .ok_or(FrameBackedError::CorruptHierarchy)
+            .ok_or(FrameBackedError::CorruptHierarchy)?;
+        if mapping.shared_identity != 0 {
+            let backing = self
+                .shared
+                .iter()
+                .find(|backing| backing.occupied && backing.identity == mapping.shared_identity)
+                .ok_or(FrameBackedError::CorruptHierarchy)?;
+            let shared_page = usize::from(mapping.shared_page_offset)
+                .checked_add(page)
+                .ok_or(FrameBackedError::CorruptHierarchy)?;
+            if shared_page >= usize::from(backing.allocated_pages)
+                || backing.frames[shared_page] != frame
+            {
+                return Err(FrameBackedError::CorruptHierarchy);
+            }
+        }
+        Ok(frame)
     }
 
     fn cleanup_transaction(
@@ -2099,6 +2517,8 @@ impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressS
                 writable: false,
                 executable: false,
             },
+            shared_identity: 0,
+            shared_page_offset: 0,
         };
         self.slots[slot_index].mapping_count += 1;
         Ok(FrameBackedMapping {
@@ -2298,6 +2718,7 @@ impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressS
         }
         #[cfg(not(target_os = "none"))]
         let _ = root;
+        self.drop_slot_shared_mappings(slot_index)?;
         self.slots[slot_index].phase = SpacePhase::Free;
         self.reset_records(slot_index);
         self.release_owned(slot_index)
@@ -2971,6 +3392,135 @@ mod tests {
             ),
             Err(FrameBackedError::InvalidRange)
         );
+    }
+
+    #[test]
+    fn shared_memfd_frames_alias_across_processes_and_outlive_the_descriptor() {
+        let mut memory = Box::new(TestMemory::<176>::new());
+        memory
+            .write_entry(
+                PhysicalAddress::new(0),
+                256,
+                0x1234_5000 | ENTRY_PRESENT | ENTRY_WRITABLE,
+            )
+            .unwrap();
+        let authority = unsafe { Authority::assume_root() };
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let image_control = authority.grant::<UserlandImageControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let catalog = catalog();
+
+        let mut first_bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let first_image = prepare_user_image(
+            catalog.materialize(1, &mut first_bytes).unwrap(),
+            &image_control,
+        )
+        .unwrap();
+        let first = install_user_image(first_image, &mut backend, &install_control).unwrap();
+        let mut second_bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let second_image = prepare_user_image(
+            catalog.materialize(1, &mut second_bytes).unwrap(),
+            &image_control,
+        )
+        .unwrap();
+        let second = install_user_image(second_image, &mut backend, &install_control).unwrap();
+
+        const IDENTITY: u32 = 0x5348_4d31;
+        let writable = MappingPermissions {
+            readable: true,
+            writable: true,
+            executable: false,
+        };
+        backend.linux_shared_memory_create(IDENTITY).unwrap();
+        backend
+            .linux_shared_memory_resize(IDENTITY, 0, PAGE_SIZE * 2)
+            .unwrap();
+        let first_address = backend
+            .linux_mmap_shared(&first.process, IDENTITY, 0, PAGE_SIZE * 2, 0, writable)
+            .unwrap();
+        let second_address = backend
+            .linux_mmap_shared(&second.process, IDENTITY, 0, PAGE_SIZE, PAGE_SIZE, writable)
+            .unwrap();
+
+        let first_slot = backend.process_slot(&first.process).unwrap();
+        let second_slot = backend.process_slot(&second.process).unwrap();
+        let first_frame = backend.slots[first_slot]
+            .pages
+            .iter()
+            .find(|page| page.virtual_address == first_address + PAGE_SIZE as u64)
+            .unwrap()
+            .frame;
+        let second_frame = backend.slots[second_slot]
+            .pages
+            .iter()
+            .find(|page| page.virtual_address == second_address)
+            .unwrap()
+            .frame;
+        assert_eq!(first_frame, second_frame);
+        backend
+            .memory_mut()
+            .write_bytes(first_frame, 37, b"cross-process-shared-frame")
+            .unwrap();
+        let mut observed = [0_u8; 26];
+        read_user_bytes(
+            &backend,
+            &second.process,
+            second_address + 37,
+            &mut observed,
+        );
+        assert_eq!(&observed, b"cross-process-shared-frame");
+
+        assert_eq!(
+            backend.linux_shared_memory_resize(IDENTITY, PAGE_SIZE * 2, PAGE_SIZE),
+            Err(FrameBackedError::InvalidState)
+        );
+        backend.linux_shared_memory_close(IDENTITY).unwrap();
+        let retained = backend
+            .shared
+            .iter()
+            .find(|backing| backing.occupied && backing.identity == IDENTITY)
+            .unwrap();
+        assert!(!retained.descriptor_open);
+        assert_eq!(retained.mapping_references, 2);
+
+        backend
+            .linux_munmap(&first.process, first_address, PAGE_SIZE * 2)
+            .unwrap();
+        let mut after_sender_unmap = [0_u8; 26];
+        read_user_bytes(
+            &backend,
+            &second.process,
+            second_address + 37,
+            &mut after_sender_unmap,
+        );
+        assert_eq!(after_sender_unmap, observed);
+        backend.memory_mut().fail_release_once = true;
+        assert_eq!(
+            backend.linux_munmap(&second.process, second_address, PAGE_SIZE),
+            Err(FrameBackedError::Memory(TestMemoryError::ReleaseFailed))
+        );
+        let retained_after_failure = backend
+            .shared
+            .iter()
+            .find(|backing| backing.occupied && backing.identity == IDENTITY)
+            .unwrap();
+        assert_eq!(retained_after_failure.mapping_references, 1);
+        backend
+            .linux_munmap(&second.process, second_address, PAGE_SIZE)
+            .unwrap();
+        assert!(
+            backend
+                .shared
+                .iter()
+                .all(|backing| !backing.occupied || backing.identity != IDENTITY)
+        );
+        let shared_frame_index = usize::try_from(second_frame.as_u64()).unwrap() / PAGE_SIZE;
+        assert!(!backend.memory().allocated[shared_frame_index]);
+
+        backend.release_process(&first.process).unwrap();
+        backend.release_process(&second.process).unwrap();
+        assert_eq!(backend.memory().in_use(), 0);
     }
 
     #[test]

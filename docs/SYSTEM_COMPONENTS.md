@@ -24,13 +24,14 @@ Arach must provide the Linux interfaces libinput-rs and COSMIC observe:
 - touchpad, mouse, TrackPoint, keyboard, switch, tablet and tablet-pad devices.
 
 The current kernel bring-up provides one generation-bound descriptor and
-open-object table for regular Akashic files, pipes, eventfds, timerfds, epoll,
-and bounded Unix stream sockets. Eventfds cover counter and semaphore reads;
+open-object table for regular Akashic files, memfds, pipes, eventfds, timerfds,
+epoll, and bounded Unix stream sockets. Eventfds cover counter and semaphore reads;
 monotonic timerfds cover one-shot and periodic expiration; pipes and sockets
-publish endpoint lifetime through the same poll/epoll readiness bridge. These
-are real early-service wake and IPC primitives, but scheduler-backed blocking,
-device descriptors, ancillary descriptor passing, and the evdev ioctl surface
-remain separate qualification work.
+publish endpoint lifetime through the same poll/epoll readiness bridge.
+Bounded `SCM_RIGHTS` and memfd-backed shared mappings provide transferable
+buffer lifetime across descriptor close. These are real early-service wake and
+IPC primitives, but scheduler-backed blocking, device descriptors, dma-buf,
+and the evdev ioctl surface remain separate qualification work.
 
 The gate runs upstream libinput behavioral tests plus COSMIC compositor tests.
 No companion process may grab a physical device in the parity path.

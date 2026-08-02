@@ -88,13 +88,20 @@ two 4 KiB byte queues per connection. Pathname and length-preserving abstract
 addresses support bind, listen, connect, plain accept, and `accept4`.
 `getsockname`, `getpeername`, `SO_TYPE`, `SO_DOMAIN`, `SO_ACCEPTCONN`, fixed
 send/receive buffer options, and root-profile `SO_PEERCRED` expose the admitted
-identity surface. Ordinary reads/writes, `sendto`/`recvfrom`, and data-only
-`sendmsg`/`recvmsg` with at most 16 vectors share one transfer path. `MSG_PEEK`,
-half-close, EOF, HUP/error readiness, duplicate lifetime, final-close epoll
-detachment, and listener namespace reuse are measured. Host tests additionally
-connect distinct exact process generations and reject stale endpoint handles,
-namespace collisions, backlog overflow, unsupported flags, and writes beyond
-the fixed queue.
+identity surface. Ordinary reads/writes, `sendto`/`recvfrom`, and
+`sendmsg`/`recvmsg` with at most 16 vectors share one transfer path. One
+x86-64 `SOL_SOCKET`/`SCM_RIGHTS` control message may carry at most eight
+descriptors. In-transit reservations retain the exact global open descriptions,
+so a receiver in another process generation observes the same status flags,
+file cursor, and backend even after the sender closes every local descriptor.
+Eight ancillary boundaries per stream direction are retained without dynamic
+allocation. `MSG_CMSG_CLOEXEC` is descriptor-local, undersized control buffers
+set `MSG_CTRUNC` and close every uninstalled right, and ordinary `read` safely
+discards reached rights. `MSG_PEEK`, half-close, EOF, HUP/error readiness,
+duplicate lifetime, final-close epoll detachment, and listener namespace reuse
+are measured. Host tests additionally connect distinct exact process
+generations and reject stale endpoint handles, namespace collisions, backlog
+overflow, unsupported flags, and writes beyond the fixed queue.
 
 `ARACH_C1_UNIX_SOCKET_PASS` records socketpair and named-listener execution in
 the measured QEMU image. Idris 2 and Agda place the socket certificate
@@ -107,8 +114,38 @@ sleep returns `EAGAIN` even when `O_NONBLOCK` is clear, and `EPIPE` does not yet
 queue `SIGPIPE`. Socket operations that would sleep also return `EAGAIN`.
 Scheduler-backed waits, asynchronous interruption, `splice`, named FIFOs,
 filesystem-backed socket inodes and unlink lifetime, datagram and sequenced-
-packet sockets, ancillary rights/credentials, and process-shared descriptor
-tables across fork remain later gates.
+packet sockets, explicit credential control messages, and process-shared
+descriptor tables across fork remain later gates. Passing Unix sockets or
+epoll instances is rejected until cyclic descriptor graphs have bounded garbage
+collection. `MSG_PEEK` observes bytes without creating duplicate received
+descriptors; a subsequent consuming receive obtains the retained rights.
+
+### Generation-bound memory files and shared mappings
+
+`memfd_create`, `ftruncate`, and non-anonymous `MAP_SHARED` provide the first
+bounded process-shared memory profile. A generation-encoded registry admits 32
+memory files, names of at most 249 bytes, `MFD_CLOEXEC` and
+`MFD_ALLOW_SEALING`, and a maximum size of 1 MiB per object. The unified
+descriptor table owns the open description, while the process runtime owns the
+physical backing independently. Shared mappings from distinct committed page
+tables install the same physical frames at independently selected virtual
+addresses and may use page-aligned offsets. Shrink is rejected while any VMA
+exists. Closing the final descriptor marks the backing private to its VMAs;
+the final unmap or process retirement releases the frames.
+
+The live probe transfers a truncated memory file with `SCM_RIGHTS`, closes the
+sender descriptor before receipt, applies close-on-exec to the received
+descriptor, creates two writable shared aliases, closes that descriptor, and
+observes one alias through the other before and after the first unmap.
+`ARACH_C1_SHARED_MEMORY_PASS` records the complete path. Host tests separately
+prove cross-process physical-frame identity, sender-close transfer lifetime,
+shared regular-file offsets, control truncation cleanup, stale-generation
+rejection, resize bounds, and final-frame reclamation.
+
+This profile does not yet implement memory-file payload `read`/`write`, seals,
+hugetlb flags, private copy-on-write memfd mappings, partial VMA split/merge,
+file growth through writes, or Linux `SIGBUS` delivery beyond EOF. Those paths
+fail closed.
 
 ### Generation-bound private file mappings
 
@@ -126,8 +163,8 @@ RX profiles. It preflights every generation-owned leaf, preserves hardware
 accessed/dirty state, rejects W+X, and restores already changed leaves if a later
 PTE write fails. The syscall return gate reloads the selected CR3 before Ring 3
 resumes, flushing stale local non-global translations. Partial VMA changes,
-`PROT_NONE`, `MAP_SHARED`, `MAP_FIXED`, non-Akashic files, demand paging, and
-pages wholly beyond EOF remain fail-closed.
+`PROT_NONE`, `MAP_FIXED`, shared mappings of non-memfd files, non-Akashic
+files, demand paging, and pages wholly beyond EOF remain fail-closed.
 
 The measured Rust probe writes `mov eax, 42; ret` to a regular file, maps it
 read-only, validates copied bytes and zero fill, closes the descriptor, proves a
@@ -168,6 +205,7 @@ before it reclaims the deferred old hierarchy.
 
 The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C1_PIPE_DESCRIPTOR_PASS`, `ARACH_C1_UNIX_SOCKET_PASS`,
+`ARACH_C1_SHARED_MEMORY_PASS`,
 `ARACH_C1_LINUX_SYSCALL_PASS`,
 `ARACH_C2_RUNTIME_LINKER_ENTER`,
 `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,

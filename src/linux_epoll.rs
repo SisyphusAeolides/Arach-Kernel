@@ -116,8 +116,8 @@ const fn fd_for_index(index: usize) -> u32 {
     EPOLL_BASE + index as u32
 }
 
-fn target_readiness(owner: ProcessHandle, target: ObjectKey) -> Option<(u32, u64)> {
-    crate::linux_fd::readiness_by_key(owner, target).ok()
+fn target_readiness(target: ObjectKey) -> Option<(u32, u64)> {
+    crate::linux_fd::readiness_by_key(target).ok()
 }
 
 /// Allocate an epoll instance owned by `owner`.
@@ -155,7 +155,7 @@ pub fn ctl(
     data: u64,
 ) -> Result<(), EpollError> {
     if events & !EPOLL_INTEREST_MASK != 0
-        || operation != EPOLL_CTL_DEL && target_readiness(owner, target).is_none()
+        || operation != EPOLL_CTL_DEL && target_readiness(target).is_none()
     {
         return Err(EpollError::InvalidArgument);
     }
@@ -253,7 +253,7 @@ pub fn wait(
         if !watch.occupied() {
             continue;
         }
-        let (ready, generation, invalid) = match target_readiness(owner, watch.target) {
+        let (ready, generation, invalid) = match target_readiness(watch.target) {
             Some((ready, generation)) => (ready, generation, false),
             None => (EPOLLERR | EPOLLHUP, 0, true),
         };
@@ -319,7 +319,7 @@ pub fn readiness(owner: ProcessHandle, epfd: u32) -> Result<u32, EpollError> {
     for watch in &watches {
         if watch.occupied() {
             let (ready, generation) =
-                target_readiness(owner, watch.target).unwrap_or((EPOLLERR | EPOLLHUP, 0));
+                target_readiness(watch.target).unwrap_or((EPOLLERR | EPOLLHUP, 0));
             let edge = watch.events & EPOLLET != 0;
             let edge_pending = !edge || !watch.edge_seen || watch.last_generation != generation;
             if ready & ((watch.events & !EPOLLET) | EPOLLERR | EPOLLHUP) != 0 && edge_pending {
@@ -361,10 +361,10 @@ pub fn close(
 /// Remove every watch for an open object whose last public descriptor closed.
 /// The caller drops the corresponding retained object references after this
 /// table lock is released.
-pub(crate) fn remove_target(owner: ProcessHandle, target: ObjectKey) -> usize {
+pub(crate) fn remove_target(target: ObjectKey) -> usize {
     let mut table = EPOLLS.lock();
     let mut removed = 0;
-    for slot in table.iter_mut().filter(|slot| slot.owner == owner) {
+    for slot in table.iter_mut().filter(|slot| slot.occupied()) {
         for watch in &mut slot.watches {
             if watch.target == target {
                 *watch = Watch::EMPTY;

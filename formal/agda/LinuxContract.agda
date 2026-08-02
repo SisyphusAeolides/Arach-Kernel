@@ -21,6 +21,8 @@ data Gate : Set where
   unixSocketPair generationBoundSocketEndpoint unixSocketNamespace : Gate
   unixSocketConnectAccept unixSocketFullDuplex unixSocketMessageVectors : Gate
   pollEpollSocketReadiness unixSocketHalfClose unixSocketPeerIdentity : Gate
+  ancillaryRightsTransfer crossProcessOpenDescription generationBoundMemfd : Gate
+  sharedFrameAlias mappingOutlivesDescriptor : Gate
   threadGroupSnapshot peerGenerationRetirement leaderZombiePublication supervisorReap : Gate
   immutableFileSnapshot boundedExecVectors measuredStaticImage inactiveActivation : Gate
   atomicImageExchange execStateReset deferredImageReap rollbackPreservesImage : Gate
@@ -121,10 +123,20 @@ record UnixSocketCertificate : Set where
     unixSocketHalfCloseEvidence : Measurement unixSocketHalfClose
     unixSocketPeerIdentityEvidence : Measurement unixSocketPeerIdentity
 
+record SharedMemoryCertificate : Set where
+  constructor sharedMemoryCertificate
+  field
+    unixSocket : UnixSocketCertificate
+    ancillaryRightsTransferEvidence : Measurement ancillaryRightsTransfer
+    crossProcessOpenDescriptionEvidence : Measurement crossProcessOpenDescription
+    generationBoundMemfdEvidence : Measurement generationBoundMemfd
+    sharedFrameAliasEvidence : Measurement sharedFrameAlias
+    mappingOutlivesDescriptorEvidence : Measurement mappingOutlivesDescriptor
+
 record GroupExitCertificate : Set where
   constructor groupExitCertificate
   field
-    unixSocket : UnixSocketCertificate
+    sharedMemory : SharedMemoryCertificate
     threadGroupSnapshotEvidence : Measurement threadGroupSnapshot
     peerGenerationRetirementEvidence : Measurement peerGenerationRetirement
     leaderZombiePublicationEvidence : Measurement leaderZombiePublication
@@ -216,12 +228,25 @@ unixSocketRequiresDescriptorPipe :
 unixSocketRequiresDescriptorPipe certificate =
   UnixSocketCertificate.descriptorPipe certificate
 
--- Whole-group termination structurally retains the local-socket boundary used
--- by service and replacement-image IPC.
+-- Shared-memory qualification structurally retains the local-socket transport
+-- carrying its generation-bound open descriptions.
+sharedMemoryRequiresUnixSocket :
+  SharedMemoryCertificate -> UnixSocketCertificate
+sharedMemoryRequiresUnixSocket certificate =
+  SharedMemoryCertificate.unixSocket certificate
+
+-- Whole-group termination structurally retains the shared-memory boundary
+-- used by service and replacement-image IPC.
+groupExitRequiresSharedMemory :
+  GroupExitCertificate -> SharedMemoryCertificate
+groupExitRequiresSharedMemory certificate =
+  GroupExitCertificate.sharedMemory certificate
+
 groupExitRequiresUnixSocket :
   GroupExitCertificate -> UnixSocketCertificate
 groupExitRequiresUnixSocket certificate =
-  GroupExitCertificate.unixSocket certificate
+  SharedMemoryCertificate.unixSocket
+    (GroupExitCertificate.sharedMemory certificate)
 
 -- The descriptor and pipe boundary remains projectable through the required
 -- Unix-socket certificate.
@@ -229,14 +254,16 @@ groupExitRequiresDescriptorPipe :
   GroupExitCertificate -> DescriptorPipeCertificate
 groupExitRequiresDescriptorPipe certificate =
   UnixSocketCertificate.descriptorPipe
-    (GroupExitCertificate.unixSocket certificate)
+    (SharedMemoryCertificate.unixSocket
+      (GroupExitCertificate.sharedMemory certificate))
 
 -- The prior signal qualification remains projectable through that boundary.
 groupExitRequiresSignalReturn : GroupExitCertificate -> SignalReturnCertificate
 groupExitRequiresSignalReturn certificate =
   DescriptorPipeCertificate.signalReturn
     (UnixSocketCertificate.descriptorPipe
-      (GroupExitCertificate.unixSocket certificate))
+      (SharedMemoryCertificate.unixSocket
+        (GroupExitCertificate.sharedMemory certificate)))
 
 -- Image replacement cannot be projected without the prior group-lifecycle
 -- qualification on which its single-threaded admission rule depends.

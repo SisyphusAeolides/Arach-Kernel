@@ -10,6 +10,7 @@ const ROBUST_PASS: &[u8] = b"ARACH_C1_ROBUST_FUTEX_PASS\n";
 const SIGNAL_PASS: &[u8] = b"ARACH_C1_SIGNAL_RETURN_PASS\n";
 const PIPE_PASS: &[u8] = b"ARACH_C1_PIPE_DESCRIPTOR_PASS\n";
 const UNIX_SOCKET_PASS: &[u8] = b"ARACH_C1_UNIX_SOCKET_PASS\n";
+const SHARED_MEMORY_PASS: &[u8] = b"ARACH_C1_SHARED_MEMORY_PASS\n";
 const FILE_MMAP_PASS: &[u8] = b"ARACH_C2_FILE_MMAP_PASS\n";
 const MPROTECT_PASS: &[u8] = b"ARACH_C2_MPROTECT_PASS\n";
 const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
@@ -30,6 +31,7 @@ const MAPPED_CODE: &[u8] = &[0xb8, 42, 0, 0, 0, 0xc3];
 const SYS_WRITE: usize = 1;
 const SYS_READ: usize = 0;
 const SYS_CLOSE: usize = 3;
+const SYS_FTRUNCATE: usize = 77;
 const SYS_FCNTL: usize = 72;
 const SYS_DUP: usize = 32;
 const SYS_DUP3: usize = 292;
@@ -79,6 +81,7 @@ const SYS_SOCKETPAIR: usize = 53;
 const SYS_SETSOCKOPT: usize = 54;
 const SYS_GETSOCKOPT: usize = 55;
 const SYS_ACCEPT4: usize = 288;
+const SYS_MEMFD_CREATE: usize = 319;
 
 const O_RDWR: usize = 0x2;
 const O_CREAT: usize = 0x40;
@@ -101,12 +104,14 @@ const SOCK_STREAM: usize = 1;
 const SOCK_NONBLOCK: usize = 0x800;
 const SOCK_CLOEXEC: usize = 0x8_0000;
 const SOL_SOCKET: usize = 1;
+const SCM_RIGHTS: usize = 1;
 const SO_TYPE: usize = 3;
 const SO_SNDBUF: usize = 7;
 const SO_PEERCRED: usize = 17;
 const SO_ACCEPTCONN: usize = 30;
 const SO_DOMAIN: usize = 39;
 const MSG_PEEK: usize = 0x2;
+const MSG_CMSG_CLOEXEC: usize = 0x4000_0000;
 const SHUT_WR: usize = 1;
 const FUTEX_WAIT_PRIVATE: usize = 128;
 const FUTEX_WAKE_PRIVATE: usize = 129;
@@ -124,7 +129,9 @@ const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
 const MAP_PRIVATE: usize = 0x02;
+const MAP_SHARED: usize = 0x01;
 const MAP_ANONYMOUS: usize = 0x20;
+const MFD_CLOEXEC: usize = 0x0001;
 
 const CLONE_VM: usize = 0x0000_0100;
 const CLONE_FS: usize = 0x0000_0200;
@@ -816,6 +823,158 @@ fn exercise_unix_socket_pair() -> bool {
         || receive_header.control_length != 0
         || receive_header.flags != 0
         || peer.family as usize != AF_UNIX
+    {
+        return false;
+    }
+
+    let transferred_event = unsafe { linux_syscall3(SYS_EVENTFD2, 9, 0, 0) };
+    let transferred_memory = unsafe {
+        linux_syscall3(
+            SYS_MEMFD_CREATE,
+            b"wayland-buffer\0".as_ptr() as usize,
+            MFD_CLOEXEC,
+            0,
+        )
+    };
+    if transferred_event < 3
+        || transferred_memory < 3
+        || unsafe { linux_syscall3(SYS_FTRUNCATE, transferred_memory as usize, 8192, 0) } != 0
+    {
+        return false;
+    }
+    let rights_byte = [b'F'];
+    let rights_vector = LinuxIoVector {
+        base: rights_byte.as_ptr() as usize,
+        length: rights_byte.len(),
+    };
+    let mut send_control = [0_u8; 24];
+    send_control[..8].copy_from_slice(&24_u64.to_ne_bytes());
+    send_control[8..12].copy_from_slice(&(SOL_SOCKET as u32).to_ne_bytes());
+    send_control[12..16].copy_from_slice(&(SCM_RIGHTS as u32).to_ne_bytes());
+    send_control[16..20].copy_from_slice(&(transferred_event as i32).to_ne_bytes());
+    send_control[20..24].copy_from_slice(&(transferred_memory as i32).to_ne_bytes());
+    let rights_header = LinuxMessageHeader {
+        name: 0,
+        name_length: 0,
+        name_padding: 0,
+        vectors: &rights_vector as *const _ as usize,
+        vector_count: 1,
+        control: send_control.as_ptr() as usize,
+        control_length: send_control.len(),
+        flags: 0,
+        flags_padding: 0,
+    };
+    if unsafe { linux_syscall3(SYS_SENDMSG, second, &rights_header as *const _ as usize, 0) } != 1
+        || unsafe { linux_syscall1(SYS_CLOSE, transferred_event as usize) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, transferred_memory as usize) } != 0
+    {
+        return false;
+    }
+    let mut received_byte = [0_u8; 1];
+    let received_vector = LinuxIoVector {
+        base: received_byte.as_mut_ptr() as usize,
+        length: received_byte.len(),
+    };
+    let mut receive_control = [0_u8; 24];
+    let mut rights_receive_header = LinuxMessageHeader {
+        name: 0,
+        name_length: 0,
+        name_padding: 0,
+        vectors: &received_vector as *const _ as usize,
+        vector_count: 1,
+        control: receive_control.as_mut_ptr() as usize,
+        control_length: receive_control.len(),
+        flags: -1,
+        flags_padding: 0,
+    };
+    if unsafe {
+        linux_syscall3(
+            SYS_RECVMSG,
+            alias,
+            &mut rights_receive_header as *mut _ as usize,
+            MSG_CMSG_CLOEXEC,
+        )
+    } != 1
+        || received_byte != rights_byte
+        || rights_receive_header.control_length != receive_control.len()
+        || rights_receive_header.flags != 0
+        || u64::from_ne_bytes(receive_control[..8].try_into().unwrap()) != 24
+        || u32::from_ne_bytes(receive_control[8..12].try_into().unwrap()) != SOL_SOCKET as u32
+        || u32::from_ne_bytes(receive_control[12..16].try_into().unwrap()) != SCM_RIGHTS as u32
+    {
+        return false;
+    }
+    let received_event = i32::from_ne_bytes(receive_control[16..20].try_into().unwrap());
+    let received_memory = i32::from_ne_bytes(receive_control[20..24].try_into().unwrap());
+    let mut transferred_value = [0_u8; 8];
+    if received_event < 3
+        || received_memory < 3
+        || unsafe { linux_syscall3(SYS_FCNTL, received_event as usize, F_GETFD, 0) }
+            != FD_CLOEXEC as isize
+        || unsafe { linux_syscall3(SYS_FCNTL, received_memory as usize, F_GETFD, 0) }
+            != FD_CLOEXEC as isize
+        || unsafe {
+            linux_syscall3(
+                SYS_READ,
+                received_event as usize,
+                transferred_value.as_mut_ptr() as usize,
+                transferred_value.len(),
+            )
+        } != transferred_value.len() as isize
+        || u64::from_ne_bytes(transferred_value) != 9
+        || unsafe { linux_syscall1(SYS_CLOSE, received_event as usize) } != 0
+    {
+        return false;
+    }
+
+    let first_shared = unsafe {
+        linux_syscall6(
+            SYS_MMAP,
+            0,
+            4096,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            received_memory as usize,
+            0,
+        )
+    };
+    let second_shared = unsafe {
+        linux_syscall6(
+            SYS_MMAP,
+            0,
+            4096,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            received_memory as usize,
+            0,
+        )
+    };
+    if first_shared <= 0
+        || second_shared <= 0
+        || first_shared == second_shared
+        || first_shared as usize & 0xfff != 0
+        || second_shared as usize & 0xfff != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, received_memory as usize) } != 0
+    {
+        return false;
+    }
+    // SAFETY: Both mappings cover the same writable shared memfd page. The
+    // descriptor has closed, but each VMA independently retains the backing.
+    unsafe {
+        core::ptr::write_volatile((first_shared as *mut u64).add(7), 0x4152_4143_4853_484d);
+        if core::ptr::read_volatile((second_shared as *const u64).add(7))
+            != 0x4152_4143_4853_484d
+        {
+            return false;
+        }
+    }
+    if unsafe { linux_syscall3(SYS_MUNMAP, first_shared as usize, 4096, 0) } != 0 {
+        return false;
+    }
+    // SAFETY: The second VMA still owns one reference after the first unmap.
+    if unsafe { core::ptr::read_volatile((second_shared as *const u64).add(7)) }
+        != 0x4152_4143_4853_484d
+        || unsafe { linux_syscall3(SYS_MUNMAP, second_shared as usize, 4096, 0) } != 0
     {
         return false;
     }
@@ -1919,6 +2078,9 @@ pub extern "C" fn _start() -> ! {
         )
     };
     if wrote != UNIX_SOCKET_PASS.len() as isize {
+        fail();
+    }
+    if !write_all(1, SHARED_MEMORY_PASS) {
         fail();
     }
 

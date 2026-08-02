@@ -7,9 +7,9 @@ proves the first live userspace slice: `write`, `read`, `close`, `eventfd2`,
 `epoll_wait`, `socket`, `socketpair`, `bind`, `listen`, `connect`, `accept`,
 `accept4`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg`, `shutdown`,
 `getsockname`, `getpeername`, `setsockopt`, `getsockopt`, `getpid`, `gettid`,
-`getppid`, anonymous and eager private file `mmap`, exact-range `mprotect` and
-`munmap`, `brk`, private `futex`, transactional static/`PT_INTERP` `execve`, and
-`exit_group`.
+`getppid`, `memfd_create`, `ftruncate`, anonymous, eager private file, and
+memfd-backed shared `mmap`, exact-range `mprotect` and `munmap`, `brk`, private
+`futex`, transactional static/`PT_INTERP` `execve`, and `exit_group`.
 The probe checks both normal and semaphore eventfd semantics, including
 non-sleeping `EAGAIN` on an empty counter, and verifies that poll/epoll
 readiness clears after the eventfd is drained. Its single-process futex gate
@@ -32,9 +32,17 @@ socketpair and an abstract named listener complete. The probe verifies socket
 creation flags, unnamed and named addresses, connect plus both accept forms,
 full-duplex byte and vector transfer, `MSG_PEEK`, fixed buffer options,
 `SO_PEERCRED`, poll/epoll readiness, duplicate lifetime, half-close HUP, and
-namespace reuse. The admitted gate is bounded: operations that would sleep
-return `EAGAIN`, and ancillary rights, filesystem socket inodes, datagram and
-sequenced-packet transports are not claimed.
+namespace reuse. It also transfers an eventfd and memfd in one bounded
+`SCM_RIGHTS` message, closes both sender descriptors before receipt, and proves
+receiver-local close-on-exec behavior. The admitted gate is bounded:
+operations that would sleep return `EAGAIN`; explicit credential messages,
+filesystem socket inodes, datagram and sequenced-packet transports are not
+claimed.
+
+`ARACH_C1_SHARED_MEMORY_PASS` follows only after the received memfd is mapped
+through two writable `MAP_SHARED` aliases. The probe closes the last descriptor,
+writes through one alias, observes the same physical bytes through the other,
+unmaps the first, observes the retained second alias, and finally unmaps it.
 
 Before that aggregate marker, the probe writes a six-byte x86-64 function to an
 Akashic regular file, maps it read-only, verifies the snapshot and zero-filled

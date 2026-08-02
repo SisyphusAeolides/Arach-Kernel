@@ -62,6 +62,7 @@ pub enum LinuxSyscall {
     Exit,
     Wait4,
     Fcntl,
+    Ftruncate,
     Socket,
     Connect,
     Accept,
@@ -100,6 +101,7 @@ pub enum LinuxSyscall {
     InotifyAddWatch,
     InotifyRmWatch,
     Getrandom,
+    MemfdCreate,
     Prlimit64,
     Gettid,
     ExitGroup,
@@ -162,6 +164,7 @@ impl LinuxSyscall {
             60 => Some(Self::Exit),
             61 => Some(Self::Wait4),
             72 => Some(Self::Fcntl),
+            77 => Some(Self::Ftruncate),
             202 => Some(Self::Futex),
             218 => Some(Self::SetTidAddress),
             228 => Some(Self::ClockGettime),
@@ -190,6 +193,7 @@ impl LinuxSyscall {
             255 => Some(Self::InotifyRmWatch),
             302 => Some(Self::Prlimit64),
             318 => Some(Self::Getrandom),
+            319 => Some(Self::MemfdCreate),
             334 => Some(Self::Rseq),
             186 => Some(Self::Gettid),
             _ => None,
@@ -284,6 +288,11 @@ mod tests {
         );
         assert_eq!(LinuxSyscall::from_number(292), Some(LinuxSyscall::Dup3));
         assert_eq!(LinuxSyscall::from_number(293), Some(LinuxSyscall::Pipe2));
+        assert_eq!(LinuxSyscall::from_number(77), Some(LinuxSyscall::Ftruncate));
+        assert_eq!(
+            LinuxSyscall::from_number(319),
+            Some(LinuxSyscall::MemfdCreate)
+        );
         assert_eq!(LinuxSyscall::from_number(288), Some(LinuxSyscall::Accept4));
         assert_eq!(
             LinuxSyscall::from_number(232),

@@ -9,8 +9,8 @@
 //!
 //! Pathname and abstract names currently live in this private namespace;
 //! pathname sockets do not yet materialize Akashic VFS inodes. Datagram and
-//! sequenced-packet modes, ancillary rights, credential messages, and
-//! scheduler-backed blocking waits remain explicit later contracts.
+//! sequenced-packet modes, explicit credential messages, and scheduler-backed
+//! blocking waits remain explicit later contracts.
 
 use crate::linux_eventfd::{READY_ERR, READY_HUP, READY_IN, READY_OUT};
 use crate::process::lifecycle::ProcessHandle;
@@ -36,6 +36,7 @@ pub const RECEIVE_FLAGS: u32 = MSG_PEEK | MSG_DONTWAIT;
 pub const UNIX_PATH_BYTES: usize = 108;
 pub const SOCKET_BUFFER_BYTES: usize = 4096;
 pub const MAXIMUM_LISTEN_BACKLOG: usize = 8;
+pub const MAXIMUM_RIGHTS_RECORDS: usize = 8;
 const MAXIMUM_ENDPOINTS: usize = 64;
 const MAXIMUM_CONNECTIONS: usize = 32;
 const ENDPOINT_INDEX_BITS: u32 = 8;
@@ -146,10 +147,10 @@ impl EndpointSlot {
     };
 }
 
-#[derive(Clone, Copy)]
 struct ByteQueue {
     head: usize,
     length: usize,
+    sequence: u64,
     bytes: [u8; SOCKET_BUFFER_BYTES],
 }
 
@@ -157,17 +158,132 @@ impl ByteQueue {
     const EMPTY: Self = Self {
         head: 0,
         length: 0,
+        sequence: 0,
         bytes: [0; SOCKET_BUFFER_BYTES],
     };
 
     fn clear(&mut self) {
+        self.sequence = self.sequence.wrapping_add(self.length as u64);
         self.head = 0;
         self.length = 0;
         self.bytes.fill(0);
     }
+
+    fn reset(&mut self) {
+        self.head = 0;
+        self.length = 0;
+        self.sequence = 0;
+        self.bytes.fill(0);
+    }
+
+    fn tail_sequence(&self) -> Option<u64> {
+        self.sequence.checked_add(self.length as u64)
+    }
 }
 
 #[derive(Clone, Copy)]
+struct RightsRecord {
+    sequence: u64,
+    count: u8,
+    tokens: [crate::linux_fd::TransferToken; crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS],
+}
+
+impl RightsRecord {
+    const EMPTY: Self = Self {
+        sequence: 0,
+        count: 0,
+        tokens: [crate::linux_fd::TransferToken::EMPTY;
+            crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS],
+    };
+}
+
+#[derive(Clone, Copy)]
+struct RightsQueue {
+    head: u8,
+    length: u8,
+    records: [RightsRecord; MAXIMUM_RIGHTS_RECORDS],
+}
+
+impl RightsQueue {
+    const EMPTY: Self = Self {
+        head: 0,
+        length: 0,
+        records: [RightsRecord::EMPTY; MAXIMUM_RIGHTS_RECORDS],
+    };
+
+    fn push(
+        &mut self,
+        sequence: u64,
+        tokens: &mut [crate::linux_fd::TransferToken],
+    ) -> Result<(), SocketError> {
+        if tokens.is_empty()
+            || tokens.len() > crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS
+            || usize::from(self.length) >= MAXIMUM_RIGHTS_RECORDS
+            || tokens.iter().any(|token| !token.occupied())
+        {
+            return Err(SocketError::Capacity);
+        }
+        let index = (usize::from(self.head) + usize::from(self.length)) % MAXIMUM_RIGHTS_RECORDS;
+        let mut record = RightsRecord {
+            sequence,
+            count: tokens.len() as u8,
+            ..RightsRecord::EMPTY
+        };
+        for (destination, source) in record.tokens.iter_mut().zip(tokens.iter_mut()) {
+            *destination = *source;
+            *source = crate::linux_fd::TransferToken::EMPTY;
+        }
+        self.records[index] = record;
+        self.length += 1;
+        Ok(())
+    }
+
+    fn record(&self, offset: usize) -> Option<RightsRecord> {
+        if offset >= usize::from(self.length) {
+            return None;
+        }
+        Some(self.records[(usize::from(self.head) + offset) % MAXIMUM_RIGHTS_RECORDS])
+    }
+
+    fn pop(&mut self, output: &mut [crate::linux_fd::TransferToken]) -> usize {
+        if self.length == 0 {
+            return 0;
+        }
+        let index = usize::from(self.head);
+        let mut record = self.records[index];
+        let count = usize::from(record.count).min(output.len());
+        for (destination, source) in output.iter_mut().zip(record.tokens.iter_mut()).take(count) {
+            *destination = *source;
+            *source = crate::linux_fd::TransferToken::EMPTY;
+        }
+        self.records[index] = RightsRecord::EMPTY;
+        self.head = ((index + 1) % MAXIMUM_RIGHTS_RECORDS) as u8;
+        self.length -= 1;
+        count
+    }
+
+    fn drain(&mut self, output: &mut [crate::linux_fd::TransferToken]) -> usize {
+        let mut count = 0;
+        while self.length != 0 {
+            count += self.pop(&mut output[count..]);
+        }
+        self.head = 0;
+        count
+    }
+
+    fn reset_empty(&mut self) {
+        debug_assert_eq!(self.length, 0);
+        self.head = 0;
+        self.length = 0;
+        for record in &mut self.records {
+            debug_assert_eq!(record.count, 0);
+            record.sequence = 0;
+            record.count = 0;
+            record.tokens.fill(crate::linux_fd::TransferToken::EMPTY);
+        }
+    }
+}
+
 struct ConnectionSlot {
     occupied: bool,
     generation: u32,
@@ -178,6 +294,7 @@ struct ConnectionSlot {
     read_open: [bool; 2],
     write_open: [bool; 2],
     outgoing: [ByteQueue; 2],
+    outgoing_rights: [RightsQueue; 2],
     readiness_generation: u64,
 }
 
@@ -200,9 +317,57 @@ impl ConnectionSlot {
         endpoint_open: [false; 2],
         read_open: [false; 2],
         write_open: [false; 2],
-        outgoing: [ByteQueue::EMPTY; 2],
+        outgoing: [const { ByteQueue::EMPTY }; 2],
+        outgoing_rights: [RightsQueue::EMPTY; 2],
         readiness_generation: 0,
     };
+
+    fn initialize(
+        &mut self,
+        generation: u32,
+        first_handle: u32,
+        second_handle: u32,
+        first_owner: ProcessHandle,
+        second_owner: ProcessHandle,
+        first_address: UnixAddress,
+        second_address: UnixAddress,
+    ) {
+        debug_assert!(!self.occupied);
+        self.occupied = true;
+        self.generation = generation;
+        self.endpoint_handles[0] = first_handle;
+        self.endpoint_handles[1] = second_handle;
+        self.owners[0] = first_owner;
+        self.owners[1] = second_owner;
+        self.addresses[0] = first_address;
+        self.addresses[1] = second_address;
+        for side in 0..2 {
+            self.endpoint_open[side] = true;
+            self.read_open[side] = true;
+            self.write_open[side] = true;
+            self.outgoing[side].reset();
+            self.outgoing_rights[side].reset_empty();
+        }
+        self.readiness_generation = 1;
+    }
+
+    fn reset_preserving_generation(&mut self) {
+        self.occupied = false;
+        for side in 0..2 {
+            self.endpoint_handles[side] = 0;
+            self.owners[side] = ProcessHandle {
+                pid: 0,
+                generation: 0,
+            };
+            self.addresses[side] = UnixAddress::UNNAMED;
+            self.endpoint_open[side] = false;
+            self.read_open[side] = false;
+            self.write_open[side] = false;
+            self.outgoing[side].reset();
+            self.outgoing_rights[side].reset_empty();
+        }
+        self.readiness_generation = 0;
+    }
 }
 
 struct SocketRegistry {
@@ -214,7 +379,7 @@ impl SocketRegistry {
     const fn new() -> Self {
         Self {
             endpoints: [EndpointSlot::EMPTY; MAXIMUM_ENDPOINTS],
-            connections: [ConnectionSlot::EMPTY; MAXIMUM_CONNECTIONS],
+            connections: [const { ConnectionSlot::EMPTY }; MAXIMUM_CONNECTIONS],
         }
     }
 }
@@ -305,14 +470,14 @@ fn retire_endpoint(endpoint: &mut EndpointSlot) {
     };
 }
 
-fn retire_connection(connection: &mut ConnectionSlot) {
-    let generation = connection.generation;
-    connection.outgoing[0].clear();
-    connection.outgoing[1].clear();
-    *connection = ConnectionSlot {
-        generation,
-        ..ConnectionSlot::EMPTY
-    };
+fn retire_connection(
+    connection: &mut ConnectionSlot,
+    discarded: &mut [crate::linux_fd::TransferToken],
+) -> usize {
+    let first = connection.outgoing_rights[0].drain(discarded);
+    let second = connection.outgoing_rights[1].drain(&mut discarded[first..]);
+    connection.reset_preserving_generation();
+    first + second
 }
 
 fn initialize_endpoint(
@@ -432,18 +597,15 @@ pub fn create_pair(
             return Err(error);
         }
     };
-    registry.connections[connection_index] = ConnectionSlot {
-        occupied: true,
-        generation: connection_generation,
-        endpoint_handles: [first, second],
-        owners: [owner, owner],
-        addresses: [UnixAddress::UNNAMED; 2],
-        endpoint_open: [true; 2],
-        read_open: [true; 2],
-        write_open: [true; 2],
-        outgoing: [ByteQueue::EMPTY; 2],
-        readiness_generation: 1,
-    };
+    registry.connections[connection_index].initialize(
+        connection_generation,
+        first,
+        second,
+        owner,
+        owner,
+        UnixAddress::UNNAMED,
+        UnixAddress::UNNAMED,
+    );
     Ok((first, second))
 }
 
@@ -545,18 +707,15 @@ pub fn connect(owner: ProcessHandle, handle: u32, address: UnixAddress) -> Resul
     client_endpoint.side = 0;
     advance_generation(&mut client_endpoint.readiness_generation);
 
-    registry.connections[connection_index] = ConnectionSlot {
-        occupied: true,
-        generation: connection_generation,
-        endpoint_handles: [handle, server_handle],
-        owners: [owner, listener.owner],
-        addresses: [client.address, listener.address],
-        endpoint_open: [true; 2],
-        read_open: [true; 2],
-        write_open: [true; 2],
-        outgoing: [ByteQueue::EMPTY; 2],
-        readiness_generation: 1,
-    };
+    registry.connections[connection_index].initialize(
+        connection_generation,
+        handle,
+        server_handle,
+        owner,
+        listener.owner,
+        client.address,
+        listener.address,
+    );
 
     let listener = &mut registry.endpoints[listener_index];
     let tail = (usize::from(listener.pending_head) + usize::from(listener.pending_length))
@@ -600,6 +759,20 @@ pub fn receive(
     output: &mut [u8],
     flags: u32,
 ) -> Result<usize, SocketError> {
+    let mut discarded =
+        [crate::linux_fd::TransferToken::EMPTY; crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS];
+    let (copied, discarded_count) = receive_message(owner, handle, output, flags, &mut discarded)?;
+    crate::linux_fd::release_transfers(&mut discarded[..discarded_count]);
+    Ok(copied)
+}
+
+pub(crate) fn receive_message(
+    owner: ProcessHandle,
+    handle: u32,
+    output: &mut [u8],
+    flags: u32,
+    rights_output: &mut [crate::linux_fd::TransferToken],
+) -> Result<(usize, usize), SocketError> {
     if flags & !RECEIVE_FLAGS != 0 {
         return Err(SocketError::OperationNotSupported);
     }
@@ -608,10 +781,10 @@ pub fn receive(
     let (connection_index, side) = resolved_connection(&registry, endpoint, handle)?;
     let connection = &mut registry.connections[connection_index];
     if !connection.read_open[side] {
-        return Ok(0);
+        return Ok((0, 0));
     }
     if output.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let incoming = 1 - side;
     let queue = &mut connection.outgoing[incoming];
@@ -619,23 +792,56 @@ pub fn receive(
         return if connection.write_open[incoming] {
             Err(SocketError::WouldBlock)
         } else {
-            Ok(0)
+            Ok((0, 0))
         };
     }
-    let copied = output.len().min(queue.length);
+    let mut copied = output.len().min(queue.length);
+    let head_sequence = queue.sequence;
+    let mut deliver_rights = false;
+    if let Some(first) = connection.outgoing_rights[incoming].record(0) {
+        let initial_end = head_sequence
+            .checked_add(copied as u64)
+            .ok_or(SocketError::Capacity)?;
+        if first.sequence < head_sequence
+            || first.sequence >= queue.tail_sequence().ok_or(SocketError::Capacity)?
+        {
+            return Err(SocketError::BadFileDescriptor);
+        }
+        deliver_rights = first.sequence < initial_end && flags & MSG_PEEK == 0;
+        if deliver_rights {
+            if usize::from(first.count) > rights_output.len() {
+                return Err(SocketError::Capacity);
+            }
+            if let Some(second) = connection.outgoing_rights[incoming].record(1)
+                && second.sequence < initial_end
+            {
+                copied = usize::try_from(second.sequence - head_sequence)
+                    .map_err(|_| SocketError::Capacity)?;
+            }
+        }
+    }
     if flags & MSG_PEEK != 0 {
         for (offset, destination) in output[..copied].iter_mut().enumerate() {
             *destination = queue.bytes[(queue.head + offset) % SOCKET_BUFFER_BYTES];
         }
-        return Ok(copied);
+        return Ok((copied, 0));
     }
     for destination in &mut output[..copied] {
         *destination = queue.bytes[queue.head];
         queue.head = (queue.head + 1) % SOCKET_BUFFER_BYTES;
     }
     queue.length -= copied;
+    queue.sequence = queue
+        .sequence
+        .checked_add(copied as u64)
+        .ok_or(SocketError::Capacity)?;
+    let rights_count = if deliver_rights {
+        connection.outgoing_rights[incoming].pop(rights_output)
+    } else {
+        0
+    };
     advance_generation(&mut connection.readiness_generation);
-    Ok(copied)
+    Ok((copied, rights_count))
 }
 
 pub fn write(owner: ProcessHandle, handle: u32, input: &[u8]) -> Result<usize, SocketError> {
@@ -647,6 +853,16 @@ pub fn send(
     handle: u32,
     input: &[u8],
     flags: u32,
+) -> Result<usize, SocketError> {
+    send_message(owner, handle, input, flags, &mut [])
+}
+
+pub(crate) fn send_message(
+    owner: ProcessHandle,
+    handle: u32,
+    input: &[u8],
+    flags: u32,
+    rights: &mut [crate::linux_fd::TransferToken],
 ) -> Result<usize, SocketError> {
     if flags & !SEND_FLAGS != 0 {
         return Err(SocketError::OperationNotSupported);
@@ -660,14 +876,23 @@ pub fn send(
         return Err(SocketError::BrokenPipe);
     }
     if input.is_empty() {
-        return Ok(0);
+        return if rights.is_empty() {
+            Ok(0)
+        } else {
+            Err(SocketError::InvalidArgument)
+        };
     }
-    let queue = &mut connection.outgoing[side];
+    let queue = &connection.outgoing[side];
     let available = SOCKET_BUFFER_BYTES - queue.length;
     if available == 0 {
         return Err(SocketError::WouldBlock);
     }
     let copied = input.len().min(available);
+    let rights_sequence = queue.tail_sequence().ok_or(SocketError::Capacity)?;
+    if !rights.is_empty() {
+        connection.outgoing_rights[side].push(rights_sequence, rights)?;
+    }
+    let queue = &mut connection.outgoing[side];
     for byte in &input[..copied] {
         let tail = (queue.head + queue.length) % SOCKET_BUFFER_BYTES;
         queue.bytes[tail] = *byte;
@@ -681,18 +906,27 @@ pub fn shutdown(owner: ProcessHandle, handle: u32, how: u32) -> Result<(), Socke
     if how > SHUT_RDWR {
         return Err(SocketError::InvalidArgument);
     }
-    let mut registry = REGISTRY.lock();
-    let (_, endpoint) = resolved_endpoint(&registry, owner, handle)?;
-    let (connection_index, side) = resolved_connection(&registry, endpoint, handle)?;
-    let connection = &mut registry.connections[connection_index];
-    if matches!(how, SHUT_RD | SHUT_RDWR) {
-        connection.read_open[side] = false;
-        connection.outgoing[1 - side].clear();
-    }
-    if matches!(how, SHUT_WR | SHUT_RDWR) {
-        connection.write_open[side] = false;
-    }
-    advance_generation(&mut connection.readiness_generation);
+    let mut discarded = [crate::linux_fd::TransferToken::EMPTY;
+        MAXIMUM_RIGHTS_RECORDS * crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS];
+    let discarded_count = {
+        let mut registry = REGISTRY.lock();
+        let (_, endpoint) = resolved_endpoint(&registry, owner, handle)?;
+        let (connection_index, side) = resolved_connection(&registry, endpoint, handle)?;
+        let connection = &mut registry.connections[connection_index];
+        let mut discarded_count = 0;
+        if matches!(how, SHUT_RD | SHUT_RDWR) {
+            let incoming = 1 - side;
+            connection.read_open[side] = false;
+            connection.outgoing[incoming].clear();
+            discarded_count = connection.outgoing_rights[incoming].drain(&mut discarded);
+        }
+        if matches!(how, SHUT_WR | SHUT_RDWR) {
+            connection.write_open[side] = false;
+        }
+        advance_generation(&mut connection.readiness_generation);
+        discarded_count
+    };
+    crate::linux_fd::release_transfers(&mut discarded[..discarded_count]);
     Ok(())
 }
 
@@ -773,8 +1007,13 @@ pub fn is_listener(owner: ProcessHandle, handle: u32) -> Result<bool, SocketErro
     Ok(endpoint.state == EndpointState::Listening)
 }
 
-fn close_connected_endpoint(registry: &mut SocketRegistry, index: usize) {
+fn close_connected_endpoint(
+    registry: &mut SocketRegistry,
+    index: usize,
+    discarded: &mut [crate::linux_fd::TransferToken],
+) -> usize {
     let endpoint = registry.endpoints[index];
+    let mut discarded_count = 0;
     if endpoint.state == EndpointState::Connected {
         let connection_index = usize::from(endpoint.connection_index);
         let side = usize::from(endpoint.side);
@@ -792,42 +1031,58 @@ fn close_connected_endpoint(registry: &mut SocketRegistry, index: usize) {
             connection.endpoint_open[side] = false;
             connection.read_open[side] = false;
             connection.write_open[side] = false;
-            connection.outgoing[1 - side].clear();
+            let incoming = 1 - side;
+            connection.outgoing[incoming].clear();
+            discarded_count += connection.outgoing_rights[incoming].drain(discarded);
             advance_generation(&mut connection.readiness_generation);
             if !connection.endpoint_open[0] && !connection.endpoint_open[1] {
-                retire_connection(connection);
+                discarded_count += retire_connection(connection, &mut discarded[discarded_count..]);
             }
         }
     }
     retire_endpoint(&mut registry.endpoints[index]);
+    discarded_count
 }
 
 pub fn close(owner: ProcessHandle, handle: u32) -> Result<(), SocketError> {
-    let mut registry = REGISTRY.lock();
-    let (index, endpoint) = resolved_endpoint(&registry, owner, handle)?;
-    if endpoint.state == EndpointState::Listening {
-        let mut pending = [0_u32; MAXIMUM_LISTEN_BACKLOG];
-        let pending_count = usize::from(endpoint.pending_length);
-        for (offset, destination) in pending[..pending_count].iter_mut().enumerate() {
-            *destination = endpoint.pending
-                [(usize::from(endpoint.pending_head) + offset) % MAXIMUM_LISTEN_BACKLOG];
-        }
-        retire_endpoint(&mut registry.endpoints[index]);
-        for pending_handle in pending[..pending_count].iter().copied() {
-            if let Some((pending_index, generation)) = decode_endpoint(pending_handle) {
-                let queued = registry.endpoints[pending_index];
-                if queued.occupied
-                    && queued.generation == generation
-                    && queued.owner == owner
-                    && queued.state == EndpointState::Connected
-                {
-                    close_connected_endpoint(&mut registry, pending_index);
+    const MAXIMUM_CLOSE_DISCARDS: usize = MAXIMUM_LISTEN_BACKLOG
+        * MAXIMUM_RIGHTS_RECORDS
+        * crate::linux_fd::MAXIMUM_TRANSFER_DESCRIPTORS;
+    let mut discarded = [crate::linux_fd::TransferToken::EMPTY; MAXIMUM_CLOSE_DISCARDS];
+    let discarded_count = {
+        let mut registry = REGISTRY.lock();
+        let (index, endpoint) = resolved_endpoint(&registry, owner, handle)?;
+        let mut discarded_count = 0;
+        if endpoint.state == EndpointState::Listening {
+            let mut pending = [0_u32; MAXIMUM_LISTEN_BACKLOG];
+            let pending_count = usize::from(endpoint.pending_length);
+            for (offset, destination) in pending[..pending_count].iter_mut().enumerate() {
+                *destination = endpoint.pending
+                    [(usize::from(endpoint.pending_head) + offset) % MAXIMUM_LISTEN_BACKLOG];
+            }
+            retire_endpoint(&mut registry.endpoints[index]);
+            for pending_handle in pending[..pending_count].iter().copied() {
+                if let Some((pending_index, generation)) = decode_endpoint(pending_handle) {
+                    let queued = registry.endpoints[pending_index];
+                    if queued.occupied
+                        && queued.generation == generation
+                        && queued.owner == owner
+                        && queued.state == EndpointState::Connected
+                    {
+                        discarded_count += close_connected_endpoint(
+                            &mut registry,
+                            pending_index,
+                            &mut discarded[discarded_count..],
+                        );
+                    }
                 }
             }
+        } else {
+            discarded_count = close_connected_endpoint(&mut registry, index, &mut discarded);
         }
-    } else {
-        close_connected_endpoint(&mut registry, index);
-    }
+        discarded_count
+    };
+    crate::linux_fd::release_transfers(&mut discarded[..discarded_count]);
     Ok(())
 }
 
