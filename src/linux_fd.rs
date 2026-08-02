@@ -2016,7 +2016,11 @@ fn map_epoll_error(error: crate::linux_epoll::EpollError) -> DescriptorError {
 pub fn fionread(owner: ProcessHandle, fd: u32) -> Result<usize, DescriptorError> {
     let lease = acquire_descriptor(owner, fd)?;
     let ready = readiness_for_lease(lease, monotonic_now_ns(), false).map(|value| value.0)?;
-    Ok(if ready & crate::linux_eventfd::READY_IN != 0 { 1 } else { 0 })
+    Ok(if ready & crate::linux_eventfd::READY_IN != 0 {
+        1
+    } else {
+        0
+    })
 }
 
 /// Enable or disable `O_NONBLOCK` on the file description backing `fd`.

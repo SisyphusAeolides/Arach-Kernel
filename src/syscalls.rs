@@ -1460,8 +1460,12 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Wait4) => linux_wait4(arguments),
         Some(crate::process::abi::LinuxSyscall::Ioctl) => linux_ioctl(arguments),
         Some(crate::process::abi::LinuxSyscall::InotifyInit1) => linux_inotify_init1(arguments),
-        Some(crate::process::abi::LinuxSyscall::InotifyAddWatch) => linux_inotify_add_watch(arguments),
-        Some(crate::process::abi::LinuxSyscall::InotifyRmWatch) => linux_inotify_rm_watch(arguments),
+        Some(crate::process::abi::LinuxSyscall::InotifyAddWatch) => {
+            linux_inotify_add_watch(arguments)
+        }
+        Some(crate::process::abi::LinuxSyscall::InotifyRmWatch) => {
+            linux_inotify_rm_watch(arguments)
+        }
         Some(crate::process::abi::LinuxSyscall::Ppoll) => linux_ppoll(arguments),
         Some(crate::process::abi::LinuxSyscall::Unshare) => linux_unshare(arguments),
         Some(crate::process::abi::LinuxSyscall::Rseq) => linux_rseq(arguments),
@@ -3585,7 +3589,10 @@ fn linux_nanosleep(arguments: [u64; 6]) -> isize {
     }
     // Write zero remainder if the caller supplied a `rem` pointer.
     if arguments[1] != 0 {
-        let zero = LinuxTimespec { tv_sec: 0, tv_nsec: 0 };
+        let zero = LinuxTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         if copy_value_to_user(arguments[1], &zero).is_err() {
             return ERROR_BAD_ADDRESS;
         }
@@ -3620,7 +3627,9 @@ fn linux_clock_nanosleep(arguments: [u64; 6]) -> isize {
     let now = crate::interrupts::monotonic_nanoseconds();
     let deadline = if flags & TIMER_ABSTIME != 0 {
         // Absolute target; if already in the past, return immediately.
-        if req_ns <= now { return 0; }
+        if req_ns <= now {
+            return 0;
+        }
         req_ns
     } else {
         now.saturating_add(req_ns)
@@ -3631,7 +3640,10 @@ fn linux_clock_nanosleep(arguments: [u64; 6]) -> isize {
     // `rem` is not written for absolute sleeps (POSIX); for relative sleeps
     // the full interval always elapses so remainder is zero.
     if flags & TIMER_ABSTIME == 0 && arguments[3] != 0 {
-        let zero = LinuxTimespec { tv_sec: 0, tv_nsec: 0 };
+        let zero = LinuxTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         if copy_value_to_user(arguments[3], &zero).is_err() {
             return ERROR_BAD_ADDRESS;
         }
@@ -3667,8 +3679,8 @@ fn linux_getrandom(arguments: [u64; 6]) -> isize {
     static ENTROPY_COUNTER: AtomicU64 = AtomicU64::new(0x517cc1b727220a95);
     let mut staging = AKASHIC_IO_STAGING.lock();
     let output = &mut staging[..count];
-    let mut state = ENTROPY_COUNTER.load(Ordering::Acquire)
-        ^ crate::interrupts::monotonic_nanoseconds();
+    let mut state =
+        ENTROPY_COUNTER.load(Ordering::Acquire) ^ crate::interrupts::monotonic_nanoseconds();
     for chunk in output.chunks_mut(8) {
         state ^= state << 13;
         state ^= state >> 7;
@@ -3864,11 +3876,7 @@ fn linux_ioctl(arguments: [u64; 6]) -> isize {
         }
         FIOCLEX => {
             // Set FD_CLOEXEC on the descriptor.
-            match crate::linux_fd::set_descriptor_flags(
-                owner,
-                fd,
-                crate::linux_fd::FD_CLOEXEC,
-            ) {
+            match crate::linux_fd::set_descriptor_flags(owner, fd, crate::linux_fd::FD_CLOEXEC) {
                 Ok(()) => 0,
                 Err(error) => map_linux_descriptor_error(error),
             }
