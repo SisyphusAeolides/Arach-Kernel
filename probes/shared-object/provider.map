@@ -3,4 +3,5 @@ ARACH_PROVIDER_1.0 {
         arach_provider_value;
         arach_provider_finalize_step;
         arach_provider_data;
+        arach_provider_vector;
 };

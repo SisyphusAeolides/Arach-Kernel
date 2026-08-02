@@ -145,17 +145,19 @@ middle providers, and one coalesced core; it applies the core's real
 first-definition weak-function edge, and one unresolved weak-function-to-zero
 edge. Three eager `R_X86_64_GLOB_DAT` writes bind one exact-version data
 object, select an earlier weak data definition over a later strong definition,
-and write one unresolved unversioned weak data slot as zero, then seal all four
-objects
-R/RW/RX, executes four provider-first initializers, and calls through both
+and write one unresolved unversioned weak data slot as zero. Four bounded
+`R_X86_64_64` writes bind a versioned function pointer, a versioned object
+pointer at a checked eight-byte interior addend, an earlier weak object, and an
+unresolved weak slot as zero. The linker then seals all four objects R/RW/RX,
+executes four provider-first initializers, and calls through both
 branches into code that consumes relocated pointer and TLS state. The main
 image later invokes the one-shot x86-64 finalizer callback, which executes four
 `DT_FINI_ARRAY` and four `DT_FINI` functions in reverse dependency order. The
 admitted slice remains single-threaded at exec and each Akashic file is bounded
 to 64 KiB. Late dynamic TLS allocation, `DT_RPATH`, `$ORIGIN`, environment or
-cache search, weak TLS, broader data relocations, or lazy binding, general file
-mapping semantics, ASLR, and
-production entropy remain fail-closed.
+cache search, weak TLS, GNU-unique or IFUNC binding, packed relative
+relocation, lazy binding, general file mapping semantics, ASLR, and production
+entropy remain fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,
 filesystem context, descriptor ownership, signal-handler identity, and SysV

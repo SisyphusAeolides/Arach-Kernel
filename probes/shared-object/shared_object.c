@@ -9,11 +9,20 @@ uint64_t arach_scope_choice(uint64_t input) __attribute__((weak));
 uint64_t arach_optional_hook(uint64_t input) __attribute__((weak));
 extern const uint64_t arach_data_choice __attribute__((weak));
 extern const uint64_t arach_provider_data;
+extern const uint64_t arach_provider_vector[3];
 extern const uint64_t arach_optional_data __attribute__((weak));
 
 uint64_t arach_shared_probe(uint64_t input);
 void arach_root_finish(void);
 static uint64_t root_stage;
+static uint64_t (*volatile absolute_provider_function)(uint64_t)
+    __attribute__((used)) = arach_provider_value;
+static const uint64_t *volatile absolute_provider_vector
+    __attribute__((used)) = &arach_provider_vector[1];
+static const uint64_t *volatile absolute_weak_data
+    __attribute__((used)) = &arach_data_choice;
+static const uint64_t *volatile absolute_optional_data
+    __attribute__((used)) = &arach_optional_data;
 
 static __attribute__((used, noinline)) uint64_t
 arach_optional_weak_probe(uint64_t input) {
@@ -25,6 +34,13 @@ arach_optional_data_probe(void) {
     return &arach_optional_data == NULL
                ? UINT64_C(0x2468ace013579bdf)
                : arach_optional_data;
+}
+
+static __attribute__((used, noinline)) uint64_t
+arach_absolute_optional_data_probe(void) {
+    return absolute_optional_data == NULL
+               ? UINT64_C(0x3141592653589793)
+               : *absolute_optional_data;
 }
 
 static void __attribute__((constructor)) arach_root_initialize(void) {
@@ -43,9 +59,11 @@ static void __attribute__((constructor)) arach_root_initialize(void) {
 
 __attribute__((visibility("default"))) uint64_t
 arach_shared_probe(uint64_t input) {
-    return arach_provider_value(input) ^ arach_observer_value(input) ^
-           arach_scope_choice(input) ^ arach_data_choice ^
-           arach_provider_data ^ arach_optional_data_probe() ^
+    return absolute_provider_function(input) ^ arach_observer_value(input) ^
+           arach_scope_choice(input) ^
+           (arach_data_choice + *absolute_weak_data) ^ arach_provider_data ^
+           *absolute_provider_vector ^ arach_optional_data_probe() ^
+           arach_absolute_optional_data_probe() ^
            UINT64_C(0xa5a55a5af0f00f0f) ^ root_stage;
 }
 

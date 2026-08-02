@@ -39,6 +39,8 @@ data Gate : Set where
   firstDefinitionWeakBinding unresolvedWeakZero : Gate
   globalDataRelocation firstDefinitionWeakDataBinding : Gate
   unresolvedWeakDataZero : Gate
+  absoluteSymbolRelocation boundedAbsoluteSymbolAddend : Gate
+  firstDefinitionWeakAbsoluteBinding unresolvedWeakAbsoluteZero : Gate
   directoryCreation canonicalRunpath runpathDependencySearch : Gate
   staticTlsLayout tlsRelocation dynamicTlsVector tlsResolver : Gate
   generalDynamicTlsAccess initializerOrder : Gate
@@ -227,6 +229,13 @@ record RuntimeInitializationCertificate : Set where
     firstDefinitionWeakDataBindingEvidence :
       Measurement firstDefinitionWeakDataBinding
     unresolvedWeakDataZeroEvidence : Measurement unresolvedWeakDataZero
+    absoluteSymbolRelocationEvidence : Measurement absoluteSymbolRelocation
+    boundedAbsoluteSymbolAddendEvidence :
+      Measurement boundedAbsoluteSymbolAddend
+    firstDefinitionWeakAbsoluteBindingEvidence :
+      Measurement firstDefinitionWeakAbsoluteBinding
+    unresolvedWeakAbsoluteZeroEvidence :
+      Measurement unresolvedWeakAbsoluteZero
     staticTlsLayoutEvidence : Measurement staticTlsLayout
     tlsRelocationEvidence : Measurement tlsRelocation
     dynamicTlsVectorEvidence : Measurement dynamicTlsVector
@@ -357,8 +366,8 @@ multiObjectGraphRequiresDependencyGraph certificate =
 
 -- Runtime initialization structurally retains bounded closure, provider-first
 -- relocation, and deterministic process-global symbol scope before adding
--- directory, runpath, weak-function/data, eager global-data relocation, TLS,
--- resolver, and initializer evidence.
+-- directory, runpath, weak-function/data, eager global-data and checked
+-- absolute-symbol relocation, TLS, resolver, and initializer evidence.
 runtimeInitializationRequiresMultiObjectGraph :
   RuntimeInitializationCertificate -> MultiObjectGraphCertificate
 runtimeInitializationRequiresMultiObjectGraph certificate =

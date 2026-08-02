@@ -213,6 +213,7 @@ The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C2_SHARED_RELOCATION_PASS`,
 `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_WEAK_BINDING_PASS`,
 `ARACH_C2_GLOBAL_DATA_PASS`,
+`ARACH_C2_ABSOLUTE_SYMBOL_PASS`,
 `ARACH_C2_SYMBOL_VERSION_PASS`,
 `ARACH_C2_STATIC_TLS_PASS`, `ARACH_C2_DYNAMIC_TLS_PASS`,
 `ARACH_C2_INITIALIZER_ORDER_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,
@@ -291,6 +292,21 @@ weak data reference with no definition is written as zero; unresolved globals
 and explicitly versioned weak data references fail closed. Slots are aligned,
 final-writable, and read back after every write.
 
+Bounded `R_X86_64_64` entries in `.rela.dyn` admit defined or undefined
+default-visible global and weak `STT_FUNC` or `STT_OBJECT` symbols. An
+undefined weak `STT_NOTYPE` reference is also admitted at a zero addend.
+Resolution uses the same exact version/provider constraints, `DT_SYMBOLIC`
+requester preference, and breadth-first first-definition scope as the PLT and
+global-data paths. Functions require a zero addend and a nonempty executable
+definition. Objects require a nonempty readable definition, a nonnegative
+addend strictly inside that definition, and any nonzero imported size must fit
+the selected provider. The linker computes `S + A` with checked arithmetic,
+writes only aligned final-writable words, and reads every word back. An
+unversioned unresolved weak reference with a zero addend becomes zero;
+unresolved globals, explicitly versioned weak references, TLS symbols,
+negative or out-of-object addends, and function-interior addresses fail
+closed.
+
 Versioned objects may provide one `DT_VERSYM` table, at most 16 linked
 `DT_VERDEF` records, at most 16 linked `DT_VERNEED` records, and at most 32
 requirement auxiliaries. The version-symbol table has exactly one entry per
@@ -330,9 +346,8 @@ that callback once; objects run in reverse dependency order, each finalization
 array runs in reverse index order, and `DT_FINI` follows its array.
 Preinitializers, lazy binding, `DT_REL`, `DT_RELR`, text relocations,
 `DT_RPATH`, `$ORIGIN`, environment/cache/hwcaps search, weak TLS symbols,
-unresolved versioned weak functions or data, `R_X86_64_COPY`, general absolute
-data relocations, version inheritance, and unknown dynamic tags remain
-rejected.
+unresolved versioned weak symbols, `R_X86_64_COPY`, GNU-unique and IFUNC
+binding, version inheritance, and unknown dynamic tags remain rejected.
 
 The measured fixture is the four-object diamond `libarach-probe.so` to
 `libarach-provider.so` and `libarach-observer.so`, with both middle objects
@@ -349,9 +364,14 @@ as zero without being called. The root also contributes three `GLOB_DAT`
 edges: one exact-version provider object, one unversioned weak object that
 selects the provider's earlier weak definition over the observer's later
 strong definition, and one unresolved unversioned weak data slot written as
-zero. Exact evidence therefore requires nine relative, three TLS, thirteen
-external, three global-data, one resolved and one unresolved weak function,
-one resolved and one unresolved weak data edge, and eleven versioned writes.
+zero. Four root `R_X86_64_64` entries then bind one exact-version function
+pointer, one exact-version provider-vector pointer with an eight-byte interior
+addend, one weak object pointer through the earlier provider, and one
+unresolved weak `STT_NOTYPE` pointer as zero. Exact evidence therefore requires
+nine relative, three TLS, seventeen external, three global-data, four
+absolute-symbol, one bounded nonzero-addend, one resolved and one unresolved
+weak function, one resolved and one unresolved weak data, one resolved and one
+unresolved weak absolute edge, and thirteen versioned writes.
 
 After relocation, the linker changes every complete VMA to its declared R,
 RW, or RX permission and executes core, provider, observer, and root
@@ -359,7 +379,8 @@ initializers in that order. It then closes all four descriptors, removes all
 four temporary mappings, resolves `arach_shared_probe` through the root's SysV
 table, and calls it. Execution measures the provider's first-scope weak result,
 crosses the callable root and middle-object PLT edges, consumes the provider's
-first-scope weak data and exact-version global data, and observes both optional
+first-scope weak data, exact-version global data, relocated function pointer,
+and checked provider-vector interior pointer. It observes all three optional
 weak slots at zero before the core dereferences its relative-relocated pointer
 and FS-relative TLS word. Each dependent initializer
 records success only after observing its providers' state. After transfer to
@@ -379,13 +400,16 @@ provider-first order, and deterministic global symbol scope.
 canonical bounded runpaths, direct-dependency search, first-definition weak
 function binding, unresolved weak-function-to-zero behavior, bounded global
 data relocation, first-definition weak-data binding, unresolved weak-data-zero
-behavior, the finite startup TLS layout and DTV, checked TLS
-relocation/resolution, and initializer order while retaining the complete graph
+behavior, bounded absolute-symbol relocation, interior-object addend bounds,
+first-definition weak absolute binding, unresolved weak-absolute-zero
+behavior, the finite startup TLS layout and DTV, checked TLS relocation and
+resolution, and initializer order while retaining the complete graph
 certificate. `RuntimeFinalizationCertificate` then requires bounded GNU
 version tables, exact version-and-provider resolution, the process-entry
 finalizer handoff, and reverse finalizer execution. This is not yet a general
 system linker: late dynamic TLS allocation, general search policy, weak TLS
-binding, broader data relocation forms, lazy binding, ASLR, general VMA
+binding, GNU-unique and IFUNC binding, packed relative relocation, lazy
+binding, ASLR, general VMA
 splitting, demand paging, and cryptographically qualified process entropy
 remain separate acceptance gates.
 

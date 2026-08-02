@@ -89,6 +89,7 @@ enum {
     DYNAMIC_FLAG_BIND_NOW = 8,
     DYNAMIC_FLAG_STATIC_TLS = 16,
     DYNAMIC_FLAG_1_NOW = 1,
+    RELOCATION_X86_64_64 = 1,
     RELOCATION_X86_64_GLOB_DAT = 6,
     RELOCATION_X86_64_JUMP_SLOT = 7,
     RELOCATION_X86_64_RELATIVE = 8,
@@ -160,6 +161,8 @@ static const char symbol_scope_marker[] =
     "ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS\n";
 static const char weak_binding_marker[] = "ARACH_C2_WEAK_BINDING_PASS\n";
 static const char global_data_marker[] = "ARACH_C2_GLOBAL_DATA_PASS\n";
+static const char absolute_symbol_marker[] =
+    "ARACH_C2_ABSOLUTE_SYMBOL_PASS\n";
 static const char version_marker[] = "ARACH_C2_SYMBOL_VERSION_PASS\n";
 static const char static_tls_marker[] = "ARACH_C2_STATIC_TLS_PASS\n";
 static const char dynamic_tls_marker[] = "ARACH_C2_DYNAMIC_TLS_PASS\n";
@@ -189,6 +192,8 @@ static const char shared_weak_binding_failure[] =
     "ARACH_C2_LINKER_WEAK_BINDING_FAIL\n";
 static const char shared_global_data_failure[] =
     "ARACH_C2_LINKER_GLOBAL_DATA_FAIL\n";
+static const char shared_absolute_symbol_failure[] =
+    "ARACH_C2_LINKER_ABSOLUTE_SYMBOL_FAIL\n";
 static const char shared_tls_failure[] = "ARACH_C2_LINKER_STATIC_TLS_FAIL\n";
 static const char shared_dynamic_tls_failure[] =
     "ARACH_C2_LINKER_DYNAMIC_TLS_FAIL\n";
@@ -395,12 +400,18 @@ typedef struct {
     size_t relative;
     size_t external;
     size_t data;
+    size_t absolute;
+    size_t absolute_functions;
+    size_t absolute_data;
+    size_t absolute_addends;
     size_t tls;
     size_t versioned;
     size_t weak_definitions;
     size_t unresolved_weak;
     size_t weak_data_definitions;
     size_t unresolved_weak_data;
+    size_t weak_absolute_definitions;
+    size_t unresolved_weak_absolute;
 } RelocationEvidence;
 
 typedef struct {
@@ -413,6 +424,13 @@ typedef struct {
     size_t size;
     uint8_t binding;
 } DataSymbolResolution;
+
+typedef struct {
+    uintptr_t address;
+    size_t size;
+    uint8_t binding;
+    uint8_t type;
+} AbsoluteSymbolResolution;
 
 typedef struct {
     uintptr_t address;
@@ -2274,6 +2292,40 @@ static int symbol_version_requirement(
     return 1;
 }
 
+static int absolute_symbol_version_requirement(
+    const LoadedObject *object, uint32_t symbol_index,
+    SymbolVersionRequirement *requirement) {
+    zero_bytes((uint8_t *)requirement, sizeof(*requirement));
+    uint32_t symbol_count = 0;
+    if (!dynamic_symbol_count(object, &symbol_count) || symbol_index == 0 ||
+        symbol_index >= symbol_count) {
+        return 0;
+    }
+    const Elf64Symbol *symbols =
+        (const Elf64Symbol *)object->dynamic.symbol_table;
+    if (symbols[symbol_index].section_index == SYMBOL_UNDEFINED) {
+        return symbol_version_requirement(object, symbol_index,
+                                          requirement);
+    }
+    if (!object->dynamic.has_version_symbols) {
+        return 1;
+    }
+    const uint16_t *versions =
+        (const uint16_t *)object->dynamic.version_symbols;
+    uint16_t raw = versions[symbol_index];
+    uint16_t version_index = raw & VERSION_INDEX_MASK;
+    if (version_index == VERSION_INDEX_GLOBAL) {
+        return (raw & VERSION_INDEX_HIDDEN) == 0;
+    }
+    if (version_index == VERSION_INDEX_LOCAL ||
+        !find_version_definition(object, version_index, &requirement->name,
+                                 &requirement->name_length)) {
+        return 0;
+    }
+    requirement->explicit_version = 1;
+    return 1;
+}
+
 static int defined_symbol_matches_version(
     const LoadedObject *object, uint32_t symbol_index,
     const SymbolVersionRequirement *requirement) {
@@ -2369,16 +2421,101 @@ static int resolve_global_data_symbol_versioned(
         return 1;
     }
     for (size_t index = 0; index < graph->object_count; ++index) {
-        if (index != requester_index &&
+        if ((!requester->dynamic.has_symbolic || index != requester_index) &&
             find_exported_data_symbol_versioned(
                 &graph->objects[index], name, name_length,
                 version_requirement, resolution)) {
             return 1;
         }
     }
-    if (!requester->dynamic.has_symbolic) {
-        return find_exported_data_symbol_versioned(
-            requester, name, name_length, version_requirement, resolution);
+    return 0;
+}
+
+static int absolute_symbol_type_matches(uint8_t reference_type,
+                                        uint8_t definition_type) {
+    if (reference_type == SYMBOL_NO_TYPE) {
+        return definition_type == SYMBOL_FUNCTION ||
+               definition_type == SYMBOL_OBJECT;
+    }
+    return reference_type == definition_type;
+}
+
+static int find_exported_absolute_symbol_versioned(
+    const LoadedObject *object, const char *expected_name,
+    size_t expected_name_length, uint8_t reference_type,
+    const SymbolVersionRequirement *version_requirement,
+    AbsoluteSymbolResolution *resolution) {
+    uint32_t symbol_count = 0;
+    if (!dynamic_symbol_count(object, &symbol_count)) {
+        return 0;
+    }
+    const Elf64Symbol *symbols =
+        (const Elf64Symbol *)object->dynamic.symbol_table;
+    for (uint32_t index = 1; index < symbol_count; ++index) {
+        const Elf64Symbol *symbol = &symbols[index];
+        uint8_t definition_type = symbol->information & 0x0f;
+        uint8_t binding = symbol->information >> 4;
+        if (symbol->section_index == SYMBOL_UNDEFINED ||
+            symbol->section_index == SYMBOL_ABSOLUTE ||
+            !absolute_symbol_type_matches(reference_type, definition_type) ||
+            (binding != SYMBOL_BIND_GLOBAL &&
+             binding != SYMBOL_BIND_WEAK) ||
+            symbol->other != SYMBOL_VISIBILITY_DEFAULT ||
+            symbol->size == 0 || symbol->size > SIZE_MAX ||
+            (definition_type == SYMBOL_OBJECT &&
+             symbol->size > MAXIMUM_SHARED_FILE_BYTES) ||
+            !defined_symbol_matches_version(object, index,
+                                            version_requirement)) {
+            continue;
+        }
+        const char *name = NULL;
+        size_t name_length = 0;
+        uintptr_t address = 0;
+        uint32_t required_flags = definition_type == SYMBOL_FUNCTION
+                                      ? PROGRAM_EXECUTABLE
+                                      : PROGRAM_READABLE;
+        if (dynamic_symbol_name(object, symbol, &name, &name_length) &&
+            name_length == expected_name_length &&
+            bytes_equal(name, expected_name, name_length) &&
+            checked_add(object->base, symbol->value, &address) &&
+            mapped_range_contains(object->loads, object->load_count, address,
+                                  (size_t)symbol->size, required_flags)) {
+            resolution->address = address;
+            resolution->size = (size_t)symbol->size;
+            resolution->binding = binding;
+            resolution->type = definition_type;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int resolve_global_absolute_symbol_versioned(
+    const ObjectGraph *graph, size_t requester_index, const char *name,
+    size_t name_length, uint8_t reference_type,
+    const SymbolVersionRequirement *version_requirement,
+    AbsoluteSymbolResolution *resolution) {
+    if (requester_index >= graph->object_count || name_length == 0 ||
+        name_length > MAXIMUM_SYMBOL_NAME_BYTES ||
+        (reference_type != SYMBOL_NO_TYPE &&
+         reference_type != SYMBOL_FUNCTION &&
+         reference_type != SYMBOL_OBJECT)) {
+        return 0;
+    }
+    const LoadedObject *requester = &graph->objects[requester_index];
+    if (requester->dynamic.has_symbolic &&
+        find_exported_absolute_symbol_versioned(
+            requester, name, name_length, reference_type,
+            version_requirement, resolution)) {
+        return 1;
+    }
+    for (size_t index = 0; index < graph->object_count; ++index) {
+        if ((!requester->dynamic.has_symbolic || index != requester_index) &&
+            find_exported_absolute_symbol_versioned(
+                &graph->objects[index], name, name_length, reference_type,
+                version_requirement, resolution)) {
+            return 1;
+        }
     }
     return 0;
 }
@@ -2555,6 +2692,98 @@ static int apply_object_relocations(ObjectGraph *graph, size_t object_index,
         if (object->dynamic.has_relative_count &&
             index < object->dynamic.relative_count) {
             return 0;
+        }
+        if (relocation_type == RELOCATION_X86_64_64) {
+            if (symbol_index == 0 || symbol_index >= symbol_count) {
+                return 0;
+            }
+            const Elf64Symbol *symbol = &symbols[symbol_index];
+            const char *name = NULL;
+            size_t name_length = 0;
+            uint8_t symbol_type = symbol->information & 0x0f;
+            uint8_t symbol_binding = symbol->information >> 4;
+            int undefined =
+                symbol->section_index == SYMBOL_UNDEFINED;
+            int weak_no_type =
+                undefined && symbol_type == SYMBOL_NO_TYPE &&
+                symbol_binding == SYMBOL_BIND_WEAK && symbol->size == 0;
+            SymbolVersionRequirement version_requirement;
+            AbsoluteSymbolResolution resolution;
+            zero_bytes((uint8_t *)&version_requirement,
+                       sizeof(version_requirement));
+            zero_bytes((uint8_t *)&resolution, sizeof(resolution));
+            if ((symbol_type != SYMBOL_FUNCTION &&
+                 symbol_type != SYMBOL_OBJECT && !weak_no_type) ||
+                (symbol_binding != SYMBOL_BIND_GLOBAL &&
+                 symbol_binding != SYMBOL_BIND_WEAK) ||
+                symbol->other != SYMBOL_VISIBILITY_DEFAULT ||
+                symbol->section_index == SYMBOL_ABSOLUTE ||
+                (undefined &&
+                 (symbol->value != 0 ||
+                  (symbol_type == SYMBOL_FUNCTION && symbol->size != 0) ||
+                  (symbol_type == SYMBOL_OBJECT &&
+                   symbol->size > MAXIMUM_SHARED_FILE_BYTES))) ||
+                (!undefined && symbol_type == SYMBOL_NO_TYPE) ||
+                (symbol_type != SYMBOL_OBJECT &&
+                 relocations[index].addend != 0) ||
+                !dynamic_symbol_name(object, symbol, &name, &name_length) ||
+                !absolute_symbol_version_requirement(
+                    object, symbol_index, &version_requirement)) {
+                return 0;
+            }
+            uintptr_t value = 0;
+            if (!resolve_global_absolute_symbol_versioned(
+                    graph, object_index, name, name_length, symbol_type,
+                    &version_requirement, &resolution)) {
+                if (symbol_binding != SYMBOL_BIND_WEAK ||
+                    relocations[index].addend != 0 ||
+                    version_requirement.explicit_version ||
+                    version_requirement.has_provider) {
+                    return 0;
+                }
+                ++evidence->unresolved_weak_absolute;
+            } else {
+                if (symbol_type == SYMBOL_OBJECT && symbol->size != 0 &&
+                    resolution.type != SYMBOL_OBJECT) {
+                    return 0;
+                }
+                if (symbol_type == SYMBOL_OBJECT && symbol->size != 0 &&
+                    resolution.size < (size_t)symbol->size) {
+                    return 0;
+                }
+                if (resolution.type == SYMBOL_FUNCTION) {
+                    if (relocations[index].addend != 0) {
+                        return 0;
+                    }
+                    value = resolution.address;
+                    ++evidence->absolute_functions;
+                } else {
+                    if (relocations[index].addend < 0 ||
+                        (uint64_t)relocations[index].addend >=
+                            (uint64_t)resolution.size ||
+                        !checked_addend(resolution.address,
+                                        relocations[index].addend, &value)) {
+                        return 0;
+                    }
+                    ++evidence->absolute_data;
+                }
+                if (resolution.binding == SYMBOL_BIND_WEAK) {
+                    ++evidence->weak_absolute_definitions;
+                }
+            }
+            *(volatile uintptr_t *)target = value;
+            if (*(volatile const uintptr_t *)target != value) {
+                return 0;
+            }
+            ++evidence->external;
+            ++evidence->absolute;
+            if (relocations[index].addend != 0) {
+                ++evidence->absolute_addends;
+            }
+            if (version_requirement.explicit_version) {
+                ++evidence->versioned;
+            }
+            continue;
         }
         if (relocation_type == RELOCATION_X86_64_GLOB_DAT) {
             if (symbol_index == 0 || symbol_index >= symbol_count ||
@@ -2861,19 +3090,13 @@ static int resolve_global_tls_symbol(const ObjectGraph *graph,
         return 1;
     }
     for (size_t index = 0; index < graph->object_count; ++index) {
-        if (index != requester_index &&
+        if ((!requester->dynamic.has_symbolic || index != requester_index) &&
             find_exported_tls_symbol(&graph->objects[index], name,
                                      name_length, version,
                                      provider_symbol)) {
             *provider_index = index;
             return 1;
         }
-    }
-    if (!requester->dynamic.has_symbolic &&
-        find_exported_tls_symbol(requester, name, name_length,
-                                 version, provider_symbol)) {
-        *provider_index = requester_index;
-        return 1;
     }
     return 0;
 }
@@ -2894,16 +3117,12 @@ static int resolve_global_symbol_versioned(
         return 1;
     }
     for (size_t index = 0; index < graph->object_count; ++index) {
-        if (index != requester_index &&
+        if ((!requester->dynamic.has_symbolic || index != requester_index) &&
             find_exported_symbol_versioned(
                 &graph->objects[index], name, name_length,
                 version_requirement, resolution)) {
             return 1;
         }
-    }
-    if (!requester->dynamic.has_symbolic) {
-        return find_exported_symbol_versioned(
-            requester, name, name_length, version_requirement, resolution);
     }
     return 0;
 }
@@ -3008,12 +3227,18 @@ static int relocate_graph(ObjectGraph *graph,
     evidence->relative = 0;
     evidence->external = 0;
     evidence->data = 0;
+    evidence->absolute = 0;
+    evidence->absolute_functions = 0;
+    evidence->absolute_data = 0;
+    evidence->absolute_addends = 0;
     evidence->tls = 0;
     evidence->versioned = 0;
     evidence->weak_definitions = 0;
     evidence->unresolved_weak = 0;
     evidence->weak_data_definitions = 0;
     evidence->unresolved_weak_data = 0;
+    evidence->weak_absolute_definitions = 0;
+    evidence->unresolved_weak_absolute = 0;
     for (size_t index = 0; index < graph->relocation_count; ++index) {
         size_t object_index = graph->relocation_order[index];
         if (object_index >= graph->object_count ||
@@ -3643,7 +3868,7 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
     }
     RelocationEvidence evidence;
     if (!relocate_graph(&graph, &tls_layout, &evidence) ||
-        evidence.relative != 9 || evidence.external != 13 ||
+        evidence.relative != 9 || evidence.external != 17 ||
         evidence.tls != 3 ||
         !write_marker(relocation_marker, sizeof(relocation_marker) - 1)) {
         fail_with(shared_relocation_failure,
@@ -3667,7 +3892,16 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
         fail_with(shared_global_data_failure,
                   sizeof(shared_global_data_failure) - 1);
     }
-    if (evidence.versioned != 11 ||
+    if (evidence.absolute != 4 || evidence.absolute_functions != 1 ||
+        evidence.absolute_data != 2 || evidence.absolute_addends != 1 ||
+        evidence.weak_absolute_definitions != 1 ||
+        evidence.unresolved_weak_absolute != 1 ||
+        !write_marker(absolute_symbol_marker,
+                      sizeof(absolute_symbol_marker) - 1)) {
+        fail_with(shared_absolute_symbol_failure,
+                  sizeof(shared_absolute_symbol_failure) - 1);
+    }
+    if (evidence.versioned != 13 ||
         !write_marker(version_marker, sizeof(version_marker) - 1)) {
         fail_with(shared_version_failure,
                   sizeof(shared_version_failure) - 1);
@@ -3715,9 +3949,12 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
         input + UINT64_C(0x13579bdf2468ace0);
     const uint64_t expected =
         provider ^ observer ^ weak_choice ^
-        UINT64_C(0x0c0ffee0ddf00d42) ^
+        (UINT64_C(0x0c0ffee0ddf00d42) +
+         UINT64_C(0x0c0ffee0ddf00d42)) ^
         UINT64_C(0x5a5aa5a596966969) ^
+        UINT64_C(0x89abcdef01234567) ^
         UINT64_C(0x2468ace013579bdf) ^
+        UINT64_C(0x3141592653589793) ^
         UINT64_C(0xa5a55a5af0f00f0f) ^ UINT64_C(0x5555555555555555);
     if (shared_probe(input) != expected) {
         fail_with(shared_call_failure, sizeof(shared_call_failure) - 1);

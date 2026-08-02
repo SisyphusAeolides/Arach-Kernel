@@ -17,6 +17,13 @@ __attribute__((weak, visibility("default"))) const uint64_t
 __attribute__((visibility("default"))) const uint64_t arach_provider_data =
     UINT64_C(0x5a5aa5a596966969);
 
+__attribute__((visibility("default"))) const uint64_t
+    arach_provider_vector[3] = {
+        UINT64_C(0x0123456789abcdef),
+        UINT64_C(0x89abcdef01234567),
+        UINT64_C(0xfedcba9876543210),
+    };
+
 static void __attribute__((constructor)) arach_provider_initialize(void) {
     const uint64_t expected_core =
         UINT64_C(0x1020304050607080) + UINT64_C(0x1111111111111111) +

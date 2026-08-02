@@ -25,6 +25,13 @@ typedef struct {
     uint32_t hash[5];
     Elf64Symbol symbols[2];
     char strings[32];
+    uint64_t storage[3];
+} VectorProviderFixture;
+
+typedef struct {
+    uint32_t hash[5];
+    Elf64Symbol symbols[2];
+    char strings[32];
     Elf64Rela relocations[3];
     uint64_t targets[3];
 } TlsConsumerFixture;
@@ -55,6 +62,17 @@ typedef struct {
     Elf64Rela relocations[2];
     uintptr_t targets[2];
 } DataRelocationFixture;
+
+typedef struct {
+    uint32_t hash[8];
+    Elf64Symbol symbols[5];
+    char strings[160];
+    uint16_t versions[5];
+    VersionRequirementFixture requirements[1];
+    Elf64Rela relocations[4];
+    uintptr_t targets[4];
+    uint64_t own_data;
+} AbsoluteRelocationFixture;
 
 typedef struct {
     uint32_t hash[5];
@@ -105,6 +123,7 @@ static int test_cycle_rejection(void);
 static int test_symbol_scope(void);
 static int test_weak_function_relocations(void);
 static int test_data_relocations(void);
+static int test_absolute_relocations(void);
 static int test_symbol_versions(void);
 static int test_tls_resolver_reference(void);
 static int test_weak_reference_version(void);
@@ -369,14 +388,29 @@ static int test_symbol_scope(void) {
     SymbolVersionRequirement version_requirement;
     zero_bytes((uint8_t *)&version_requirement,
                sizeof(version_requirement));
-    return validate_dynamic_symbols(&graph.objects[0]) &&
-           validate_dynamic_symbols(&graph.objects[1]) &&
-           resolve_global_symbol_versioned(
-               &graph, 2, "shared_definition",
+    if (!validate_dynamic_symbols(&graph.objects[0]) ||
+        !validate_dynamic_symbols(&graph.objects[1]) ||
+        !resolve_global_symbol_versioned(
+            &graph, 2, "shared_definition",
+            sizeof("shared_definition") - 1, &version_requirement,
+            &resolution) ||
+        resolution.address != (uintptr_t)&first_definition ||
+        resolution.binding != SYMBOL_BIND_WEAK ||
+        !resolve_global_symbol_versioned(
+            &graph, 0, "shared_definition",
+            sizeof("shared_definition") - 1, &version_requirement,
+            &resolution) ||
+        resolution.address != (uintptr_t)&first_definition ||
+        resolution.binding != SYMBOL_BIND_WEAK) {
+        return 0;
+    }
+    graph.objects[1].dynamic.has_symbolic = 1;
+    return resolve_global_symbol_versioned(
+               &graph, 1, "shared_definition",
                sizeof("shared_definition") - 1, &version_requirement,
                &resolution) &&
-           resolution.address == (uintptr_t)&first_definition &&
-           resolution.binding == SYMBOL_BIND_WEAK;
+           resolution.address == (uintptr_t)&second_definition &&
+           resolution.binding == SYMBOL_BIND_GLOBAL;
 }
 
 static int test_weak_function_relocations(void) {
@@ -660,6 +694,292 @@ static int test_data_relocations(void) {
            consumer.targets[1] == UINTPTR_MAX;
 }
 
+static int prepare_vector_provider(LoadedObject *object,
+                                   VectorProviderFixture *fixture) {
+    const char symbol_name[] = "vector_data";
+    zero_bytes((uint8_t *)object, sizeof(*object));
+    zero_bytes((uint8_t *)fixture, sizeof(*fixture));
+    if (!copy_fixture_string(fixture->strings, sizeof(fixture->strings), 1,
+                             symbol_name, sizeof(symbol_name))) {
+        return 0;
+    }
+    fixture->hash[0] = 1;
+    fixture->hash[1] = 2;
+    fixture->symbols[1].name = 1;
+    fixture->symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_OBJECT);
+    fixture->symbols[1].other = SYMBOL_VISIBILITY_DEFAULT;
+    fixture->symbols[1].section_index = 1;
+    fixture->symbols[1].value = offsetof(VectorProviderFixture, storage);
+    fixture->symbols[1].size = sizeof(fixture->storage);
+    fixture->storage[0] = UINT64_C(0x1111222233334444);
+    fixture->storage[1] = UINT64_C(0x5555666677778888);
+    fixture->storage[2] = UINT64_C(0x9999aaaabbbbcccc);
+    object->base = (uintptr_t)fixture;
+    object->dynamic.hash = (uintptr_t)&fixture->hash[0];
+    object->dynamic.symbol_table = (uintptr_t)&fixture->symbols[0];
+    object->dynamic.string_table = (uintptr_t)&fixture->strings[0];
+    object->dynamic.string_size = sizeof(fixture->strings);
+    object->loads[0].address = (uintptr_t)fixture;
+    object->loads[0].memory_size = sizeof(*fixture);
+    object->loads[0].mapping_size = sizeof(*fixture);
+    object->loads[0].flags = PROGRAM_READABLE;
+    object->load_count = 1;
+    return 1;
+}
+
+static int test_absolute_relocations(void) {
+    ObjectGraph graph;
+    AbsoluteRelocationFixture consumer;
+    DataProviderFixture weak_provider;
+    DataProviderFixture strong_provider;
+    SymbolFixture function_provider;
+    VectorProviderFixture vector_provider;
+    StaticTlsLayout tls_layout;
+    RelocationEvidence evidence;
+    const char shared_data[] = "shared_data";
+    const char shared_function[] = "shared_definition";
+    const char vector_data[] = "vector_data";
+    const char optional_absolute[] = "optional_absolute";
+    const char missing_provider[] = "libmissing.so";
+    const char missing_version[] = "ABS_1";
+    zero_bytes((uint8_t *)&graph, sizeof(graph));
+    zero_bytes((uint8_t *)&consumer, sizeof(consumer));
+    zero_bytes((uint8_t *)&tls_layout, sizeof(tls_layout));
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    graph.object_count = 5;
+    if (!prepare_data_provider(&graph.objects[0], &weak_provider,
+                               SYMBOL_BIND_WEAK,
+                               UINT64_C(0x1111222233334444)) ||
+        !prepare_data_provider(&graph.objects[1], &strong_provider,
+                               SYMBOL_BIND_GLOBAL,
+                               UINT64_C(0xaaaabbbbccccdddd)) ||
+        !prepare_vector_provider(&graph.objects[4], &vector_provider) ||
+        !copy_fixture_string(consumer.strings, sizeof(consumer.strings), 1,
+                             shared_data, sizeof(shared_data)) ||
+        !copy_fixture_string(consumer.strings, sizeof(consumer.strings), 24,
+                             shared_function, sizeof(shared_function)) ||
+        !copy_fixture_string(consumer.strings, sizeof(consumer.strings), 56,
+                             vector_data, sizeof(vector_data)) ||
+        !copy_fixture_string(consumer.strings, sizeof(consumer.strings), 80,
+                             optional_absolute,
+                             sizeof(optional_absolute)) ||
+        !copy_fixture_string(consumer.strings, sizeof(consumer.strings), 112,
+                             missing_provider, sizeof(missing_provider)) ||
+        !copy_fixture_string(consumer.strings, sizeof(consumer.strings), 128,
+                             missing_version, sizeof(missing_version))) {
+        return 0;
+    }
+    prepare_symbol_object(&graph.objects[3], &function_provider,
+                          (uintptr_t)&first_definition);
+    consumer.hash[0] = 1;
+    consumer.hash[1] = 5;
+    consumer.symbols[1].name = 1;
+    consumer.symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_OBJECT);
+    consumer.symbols[1].other = SYMBOL_VISIBILITY_DEFAULT;
+    consumer.symbols[1].section_index = 1;
+    consumer.symbols[1].value =
+        offsetof(AbsoluteRelocationFixture, own_data);
+    consumer.symbols[1].size = sizeof(consumer.own_data);
+    consumer.symbols[2].name = 24;
+    consumer.symbols[2].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_FUNCTION);
+    consumer.symbols[2].other = SYMBOL_VISIBILITY_DEFAULT;
+    consumer.symbols[2].section_index = SYMBOL_UNDEFINED;
+    consumer.symbols[3].name = 56;
+    consumer.symbols[3].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_OBJECT);
+    consumer.symbols[3].other = SYMBOL_VISIBILITY_DEFAULT;
+    consumer.symbols[3].section_index = SYMBOL_UNDEFINED;
+    consumer.symbols[3].size = 2 * sizeof(uint64_t);
+    consumer.symbols[4].name = 80;
+    consumer.symbols[4].information =
+        (uint8_t)((SYMBOL_BIND_WEAK << 4) | SYMBOL_NO_TYPE);
+    consumer.symbols[4].other = SYMBOL_VISIBILITY_DEFAULT;
+    consumer.symbols[4].section_index = SYMBOL_UNDEFINED;
+    consumer.own_data = UINT64_C(0xdeadbeefcafef00d);
+    for (size_t index = 0; index < 4; ++index) {
+        consumer.relocations[index].offset =
+            offsetof(AbsoluteRelocationFixture, targets) +
+            index * sizeof(consumer.targets[0]);
+        consumer.relocations[index].information =
+            ((uint64_t)(index + 1) << 32) | RELOCATION_X86_64_64;
+        consumer.targets[index] = UINTPTR_MAX;
+    }
+    consumer.relocations[2].addend = (int64_t)sizeof(uint64_t);
+    graph.objects[2].base = (uintptr_t)&consumer;
+    graph.objects[2].dynamic.hash = (uintptr_t)&consumer.hash[0];
+    graph.objects[2].dynamic.symbol_table =
+        (uintptr_t)&consumer.symbols[0];
+    graph.objects[2].dynamic.string_table =
+        (uintptr_t)&consumer.strings[0];
+    graph.objects[2].dynamic.string_size = sizeof(consumer.strings);
+    graph.objects[2].dynamic.relocations =
+        (uintptr_t)&consumer.relocations[0];
+    graph.objects[2].dynamic.relocation_size =
+        sizeof(consumer.relocations);
+    graph.objects[2].loads[0].address = (uintptr_t)&consumer;
+    graph.objects[2].loads[0].memory_size = sizeof(consumer);
+    graph.objects[2].loads[0].mapping_size = sizeof(consumer);
+    graph.objects[2].loads[0].flags =
+        PROGRAM_READABLE | PROGRAM_WRITABLE;
+    graph.objects[2].load_count = 1;
+
+    ObjectGraph valid_graph = graph;
+    AbsoluteRelocationFixture valid_consumer = consumer;
+    VectorProviderFixture valid_vector_provider = vector_provider;
+    if (!validate_dynamic_symbols(&graph.objects[0]) ||
+        !validate_dynamic_symbols(&graph.objects[1]) ||
+        !validate_dynamic_symbols(&graph.objects[2]) ||
+        !validate_dynamic_symbols(&graph.objects[3]) ||
+        !validate_dynamic_symbols(&graph.objects[4]) ||
+        !apply_object_relocations(&graph, 2, &tls_layout, &evidence) ||
+        consumer.targets[0] != (uintptr_t)&weak_provider.storage ||
+        consumer.targets[1] != (uintptr_t)&first_definition ||
+        consumer.targets[2] != (uintptr_t)&vector_provider.storage[1] ||
+        consumer.targets[3] != 0 ||
+        *(const uint64_t *)consumer.targets[0] != weak_provider.storage ||
+        *(const uint64_t *)consumer.targets[2] != vector_provider.storage[1] ||
+        evidence.external != 4 || evidence.absolute != 4 ||
+        evidence.absolute_functions != 1 || evidence.absolute_data != 2 ||
+        evidence.absolute_addends != 1 ||
+        evidence.weak_absolute_definitions != 1 ||
+        evidence.unresolved_weak_absolute != 1 || evidence.versioned != 0) {
+        return 0;
+    }
+
+    graph = valid_graph;
+    consumer = valid_consumer;
+    graph.objects[2].dynamic.has_symbolic = 1;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (!apply_object_relocations(&graph, 2, &tls_layout, &evidence) ||
+        consumer.targets[0] != (uintptr_t)&consumer.own_data ||
+        evidence.weak_absolute_definitions != 0) {
+        return 0;
+    }
+
+    graph = valid_graph;
+    consumer = valid_consumer;
+    consumer.symbols[4].information =
+        (uint8_t)((SYMBOL_BIND_WEAK << 4) | SYMBOL_TLS);
+    if (validate_dynamic_symbols(&graph.objects[2])) {
+        return 0;
+    }
+
+    consumer = valid_consumer;
+    consumer.symbols[4].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_OBJECT);
+    consumer.symbols[4].size = sizeof(uint64_t);
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (!validate_dynamic_symbols(&graph.objects[2]) ||
+        apply_object_relocations(&graph, 2, &tls_layout, &evidence) ||
+        consumer.targets[3] != UINTPTR_MAX) {
+        return 0;
+    }
+
+    consumer = valid_consumer;
+    consumer.relocations[3].addend = 1;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (!validate_dynamic_symbols(&graph.objects[2]) ||
+        apply_object_relocations(&graph, 2, &tls_layout, &evidence) ||
+        consumer.targets[3] != UINTPTR_MAX) {
+        return 0;
+    }
+
+    consumer = valid_consumer;
+    consumer.relocations[1].addend = 1;
+    consumer.targets[1] = UINTPTR_MAX;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 2, &tls_layout, &evidence) ||
+        consumer.targets[1] != UINTPTR_MAX) {
+        return 0;
+    }
+
+    consumer = valid_consumer;
+    consumer.relocations[2].addend = -1;
+    consumer.targets[2] = UINTPTR_MAX;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 2, &tls_layout, &evidence) ||
+        consumer.targets[2] != UINTPTR_MAX) {
+        return 0;
+    }
+
+    consumer = valid_consumer;
+    consumer.relocations[2].addend =
+        (int64_t)sizeof(vector_provider.storage);
+    consumer.targets[2] = UINTPTR_MAX;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 2, &tls_layout, &evidence) ||
+        consumer.targets[2] != UINTPTR_MAX) {
+        return 0;
+    }
+
+    consumer = valid_consumer;
+    consumer.symbols[3].size = sizeof(vector_provider.storage) + 1;
+    consumer.targets[2] = UINTPTR_MAX;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (!validate_dynamic_symbols(&graph.objects[2]) ||
+        apply_object_relocations(&graph, 2, &tls_layout, &evidence) ||
+        consumer.targets[2] != UINTPTR_MAX) {
+        return 0;
+    }
+
+    consumer = valid_consumer;
+    vector_provider = valid_vector_provider;
+    vector_provider.symbols[1].value =
+        sizeof(vector_provider) - sizeof(uint64_t);
+    if (validate_dynamic_symbols(&graph.objects[4])) {
+        return 0;
+    }
+
+    vector_provider = valid_vector_provider;
+    consumer = valid_consumer;
+    consumer.relocations[0].offset += 1;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 2, &tls_layout, &evidence)) {
+        return 0;
+    }
+
+    consumer = valid_consumer;
+    graph.objects[2].loads[0].flags = PROGRAM_READABLE;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    if (apply_object_relocations(&graph, 2, &tls_layout, &evidence)) {
+        return 0;
+    }
+
+    graph = valid_graph;
+    consumer = valid_consumer;
+    consumer.versions[0] = VERSION_INDEX_LOCAL;
+    consumer.versions[1] = VERSION_INDEX_GLOBAL;
+    consumer.versions[2] = VERSION_INDEX_GLOBAL;
+    consumer.versions[3] = VERSION_INDEX_GLOBAL;
+    consumer.versions[4] = 2;
+    consumer.requirements[0].requirement.version = VERSION_CURRENT;
+    consumer.requirements[0].requirement.auxiliary_count = 1;
+    consumer.requirements[0].requirement.file = 112;
+    consumer.requirements[0].requirement.auxiliary =
+        sizeof(Elf64VersionRequirement);
+    consumer.requirements[0].auxiliary.hash =
+        version_name_hash(missing_version, sizeof(missing_version) - 1);
+    consumer.requirements[0].auxiliary.other = 2;
+    consumer.requirements[0].auxiliary.name = 128;
+    graph.objects[2].dynamic.needed_offsets[0] = 112;
+    graph.objects[2].dynamic.needed_count = 1;
+    graph.objects[2].dynamic.version_symbols =
+        (uintptr_t)&consumer.versions[0];
+    graph.objects[2].dynamic.version_requirements =
+        (uintptr_t)&consumer.requirements[0];
+    graph.objects[2].dynamic.version_requirement_count = 1;
+    graph.objects[2].dynamic.has_version_symbols = 1;
+    graph.objects[2].dynamic.has_version_requirements = 1;
+    graph.objects[2].dynamic.has_version_requirement_count = 1;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    return validate_dynamic_symbols(&graph.objects[2]) &&
+           !apply_object_relocations(&graph, 2, &tls_layout, &evidence) &&
+           consumer.targets[3] == UINTPTR_MAX;
+}
+
 static int prepare_version_provider(LoadedObject *object,
                                     VersionProviderFixture *fixture,
                                     uintptr_t definition) {
@@ -804,6 +1124,21 @@ static int test_symbol_versions(void) {
             sizeof("shared_definition") - 1, &requirement, &resolution) ||
         resolution.address != (uintptr_t)&first_definition ||
         resolution.binding != SYMBOL_BIND_GLOBAL) {
+        return 0;
+    }
+    SymbolVersionRequirement absolute_requirement;
+    AbsoluteSymbolResolution absolute_resolution;
+    if (!absolute_symbol_version_requirement(
+            &graph.objects[1], 1, &absolute_requirement) ||
+        !absolute_requirement.explicit_version ||
+        absolute_requirement.has_provider ||
+        !resolve_global_absolute_symbol_versioned(
+            &graph, 1, "shared_definition",
+            sizeof("shared_definition") - 1, SYMBOL_FUNCTION,
+            &absolute_requirement, &absolute_resolution) ||
+        absolute_resolution.address != (uintptr_t)&first_definition ||
+        absolute_resolution.type != SYMBOL_FUNCTION ||
+        absolute_resolution.binding != SYMBOL_BIND_GLOBAL) {
         return 0;
     }
     ObjectName wrong_provider;
@@ -1243,6 +1578,7 @@ int main(void) {
                    test_symbol_scope() &&
                    test_weak_function_relocations() &&
                    test_data_relocations() &&
+                   test_absolute_relocations() &&
                    test_symbol_versions() &&
                    test_tls_resolver_reference() &&
                    test_weak_reference_version() &&

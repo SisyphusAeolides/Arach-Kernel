@@ -99,6 +99,10 @@ data Gate
   | GlobalDataRelocation
   | FirstDefinitionWeakDataBinding
   | UnresolvedWeakDataZero
+  | AbsoluteSymbolRelocation
+  | BoundedAbsoluteSymbolAddend
+  | FirstDefinitionWeakAbsoluteBinding
+  | UnresolvedWeakAbsoluteZero
   | DirectoryCreation
   | CanonicalRunpath
   | RunpathDependencySearch
@@ -339,9 +343,9 @@ record MultiObjectGraphCertificate where
 ||| object graph and adds measured directory creation, canonical bounded
 ||| runpaths, direct-dependency search, one finite Variant-II TLS arena,
 ||| checked static and general-dynamic relocations, Linux-compatible weak
-||| function and data binding, bounded eager global-data relocation, a bounded
-||| dynamic-thread vector, one exact resolver boundary, and dependency-first
-||| initialization.
+||| function and data binding, bounded eager global-data and absolute-symbol
+||| relocation, checked interior object addends, a bounded dynamic-thread
+||| vector, one exact resolver boundary, and dependency-first initialization.
 public export
 record RuntimeInitializationCertificate where
   constructor MkRuntimeInitializationCertificate
@@ -354,6 +358,11 @@ record RuntimeInitializationCertificate where
   globalDataRelocation : Measurement GlobalDataRelocation
   firstDefinitionWeakDataBinding : Measurement FirstDefinitionWeakDataBinding
   unresolvedWeakDataZero : Measurement UnresolvedWeakDataZero
+  absoluteSymbolRelocation : Measurement AbsoluteSymbolRelocation
+  boundedAbsoluteSymbolAddend : Measurement BoundedAbsoluteSymbolAddend
+  firstDefinitionWeakAbsoluteBinding :
+    Measurement FirstDefinitionWeakAbsoluteBinding
+  unresolvedWeakAbsoluteZero : Measurement UnresolvedWeakAbsoluteZero
   staticTlsLayout : Measurement StaticTlsLayout
   tlsRelocation : Measurement TlsRelocation
   dynamicTlsVector : Measurement DynamicTlsVector

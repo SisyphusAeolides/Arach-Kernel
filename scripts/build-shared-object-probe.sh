@@ -102,7 +102,8 @@ test "${root_dependencies[*]}" = '[libarach-provider.so] [libarach-observer.so]'
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 5
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 2
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_GLOB_DAT" {count++} END {print count + 0}')" -eq 3
-test -z "$(readelf -rW "$output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" && $3 != "R_X86_64_GLOB_DAT" {print}')"
+test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_64" {count++} END {print count + 0}')" -eq 4
+test -z "$(readelf -rW "$output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" && $3 != "R_X86_64_GLOB_DAT" && $3 != "R_X86_64_64" {print}')"
 test "$(readelf -dW "$output" | awk '$2 == "(INIT_ARRAYSZ)" {print $3}')" -eq 8
 test "$(readelf -dW "$output" | awk '$2 == "(FINI_ARRAYSZ)" {print $3}')" -eq 8
 test "$(readelf -dW "$output" | awk '$2 == "(FINI)" {count++} END {print count + 0}')" -eq 1
@@ -120,6 +121,9 @@ test "$(readelf --dyn-syms -W "$output" | awk '$4 == "OBJECT" && $5 == "WEAK" &&
 test "$(readelf --dyn-syms -W "$output" | awk '$4 == "NOTYPE" && $5 == "WEAK" && $7 == "UND" && $8 == "arach_optional_data" {count++} END {print count + 0}')" -eq 1
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_GLOB_DAT" && $5 ~ /^arach_provider_data@ARACH_PROVIDER_1[.]0$/ {count++} END {print count + 0}')" -eq 1
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_GLOB_DAT" && ($5 == "arach_data_choice" || $5 == "arach_optional_data") {count++} END {print count + 0}')" -eq 2
+test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_64" && $5 ~ /^arach_provider_value@ARACH_PROVIDER_1[.]0$/ && $7 == "0" {count++} END {print count + 0}')" -eq 1
+test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_64" && $5 ~ /^arach_provider_vector@ARACH_PROVIDER_1[.]0$/ && $7 == "8" {count++} END {print count + 0}')" -eq 1
+test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_64" && ($5 == "arach_data_choice" || $5 == "arach_optional_data") && $7 == "0" {count++} END {print count + 0}')" -eq 2
 
 test "$(readelf -hW "$provider_output" | awk '/Type:/{print $2}')" = DYN
 test -z "$(readelf -lW "$provider_output" | awk '$1 == "INTERP" {print}')"
@@ -145,6 +149,7 @@ test "$(readelf --dyn-syms -W "$provider_output" | awk '$8 ~ /^arach_provider_va
 test "$(readelf --dyn-syms -W "$provider_output" | awk '$4 == "FUNC" && $5 == "WEAK" && $6 == "DEFAULT" && $7 != "UND" && $8 == "arach_scope_choice" {count++} END {print count + 0}')" -eq 1
 test "$(readelf --dyn-syms -W "$provider_output" | awk '$3 == 8 && $4 == "OBJECT" && $5 == "WEAK" && $6 == "DEFAULT" && $7 != "UND" && $8 == "arach_data_choice" {count++} END {print count + 0}')" -eq 1
 test "$(readelf --dyn-syms -W "$provider_output" | awk '$3 == 8 && $4 == "OBJECT" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" && $8 ~ /^arach_provider_data@@ARACH_PROVIDER_1[.]0$/ {count++} END {print count + 0}')" -eq 1
+test "$(readelf --dyn-syms -W "$provider_output" | awk '$3 == 24 && $4 == "OBJECT" && $5 == "GLOBAL" && $6 == "DEFAULT" && $7 != "UND" && $8 ~ /^arach_provider_vector@@ARACH_PROVIDER_1[.]0$/ {count++} END {print count + 0}')" -eq 1
 test "$(readelf --dyn-syms -W "$provider_output" | awk '$4 == "TLS" && $5 == "GLOBAL" && $7 == "UND" && $8 ~ /^arach_core_tls@ARACH_CORE_1[.]0$/ {count++} END {print count + 0}')" -eq 1
 test "$(readelf --dyn-syms -W "$provider_output" | awk '$4 == "NOTYPE" && $5 == "GLOBAL" && $7 == "UND" && $8 == "__tls_get_addr" {count++} END {print count + 0}')" -eq 1
 test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_JUMP_SLOT" && $5 ~ /@ARACH_CORE_1[.]0/ {count++} END {print count + 0}')" -eq 2
