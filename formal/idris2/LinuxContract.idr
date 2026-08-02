@@ -94,6 +94,9 @@ data Gate
   | DuplicateDependencyCoalescing
   | AcyclicRelocationOrder
   | GlobalSymbolScope
+  | StaticTlsLayout
+  | TlsRelocation
+  | InitializerOrder
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -317,6 +320,17 @@ record MultiObjectGraphCertificate where
   acyclicRelocationOrder : Measurement AcyclicRelocationOrder
   globalSymbolScope : Measurement GlobalSymbolScope
 
+||| The first runtime-initialization certificate retains the complete bounded
+||| object graph and adds one finite Variant-II TLS arena, checked TLS
+||| relocation, and dependency-first initializer execution.
+public export
+record RuntimeInitializationCertificate where
+  constructor MkRuntimeInitializationCertificate
+  multiObjectGraph : MultiObjectGraphCertificate
+  staticTlsLayout : Measurement StaticTlsLayout
+  tlsRelocation : Measurement TlsRelocation
+  initializerOrder : Measurement InitializerOrder
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -419,3 +433,11 @@ public export
 multiObjectGraphRequiresDependencyGraph :
   MultiObjectGraphCertificate -> DependencyGraphCertificate
 multiObjectGraphRequiresDependencyGraph certificate = certificate.dependencyGraph
+
+||| TLS and initializer qualification cannot be projected without the complete
+||| dependency graph, relocation, sealing, and global-scope evidence.
+public export
+runtimeInitializationRequiresMultiObjectGraph :
+  RuntimeInitializationCertificate -> MultiObjectGraphCertificate
+runtimeInitializationRequiresMultiObjectGraph certificate =
+  certificate.multiObjectGraph

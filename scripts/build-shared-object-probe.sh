@@ -51,7 +51,7 @@ common_flags=(
     -o "$build_directory/core.o"
 "$ld_bin" -shared -nostdlib -Bsymbolic --hash-style=sysv -z noexecstack \
     -soname libarach-core.so \
-    -T "$root/probes/shared-object/provider.ld" \
+    -T "$root/probes/shared-object/core.ld" \
     -o "$core_output" \
     "$build_directory/core.o"
 "$ld_bin" -shared -nostdlib -Bsymbolic --hash-style=sysv -z noexecstack \
@@ -84,7 +84,10 @@ test "$(readelf -dW "$output" | awk '$2 == "(SONAME)" {print $5}')" = '[libarach
 mapfile -t root_dependencies < <(readelf -dW "$output" | awk '$2 == "(NEEDED)" {print $5}')
 test "${root_dependencies[*]}" = '[libarach-provider.so] [libarach-observer.so]'
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 2
-test -z "$(readelf -rW "$output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" {print}')"
+test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -rW "$output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" {print}')"
+test "$(readelf -dW "$output" | awk '$2 == "(INIT_ARRAYSZ)" {print $3}')" -eq 8
+test -z "$(readelf -lW "$output" | awk '$1 == "TLS" {print}')"
 test "$(readelf -sW "$output" | awk '$8 == "arach_shared_probe" && $7 != "UND" {count++} END {print count + 0}')" -ge 1
 
 test "$(readelf -hW "$provider_output" | awk '/Type:/{print $2}')" = DYN
@@ -92,7 +95,10 @@ test -z "$(readelf -lW "$provider_output" | awk '$1 == "INTERP" {print}')"
 test "$(readelf -dW "$provider_output" | awk '$2 == "(SONAME)" {print $5}')" = '[libarach-provider.so]'
 test "$(readelf -dW "$provider_output" | awk '$2 == "(NEEDED)" {print $5}')" = '[libarach-core.so]'
 test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 1
-test -z "$(readelf -rW "$provider_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" {print}')"
+test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -rW "$provider_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" {print}')"
+test "$(readelf -dW "$provider_output" | awk '$2 == "(INIT_ARRAYSZ)" {print $3}')" -eq 8
+test -z "$(readelf -lW "$provider_output" | awk '$1 == "TLS" {print}')"
 test "$(readelf -sW "$provider_output" | awk '$8 == "arach_provider_value" && $7 != "UND" {count++} END {print count + 0}')" -ge 1
 
 test "$(readelf -hW "$observer_output" | awk '/Type:/{print $2}')" = DYN
@@ -100,13 +106,23 @@ test -z "$(readelf -lW "$observer_output" | awk '$1 == "INTERP" {print}')"
 test "$(readelf -dW "$observer_output" | awk '$2 == "(SONAME)" {print $5}')" = '[libarach-observer.so]'
 test "$(readelf -dW "$observer_output" | awk '$2 == "(NEEDED)" {print $5}')" = '[libarach-core.so]'
 test "$(readelf -rW "$observer_output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 1
-test -z "$(readelf -rW "$observer_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" {print}')"
+test "$(readelf -rW "$observer_output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -rW "$observer_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" {print}')"
+test "$(readelf -dW "$observer_output" | awk '$2 == "(INIT_ARRAYSZ)" {print $3}')" -eq 8
+test -z "$(readelf -lW "$observer_output" | awk '$1 == "TLS" {print}')"
 test "$(readelf -sW "$observer_output" | awk '$8 == "arach_observer_value" && $7 != "UND" {count++} END {print count + 0}')" -ge 1
 
 test "$(readelf -hW "$core_output" | awk '/Type:/{print $2}')" = DYN
 test -z "$(readelf -lW "$core_output" | awk '$1 == "INTERP" {print}')"
 test "$(readelf -dW "$core_output" | awk '$2 == "(SONAME)" {print $5}')" = '[libarach-core.so]'
-test "$(readelf -rW "$core_output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 1
-test -z "$(readelf -rW "$core_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_RELATIVE" {print}')"
+test "$(readelf -rW "$core_output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 2
+test "$(readelf -rW "$core_output" | awk '$3 == "R_X86_64_TPOFF64" {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -rW "$core_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_RELATIVE" && $3 != "R_X86_64_TPOFF64" {print}')"
+test "$(readelf -dW "$core_output" | awk '$2 == "(INIT_ARRAYSZ)" {print $3}')" -eq 8
+test "$(readelf -lW "$core_output" | awk '$1 == "TLS" {count++} END {print count + 0}')" -eq 1
+test "$(readelf -lW "$core_output" | awk '$1 == "TLS" {print $5, $6, $8}')" = '0x000008 0x000008 0x8'
+test "$(readelf -sW "$core_output" | awk '$4 == "TLS" && $8 == "arach_core_tls" && $7 != "UND" {count++} END {print count + 0}')" -ge 1
+test "$(readelf -dW "$core_output" | awk '$2 == "(FLAGS)" && /STATIC_TLS/ {count++} END {print count + 0}')" -eq 1
+test "$(objdump -d "$core_output" | awk '/%fs:/{count++} END {print count + 0}')" -ge 2
 test -z "$(readelf -dW "$core_output" | awk '$2 == "(NEEDED)" {print}')"
 test "$(readelf -sW "$core_output" | awk '$8 == "arach_core_value" && $7 != "UND" {count++} END {print count + 0}')" -ge 1

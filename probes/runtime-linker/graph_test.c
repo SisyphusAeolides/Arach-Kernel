@@ -6,6 +6,24 @@ typedef struct {
     char strings[32];
 } SymbolFixture;
 
+typedef struct {
+    uint32_t hash[5];
+    Elf64Symbol symbols[2];
+    char strings[32];
+    Elf64Rela relocations[3];
+    uint64_t targets[3];
+} TlsConsumerFixture;
+
+typedef struct {
+    uint32_t hash[5];
+    Elf64Symbol symbols[2];
+    char strings[32];
+    uint64_t storage[2];
+} TlsProviderFixture;
+
+static size_t initializer_sequence[4];
+static size_t initializer_count;
+
 static uintptr_t first_definition(uintptr_t value);
 static uintptr_t second_definition(uintptr_t value);
 static int set_name(ObjectName *name, const char *value, size_t length);
@@ -15,11 +33,30 @@ static int test_names(void);
 static int test_graph_order(void);
 static int test_cycle_rejection(void);
 static int test_symbol_scope(void);
+static int test_static_tls_layout(void);
+static int test_tls_relocation(void);
+static int test_initializer_order(void);
 int main(void);
 
 static uintptr_t first_definition(uintptr_t value) { return value + 1; }
 
 static uintptr_t second_definition(uintptr_t value) { return value + 2; }
+
+static void initializer_root(void) {
+    initializer_sequence[initializer_count++] = 0;
+}
+
+static void initializer_provider(void) {
+    initializer_sequence[initializer_count++] = 1;
+}
+
+static void initializer_observer(void) {
+    initializer_sequence[initializer_count++] = 2;
+}
+
+static void initializer_core(void) {
+    initializer_sequence[initializer_count++] = 3;
+}
 
 static int set_name(ObjectName *name, const char *value, size_t length) {
     return copy_object_name(value, length + 1, name);
@@ -139,9 +176,179 @@ static int test_symbol_scope(void) {
            address == (uintptr_t)&first_definition;
 }
 
+static int test_static_tls_layout(void) {
+    ObjectGraph graph;
+    StaticTlsLayout layout;
+    Elf64ProgramHeader first;
+    Elf64ProgramHeader second;
+    zero_bytes((uint8_t *)&graph, sizeof(graph));
+    zero_bytes((uint8_t *)&first, sizeof(first));
+    zero_bytes((uint8_t *)&second, sizeof(second));
+    graph.object_count = 4;
+    first.type = PROGRAM_TLS;
+    first.file_size = 8;
+    first.memory_size = 8;
+    first.alignment = 8;
+    second.type = PROGRAM_TLS;
+    second.file_size = 8;
+    second.memory_size = 24;
+    second.alignment = 16;
+    graph.objects[1].tls_program = &first;
+    graph.objects[3].tls_program = &second;
+    if (!plan_static_tls(&graph, &layout) || layout.object_count != 2 ||
+        layout.payload_size != 48 || layout.mapping_size != PAGE_SIZE ||
+        graph.objects[1].tls_offset != 0 ||
+        graph.objects[1].tls_module_id != 2 ||
+        graph.objects[3].tls_offset != 16 ||
+        graph.objects[3].tls_module_id != 4) {
+        return 0;
+    }
+    second.alignment = 3;
+    return !plan_static_tls(&graph, &layout);
+}
+
+static void prepare_tls_hash(uint32_t *hash, Elf64Symbol *symbols,
+                             char *strings, uint16_t section_index,
+                             uint64_t symbol_size) {
+    zero_bytes((uint8_t *)hash, 5 * sizeof(*hash));
+    zero_bytes((uint8_t *)symbols, 2 * sizeof(*symbols));
+    zero_bytes((uint8_t *)strings, 32);
+    hash[0] = 1;
+    hash[1] = 2;
+    hash[2] = 1;
+    const char name[] = "shared_tls";
+    for (size_t index = 0; index < sizeof(name); ++index) {
+        strings[index + 1] = name[index];
+    }
+    symbols[1].name = 1;
+    symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_TLS);
+    symbols[1].other = SYMBOL_VISIBILITY_DEFAULT;
+    symbols[1].section_index = section_index;
+    symbols[1].size = symbol_size;
+}
+
+static int test_tls_relocation(void) {
+    ObjectGraph graph;
+    TlsConsumerFixture consumer;
+    TlsProviderFixture provider;
+    Elf64ProgramHeader tls_program;
+    StaticTlsLayout layout;
+    RelocationEvidence evidence;
+    zero_bytes((uint8_t *)&graph, sizeof(graph));
+    zero_bytes((uint8_t *)&consumer, sizeof(consumer));
+    zero_bytes((uint8_t *)&provider, sizeof(provider));
+    zero_bytes((uint8_t *)&tls_program, sizeof(tls_program));
+    zero_bytes((uint8_t *)&layout, sizeof(layout));
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    graph.object_count = 2;
+    prepare_tls_hash(consumer.hash, consumer.symbols, consumer.strings,
+                     SYMBOL_UNDEFINED, 0);
+    prepare_tls_hash(provider.hash, provider.symbols, provider.strings, 1,
+                     sizeof(provider.storage[1]));
+    provider.symbols[1].value = sizeof(provider.storage[0]);
+    const uint32_t types[3] = {
+        RELOCATION_X86_64_DTPMOD64,
+        RELOCATION_X86_64_DTPOFF64,
+        RELOCATION_X86_64_TPOFF64,
+    };
+    for (size_t index = 0; index < 3; ++index) {
+        consumer.relocations[index].offset =
+            offsetof(TlsConsumerFixture, targets) +
+            index * sizeof(consumer.targets[0]);
+        consumer.relocations[index].information =
+            (UINT64_C(1) << 32) | types[index];
+    }
+    graph.objects[0].base = (uintptr_t)&consumer;
+    graph.objects[0].dynamic.hash = (uintptr_t)&consumer.hash[0];
+    graph.objects[0].dynamic.symbol_table =
+        (uintptr_t)&consumer.symbols[0];
+    graph.objects[0].dynamic.string_table =
+        (uintptr_t)&consumer.strings[0];
+    graph.objects[0].dynamic.string_size = sizeof(consumer.strings);
+    graph.objects[0].dynamic.relocations =
+        (uintptr_t)&consumer.relocations[0];
+    graph.objects[0].dynamic.relocation_size = sizeof(consumer.relocations);
+    graph.objects[0].loads[0].address = (uintptr_t)&consumer;
+    graph.objects[0].loads[0].memory_size = sizeof(consumer);
+    graph.objects[0].loads[0].mapping_size = sizeof(consumer);
+    graph.objects[0].loads[0].flags = PROGRAM_READABLE | PROGRAM_WRITABLE;
+    graph.objects[0].load_count = 1;
+
+    tls_program.type = PROGRAM_TLS;
+    tls_program.file_size = sizeof(provider.storage);
+    tls_program.memory_size = sizeof(provider.storage);
+    tls_program.alignment = sizeof(provider.storage);
+    graph.objects[1].dynamic.hash = (uintptr_t)&provider.hash[0];
+    graph.objects[1].dynamic.symbol_table =
+        (uintptr_t)&provider.symbols[0];
+    graph.objects[1].dynamic.string_table =
+        (uintptr_t)&provider.strings[0];
+    graph.objects[1].dynamic.string_size = sizeof(provider.strings);
+    graph.objects[1].tls_program = &tls_program;
+    graph.objects[1].tls_instance = (uintptr_t)&provider.storage[0];
+    graph.objects[1].tls_module_id = 2;
+    graph.objects[1].loads[0].address = (uintptr_t)&provider;
+    graph.objects[1].loads[0].memory_size = sizeof(provider);
+    graph.objects[1].loads[0].mapping_size = sizeof(provider);
+    graph.objects[1].loads[0].flags = PROGRAM_READABLE | PROGRAM_WRITABLE;
+    graph.objects[1].load_count = 1;
+    layout.thread_pointer = (uintptr_t)&provider.storage[0] +
+                            sizeof(provider.storage);
+    if (!apply_object_relocations(&graph, 0, &layout, &evidence) ||
+        consumer.targets[0] != 2 || consumer.targets[1] != 8 ||
+        consumer.targets[2] != UINT64_MAX - 7 || evidence.tls != 3 ||
+        evidence.relative != 0) {
+        return 0;
+    }
+    consumer.relocations[2].addend = 8;
+    zero_bytes((uint8_t *)&evidence, sizeof(evidence));
+    return !apply_object_relocations(&graph, 0, &layout, &evidence);
+}
+
+static int test_initializer_order(void) {
+    ObjectGraph graph;
+    InitializerEvidence evidence;
+    uintptr_t initializers[4] = {
+        (uintptr_t)&initializer_root,
+        (uintptr_t)&initializer_provider,
+        (uintptr_t)&initializer_observer,
+        (uintptr_t)&initializer_core,
+    };
+    zero_bytes((uint8_t *)&graph, sizeof(graph));
+    initializer_count = 0;
+    graph.object_count = 4;
+    graph.relocation_count = 4;
+    graph.relocation_order[0] = 3;
+    graph.relocation_order[1] = 1;
+    graph.relocation_order[2] = 2;
+    graph.relocation_order[3] = 0;
+    for (size_t index = 0; index < graph.object_count; ++index) {
+        graph.objects[index].dynamic.init_array =
+            (uintptr_t)&initializers[index];
+        graph.objects[index].dynamic.init_array_size = sizeof(uintptr_t);
+        graph.objects[index].loads[0].address = initializers[index];
+        graph.objects[index].loads[0].memory_size = 1;
+        graph.objects[index].loads[0].mapping_size = 1;
+        graph.objects[index].loads[0].flags =
+            PROGRAM_READABLE | PROGRAM_EXECUTABLE;
+        graph.objects[index].load_count = 1;
+    }
+    if (!run_initializers(&graph, &evidence) || evidence.calls != 4 ||
+        initializer_count != 4 || initializer_sequence[0] != 3 ||
+        initializer_sequence[1] != 1 || initializer_sequence[2] != 2 ||
+        initializer_sequence[3] != 0) {
+        return 0;
+    }
+    initializer_count = 0;
+    initializers[3] = (uintptr_t)&initializer_provider;
+    return !run_initializers(&graph, &evidence);
+}
+
 int main(void) {
     return test_names() && test_graph_order() && test_cycle_rejection() &&
-                   test_symbol_scope()
+                   test_symbol_scope() && test_static_tls_layout() &&
+                   test_tls_relocation() && test_initializer_order()
                ? 0
                : 1;
 }

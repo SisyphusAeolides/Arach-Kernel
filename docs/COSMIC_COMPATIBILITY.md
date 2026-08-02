@@ -136,12 +136,13 @@ from canonical SONAMEs, snapshots each SONAME once, rejects cycles, derives a
 provider-first order, and uses deterministic load-order SysV symbol scope for
 eager PLT binding. The measured diamond loads one consumer, two independent
 middle providers, and one coalesced core; it applies the core's real
-`R_X86_64_RELATIVE`, resolves four real `R_X86_64_JUMP_SLOT` entries, seals all
-four objects R/RW/RX, and calls through both branches into code that
-dereferences the relocated core pointer. The admitted slice remains
-single-threaded at exec and each Akashic file is bounded to 64 KiB. TLS
-relocations, constructors, symbol versions, general search paths, lazy
-binding, general file mapping semantics, ASLR, and production entropy remain
+`R_X86_64_TPOFF64` plus five real `R_X86_64_RELATIVE` writes, resolves four
+real `R_X86_64_JUMP_SLOT` entries, seals all four objects R/RW/RX, executes
+four provider-first initializers, and calls through both branches into code
+that consumes relocated pointer and TLS state. The admitted slice remains
+single-threaded at exec and each Akashic file is bounded to 64 KiB. Dynamic TLS
+allocation, finalizers, symbol versions, general search paths, lazy binding,
+general file mapping semantics, ASLR, and production entropy remain
 fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,

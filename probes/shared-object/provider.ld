@@ -26,6 +26,11 @@ SECTIONS
         *(.got .got.*)
         *(.data .data.*)
     } :data
+    .init_array :
+    {
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        KEEP(*(.init_array))
+    } :data
     .bss (NOLOAD) : { *(.bss .bss.*) *(COMMON) } :data
 
     /DISCARD/ :

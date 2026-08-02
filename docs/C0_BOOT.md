@@ -82,11 +82,17 @@ containing all of the following evidence from the same bundle:
 - `ARACH_C2_MULTI_OBJECT_GRAPH_PASS` was emitted only after the measured
   four-object diamond coalesced both middle-object references to one core
   snapshot and produced provider-first relocation order;
-- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after the core's real
-  relative relocation and all four eager external relocations were written to
-  final-writable targets and read back;
+- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after five real relative
+  relocations, one real static-TLS relocation, and all four eager external
+  relocations were written to final-writable targets and read back;
 - `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS` was emitted only after each undefined
   function was resolved through deterministic breadth-first SysV symbol scope;
+- `ARACH_C2_STATIC_TLS_PASS` was emitted only after the bounded initial TLS
+  template was copied, its checked TPOFF relocation installed, FS base
+  published, and the core consumed its initialized TLS word;
+- `ARACH_C2_INITIALIZER_ORDER_PASS` was emitted only after core, provider,
+  observer, and root initializers ran in provider-first order and each
+  dependent observed its providers' initialized state;
 - `ARACH_C2_EXTERNAL_SYMBOL_PASS` was emitted only after all four objects were
   sealed R/RW/RX and the root call crossed both middle PLT edges, both shared
   core PLT edges, and consumed the core's relocated state;

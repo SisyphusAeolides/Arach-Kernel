@@ -19,6 +19,7 @@ enum {
     SYS_MMAP = 9,
     SYS_MPROTECT = 10,
     SYS_MUNMAP = 11,
+    SYS_ARCH_PRCTL = 158,
     SYS_EXIT_GROUP = 231,
     O_RDONLY = 0,
     SEEK_SET = 0,
@@ -27,6 +28,8 @@ enum {
     PROT_WRITE = 2,
     PROT_EXEC = 4,
     MAP_PRIVATE = 2,
+    MAP_ANONYMOUS = 32,
+    ARCH_SET_FS = 0x1002,
     ELF_CLASS_64 = 2,
     ELF_DATA_LITTLE_ENDIAN = 1,
     ELF_VERSION_CURRENT = 1,
@@ -35,6 +38,7 @@ enum {
     PROGRAM_LOAD = 1,
     PROGRAM_DYNAMIC = 2,
     PROGRAM_HEADERS = 6,
+    PROGRAM_TLS = 7,
     PROGRAM_EXECUTABLE = 1,
     PROGRAM_WRITABLE = 2,
     PROGRAM_READABLE = 4,
@@ -77,12 +81,17 @@ enum {
     DYNAMIC_FLAGS_1 = 0x6ffffffb,
     DYNAMIC_FLAG_SYMBOLIC = 2,
     DYNAMIC_FLAG_BIND_NOW = 8,
+    DYNAMIC_FLAG_STATIC_TLS = 16,
     DYNAMIC_FLAG_1_NOW = 1,
     RELOCATION_X86_64_JUMP_SLOT = 7,
     RELOCATION_X86_64_RELATIVE = 8,
+    RELOCATION_X86_64_DTPMOD64 = 16,
+    RELOCATION_X86_64_DTPOFF64 = 17,
+    RELOCATION_X86_64_TPOFF64 = 18,
     SYMBOL_UNDEFINED = 0,
     SYMBOL_BIND_GLOBAL = 1,
     SYMBOL_FUNCTION = 2,
+    SYMBOL_TLS = 6,
     SYMBOL_VISIBILITY_DEFAULT = 0,
     PAGE_SIZE = 4096,
     MAXIMUM_PROGRAM_HEADERS = 16,
@@ -95,6 +104,9 @@ enum {
     MAXIMUM_OBJECT_NAME_BYTES = 63,
     MAXIMUM_SYMBOL_NAME_BYTES = 127,
     MAXIMUM_RELOCATIONS = 64,
+    MAXIMUM_INITIALIZERS = 16,
+    MAXIMUM_TLS_ALIGNMENT = PAGE_SIZE,
+    MAXIMUM_STATIC_TLS_BYTES = 16 * 1024,
 };
 
 static const uintptr_t first_object_base = UINT64_C(0x30000000);
@@ -113,6 +125,9 @@ static const char multi_object_marker[] =
 static const char relocation_marker[] = "ARACH_C2_SHARED_RELOCATION_PASS\n";
 static const char symbol_scope_marker[] =
     "ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS\n";
+static const char static_tls_marker[] = "ARACH_C2_STATIC_TLS_PASS\n";
+static const char initializer_marker[] =
+    "ARACH_C2_INITIALIZER_ORDER_PASS\n";
 static const char external_marker[] = "ARACH_C2_EXTERNAL_SYMBOL_PASS\n";
 static const char pass_marker[] = "ARACH_C2_RUNTIME_LINKER_PASS\n";
 static const char stack_failure[] = "ARACH_C2_LINKER_STACK_FAIL\n";
@@ -131,6 +146,9 @@ static const char shared_relocation_failure[] =
     "ARACH_C2_LINKER_SHARED_RELOCATION_FAIL\n";
 static const char shared_external_failure[] =
     "ARACH_C2_LINKER_SHARED_EXTERNAL_FAIL\n";
+static const char shared_tls_failure[] = "ARACH_C2_LINKER_STATIC_TLS_FAIL\n";
+static const char shared_initializer_failure[] =
+    "ARACH_C2_LINKER_INITIALIZER_FAIL\n";
 static const char shared_symbol_failure[] = "ARACH_C2_LINKER_SHARED_SYMBOL_FAIL\n";
 static const char shared_call_failure[] = "ARACH_C2_LINKER_SHARED_CALL_FAIL\n";
 
@@ -206,11 +224,14 @@ typedef struct {
     uintptr_t relocations;
     uintptr_t jump_relocations;
     uintptr_t plt_got;
+    uintptr_t init_function;
+    uintptr_t init_array;
     size_t string_size;
     size_t relocation_size;
     size_t jump_relocation_size;
     size_t relocation_entry_size;
     size_t symbol_entry_size;
+    size_t init_array_size;
     size_t soname_offset;
     size_t needed_offsets[MAXIMUM_NEEDED_ENTRIES];
     size_t needed_count;
@@ -225,6 +246,9 @@ typedef struct {
     int has_flags_1;
     int has_symbolic;
     int has_bind_now;
+    int has_init_function;
+    int has_init_array;
+    int has_init_array_size;
 } SharedDynamic;
 
 typedef struct {
@@ -235,11 +259,15 @@ typedef struct {
     size_t temporary_size;
     const Elf64Header *header;
     const Elf64ProgramHeader *headers;
+    const Elf64ProgramHeader *tls_program;
     MappedLoad loads[MAXIMUM_SHARED_LOADS];
     size_t load_count;
     SharedDynamic dynamic;
     size_t dependencies[MAXIMUM_NEEDED_ENTRIES];
     size_t dependency_count;
+    uintptr_t tls_instance;
+    size_t tls_offset;
+    size_t tls_module_id;
 } LoadedObject;
 
 typedef struct {
@@ -252,7 +280,20 @@ typedef struct {
 typedef struct {
     size_t relative;
     size_t external;
+    size_t tls;
 } RelocationEvidence;
+
+typedef struct {
+    uintptr_t mapping;
+    size_t mapping_size;
+    uintptr_t thread_pointer;
+    size_t payload_size;
+    size_t object_count;
+} StaticTlsLayout;
+
+typedef struct {
+    size_t calls;
+} InitializerEvidence;
 
 _Static_assert(sizeof(Elf64Header) == 64, "ELF64 header layout");
 _Static_assert(sizeof(Elf64ProgramHeader) == 56, "ELF64 program header layout");
@@ -417,6 +458,18 @@ static int round_to_pages(size_t length, size_t *rounded) {
     return 1;
 }
 
+static int is_power_of_two(uint64_t value) {
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
+static int align_size(size_t value, size_t alignment, size_t *aligned) {
+    if (!is_power_of_two(alignment) || value > SIZE_MAX - (alignment - 1)) {
+        return 0;
+    }
+    *aligned = (value + alignment - 1) & ~(alignment - 1);
+    return 1;
+}
+
 static int main_range_contains(const Elf64ProgramHeader *headers,
                                size_t header_count, uintptr_t load_base,
                                uintptr_t address, size_t length) {
@@ -563,6 +616,32 @@ static int mapped_range_contains(const MappedLoad *loads, size_t load_count,
     return 0;
 }
 
+static int tls_program_matches_load(const LoadedObject *object,
+                                    const Elf64ProgramHeader *tls) {
+    for (size_t index = 0; index < object->header->program_header_count;
+         ++index) {
+        const Elf64ProgramHeader *load = &object->headers[index];
+        if (load->type != PROGRAM_LOAD ||
+            tls->virtual_address < load->virtual_address) {
+            continue;
+        }
+        uint64_t virtual_delta =
+            tls->virtual_address - load->virtual_address;
+        if (virtual_delta > load->memory_size ||
+            tls->memory_size > load->memory_size - virtual_delta) {
+            continue;
+        }
+        if (tls->offset < load->offset) {
+            return 0;
+        }
+        uint64_t file_delta = tls->offset - load->offset;
+        return file_delta == virtual_delta &&
+               file_delta <= load->file_size &&
+               tls->file_size <= load->file_size - file_delta;
+    }
+    return 0;
+}
+
 static int mappings_overlap(const MappedLoad *loads, size_t load_count,
                             uintptr_t address, size_t length) {
     uintptr_t end = 0;
@@ -583,6 +662,13 @@ static int mappings_overlap(const MappedLoad *loads, size_t load_count,
 static void zero_bytes(uint8_t *bytes, size_t length) {
     for (size_t index = 0; index < length; ++index) {
         bytes[index] = 0;
+    }
+}
+
+static void copy_bytes(uint8_t *destination, const uint8_t *source,
+                       size_t length) {
+    for (size_t index = 0; index < length; ++index) {
+        destination[index] = source[index];
     }
 }
 
@@ -620,11 +706,14 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->relocations = 0;
     result->jump_relocations = 0;
     result->plt_got = 0;
+    result->init_function = 0;
+    result->init_array = 0;
     result->string_size = 0;
     result->relocation_size = 0;
     result->jump_relocation_size = 0;
     result->relocation_entry_size = 0;
     result->symbol_entry_size = 0;
+    result->init_array_size = 0;
     result->soname_offset = 0;
     for (size_t index = 0; index < MAXIMUM_NEEDED_ENTRIES; ++index) {
         result->needed_offsets[index] = 0;
@@ -641,6 +730,9 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->has_flags_1 = 0;
     result->has_symbolic = 0;
     result->has_bind_now = 0;
+    result->has_init_function = 0;
+    result->has_init_array = 0;
+    result->has_init_array_size = 0;
     for (size_t index = 0; index < entries; ++index) {
         uintptr_t pointer = 0;
         switch (dynamic[index].tag) {
@@ -733,6 +825,30 @@ static int parse_shared_dynamic(LoadedObject *object) {
             result->soname_offset = (size_t)dynamic[index].value;
             result->has_soname = 1;
             break;
+        case DYNAMIC_INIT:
+            if (result->has_init_function ||
+                !checked_add(object->base, dynamic[index].value, &pointer)) {
+                return 0;
+            }
+            result->init_function = pointer;
+            result->has_init_function = 1;
+            break;
+        case DYNAMIC_INIT_ARRAY:
+            if (result->has_init_array ||
+                !checked_add(object->base, dynamic[index].value, &pointer)) {
+                return 0;
+            }
+            result->init_array = pointer;
+            result->has_init_array = 1;
+            break;
+        case DYNAMIC_INIT_ARRAY_SIZE:
+            if (result->has_init_array_size || dynamic[index].value == 0 ||
+                dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->init_array_size = (size_t)dynamic[index].value;
+            result->has_init_array_size = 1;
+            break;
         case DYNAMIC_SYMBOLIC:
             if (result->has_symbolic || dynamic[index].value != 0) {
                 return 0;
@@ -781,16 +897,13 @@ static int parse_shared_dynamic(LoadedObject *object) {
             result->flags_1 = dynamic[index].value;
             result->has_flags_1 = 1;
             break;
-        case DYNAMIC_INIT:
         case DYNAMIC_FINI:
         case DYNAMIC_REL:
         case DYNAMIC_REL_SIZE:
         case DYNAMIC_REL_ENTRY:
         case DYNAMIC_DEBUG:
         case DYNAMIC_TEXT_RELOCATION:
-        case DYNAMIC_INIT_ARRAY:
         case DYNAMIC_FINI_ARRAY:
-        case DYNAMIC_INIT_ARRAY_SIZE:
         case DYNAMIC_FINI_ARRAY_SIZE:
         case DYNAMIC_RUNPATH:
         case DYNAMIC_PREINIT_ARRAY:
@@ -813,10 +926,26 @@ static int parse_shared_dynamic(LoadedObject *object) {
         !mapped_range_contains(object->loads, object->load_count,
                                result->string_table, result->string_size, 0) ||
         result->flags &
-                ~(uint64_t)(DYNAMIC_FLAG_SYMBOLIC | DYNAMIC_FLAG_BIND_NOW) ||
+                ~(uint64_t)(DYNAMIC_FLAG_SYMBOLIC | DYNAMIC_FLAG_BIND_NOW |
+                            DYNAMIC_FLAG_STATIC_TLS) ||
         result->flags_1 & ~(uint64_t)DYNAMIC_FLAG_1_NOW ||
         (result->has_symbolic !=
-         ((result->flags & DYNAMIC_FLAG_SYMBOLIC) != 0))) {
+         ((result->flags & DYNAMIC_FLAG_SYMBOLIC) != 0)) ||
+        ((result->flags & DYNAMIC_FLAG_STATIC_TLS) != 0) !=
+            (object->tls_program != NULL) ||
+        (result->has_init_function &&
+         !mapped_range_contains(object->loads, object->load_count,
+                                result->init_function, 1,
+                                PROGRAM_EXECUTABLE)) ||
+        (result->has_init_array != result->has_init_array_size) ||
+        (result->has_init_array &&
+         (result->init_array_size % sizeof(uintptr_t) != 0 ||
+          result->init_array_size / sizeof(uintptr_t) >
+              MAXIMUM_INITIALIZERS ||
+          !mapped_range_contains(object->loads, object->load_count,
+                                 result->init_array,
+                                 result->init_array_size,
+                                 PROGRAM_WRITABLE)))) {
         return 0;
     }
     ObjectName soname;
@@ -998,6 +1127,11 @@ static int verify_probe_graph(const ObjectGraph *graph) {
 static int dynamic_symbol_name(const LoadedObject *object,
                                const Elf64Symbol *symbol, const char **name,
                                size_t *name_length);
+static int resolve_global_tls_symbol(const ObjectGraph *graph,
+                                     size_t requester_index,
+                                     const char *name, size_t name_length,
+                                     size_t *provider_index,
+                                     const Elf64Symbol **provider_symbol);
 
 static int dynamic_symbol_count(const LoadedObject *object,
                                 uint32_t *symbol_count) {
@@ -1061,14 +1195,25 @@ static int validate_dynamic_symbols(const LoadedObject *object) {
         const Elf64Symbol *symbol = &symbols[index];
         const char *name = NULL;
         size_t name_length = 0;
-        if (symbol->information !=
-                (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_FUNCTION) ||
+        uint8_t symbol_type = symbol->information & 0x0f;
+        uint8_t symbol_binding = symbol->information >> 4;
+        if (symbol_binding != SYMBOL_BIND_GLOBAL ||
+            (symbol_type != SYMBOL_FUNCTION && symbol_type != SYMBOL_TLS) ||
             symbol->other != SYMBOL_VISIBILITY_DEFAULT ||
             !dynamic_symbol_name(object, symbol, &name, &name_length)) {
             return 0;
         }
         if (symbol->section_index == SYMBOL_UNDEFINED) {
             if (symbol->value != 0 || symbol->size != 0) {
+                return 0;
+            }
+            continue;
+        }
+        if (symbol_type == SYMBOL_TLS) {
+            if (object->tls_program == NULL || symbol->size == 0 ||
+                symbol->value > object->tls_program->memory_size ||
+                symbol->size >
+                    object->tls_program->memory_size - symbol->value) {
                 return 0;
             }
             continue;
@@ -1085,36 +1230,233 @@ static int validate_dynamic_symbols(const LoadedObject *object) {
     return 1;
 }
 
-static int apply_relative_relocations(const LoadedObject *object,
-                                      RelocationEvidence *evidence) {
+static int plan_static_tls(ObjectGraph *graph, StaticTlsLayout *layout) {
+    zero_bytes((uint8_t *)layout, sizeof(*layout));
+    size_t cursor = 0;
+    size_t maximum_alignment = sizeof(uintptr_t);
+    for (size_t index = 0; index < graph->object_count; ++index) {
+        LoadedObject *object = &graph->objects[index];
+        object->tls_instance = 0;
+        object->tls_offset = 0;
+        object->tls_module_id = 0;
+        if (object->tls_program == NULL) {
+            continue;
+        }
+        const Elf64ProgramHeader *tls = object->tls_program;
+        size_t alignment = (size_t)tls->alignment;
+        size_t offset = 0;
+        if (alignment > maximum_alignment) {
+            maximum_alignment = alignment;
+        }
+        if (!align_size(cursor, alignment, &offset) ||
+            tls->memory_size > SIZE_MAX ||
+            offset > MAXIMUM_STATIC_TLS_BYTES ||
+            (size_t)tls->memory_size > MAXIMUM_STATIC_TLS_BYTES - offset) {
+            return 0;
+        }
+        object->tls_offset = offset;
+        object->tls_module_id = index + 1;
+        cursor = offset + (size_t)tls->memory_size;
+        ++layout->object_count;
+    }
+    if (layout->object_count == 0) {
+        return 1;
+    }
+    if (!align_size(cursor, maximum_alignment, &layout->payload_size) ||
+        layout->payload_size >
+            MAXIMUM_STATIC_TLS_BYTES - (2 * sizeof(uintptr_t)) ||
+        !round_to_pages(layout->payload_size + (2 * sizeof(uintptr_t)),
+                        &layout->mapping_size) ||
+        layout->mapping_size > MAXIMUM_STATIC_TLS_BYTES) {
+        return 0;
+    }
+    return 1;
+}
+
+static int install_static_tls(ObjectGraph *graph, StaticTlsLayout *layout) {
+    if (!plan_static_tls(graph, layout)) {
+        return 0;
+    }
+    if (layout->object_count == 0) {
+        return 1;
+    }
+    long mapped = syscall6(SYS_MMAP, 0, layout->mapping_size,
+                           PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, UINT64_MAX, 0);
+    if (syscall_failed(mapped) || mapped == 0 ||
+        (uintptr_t)mapped % PAGE_SIZE != 0) {
+        return 0;
+    }
+    layout->mapping = (uintptr_t)mapped;
+    zero_bytes((uint8_t *)layout->mapping, layout->mapping_size);
+    for (size_t index = 0; index < graph->object_count; ++index) {
+        LoadedObject *object = &graph->objects[index];
+        if (object->tls_program == NULL) {
+            continue;
+        }
+        uintptr_t source = 0;
+        uintptr_t destination = 0;
+        if (!checked_add(object->base,
+                         object->tls_program->virtual_address, &source) ||
+            !checked_add(layout->mapping, object->tls_offset, &destination)) {
+            return 0;
+        }
+        object->tls_instance = destination;
+        copy_bytes((uint8_t *)destination, (const uint8_t *)source,
+                   (size_t)object->tls_program->file_size);
+    }
+    if (!checked_add(layout->mapping, layout->payload_size,
+                     &layout->thread_pointer)) {
+        return 0;
+    }
+    uintptr_t *thread_control = (uintptr_t *)layout->thread_pointer;
+    thread_control[0] = layout->thread_pointer;
+    thread_control[1] = 0;
+    return syscall3(SYS_ARCH_PRCTL, ARCH_SET_FS, layout->thread_pointer, 0) ==
+           0;
+}
+
+static int apply_object_relocations(ObjectGraph *graph, size_t object_index,
+                                    const StaticTlsLayout *tls_layout,
+                                    RelocationEvidence *evidence) {
+    if (object_index >= graph->object_count) {
+        return 0;
+    }
+    const LoadedObject *object = &graph->objects[object_index];
     const Elf64Rela *relocations =
         (const Elf64Rela *)object->dynamic.relocations;
     size_t count = object->dynamic.relocation_size / sizeof(*relocations);
+    uint32_t symbol_count = 0;
     if (count > MAXIMUM_RELOCATIONS ||
-        (object->dynamic.has_relative_count &&
-         object->dynamic.relative_count != count)) {
+        !dynamic_symbol_count(object, &symbol_count)) {
         return 0;
     }
+    const Elf64Symbol *symbols =
+        (const Elf64Symbol *)object->dynamic.symbol_table;
     for (size_t index = 0; index < count; ++index) {
         uint32_t relocation_type = (uint32_t)relocations[index].information;
-        uint32_t symbol = (uint32_t)(relocations[index].information >> 32);
+        uint32_t symbol_index =
+            (uint32_t)(relocations[index].information >> 32);
         uintptr_t target = 0;
-        uintptr_t value = 0;
-        if (relocation_type != RELOCATION_X86_64_RELATIVE || symbol != 0 ||
-            !checked_add(object->base, relocations[index].offset, &target) ||
-            !checked_addend(object->base, relocations[index].addend, &value) ||
+        if (!checked_add(object->base, relocations[index].offset, &target) ||
             target % sizeof(uintptr_t) != 0 ||
             !mapped_range_contains(object->loads, object->load_count, target,
-                                   sizeof(uintptr_t), PROGRAM_WRITABLE) ||
-            !mapped_range_contains(object->loads, object->load_count, value, 1,
-                                   0)) {
+                                   sizeof(uintptr_t), PROGRAM_WRITABLE)) {
             return 0;
         }
-        *(volatile uintptr_t *)target = value;
-        if (*(volatile const uintptr_t *)target != value) {
+        if (relocation_type == RELOCATION_X86_64_RELATIVE) {
+            uintptr_t value = 0;
+            if (symbol_index != 0 ||
+                (object->dynamic.has_relative_count &&
+                 index >= object->dynamic.relative_count) ||
+                !checked_addend(object->base, relocations[index].addend,
+                                &value) ||
+                !mapped_range_contains(object->loads, object->load_count,
+                                       value, 1, 0)) {
+                return 0;
+            }
+            *(volatile uintptr_t *)target = value;
+            if (*(volatile const uintptr_t *)target != value) {
+                return 0;
+            }
+            ++evidence->relative;
+            continue;
+        }
+        if (object->dynamic.has_relative_count &&
+            index < object->dynamic.relative_count) {
             return 0;
         }
-        ++evidence->relative;
+        if (relocation_type != RELOCATION_X86_64_DTPMOD64 &&
+            relocation_type != RELOCATION_X86_64_DTPOFF64 &&
+            relocation_type != RELOCATION_X86_64_TPOFF64) {
+            return 0;
+        }
+        size_t provider_index = object_index;
+        const Elf64Symbol *provider_symbol = NULL;
+        if (symbol_index == 0) {
+            if (relocation_type != RELOCATION_X86_64_DTPMOD64 ||
+                relocations[index].addend != 0) {
+                return 0;
+            }
+        } else {
+            const Elf64Symbol *symbol = NULL;
+            const char *name = NULL;
+            size_t name_length = 0;
+            if (symbol_index >= symbol_count) {
+                return 0;
+            }
+            symbol = &symbols[symbol_index];
+            if ((symbol->information & 0x0f) != SYMBOL_TLS ||
+                (symbol->information >> 4) != SYMBOL_BIND_GLOBAL ||
+                symbol->other != SYMBOL_VISIBILITY_DEFAULT ||
+                !dynamic_symbol_name(object, symbol, &name, &name_length) ||
+                !resolve_global_tls_symbol(
+                    graph, object_index, name, name_length, &provider_index,
+                    &provider_symbol)) {
+                return 0;
+            }
+        }
+        const LoadedObject *provider = &graph->objects[provider_index];
+        uint64_t value = 0;
+        if (provider->tls_program == NULL || provider->tls_instance == 0 ||
+            provider->tls_module_id == 0) {
+            return 0;
+        }
+        if (relocation_type == RELOCATION_X86_64_DTPMOD64) {
+            if (relocations[index].addend != 0) {
+                return 0;
+            }
+            value = (uint64_t)provider->tls_module_id;
+        } else {
+            if (provider_symbol == NULL) {
+                return 0;
+            }
+            uintptr_t symbol_address = 0;
+            if (!checked_add(provider->tls_instance, provider_symbol->value,
+                             &symbol_address) ||
+                !checked_addend(symbol_address, relocations[index].addend,
+                                &symbol_address)) {
+                return 0;
+            }
+            uintptr_t tls_end = 0;
+            if (!checked_range(provider->tls_instance,
+                               (size_t)provider->tls_program->memory_size,
+                               &tls_end) ||
+                symbol_address < provider->tls_instance ||
+                symbol_address >= tls_end) {
+                return 0;
+            }
+            if (relocation_type == RELOCATION_X86_64_DTPOFF64) {
+                if (symbol_address < provider->tls_instance) {
+                    return 0;
+                }
+                value = (uint64_t)(symbol_address - provider->tls_instance);
+            } else {
+                uint64_t magnitude = 0;
+                if (tls_layout->thread_pointer == 0) {
+                    return 0;
+                }
+                if (symbol_address >= tls_layout->thread_pointer) {
+                    value = (uint64_t)(symbol_address -
+                                       tls_layout->thread_pointer);
+                    if (value > INT64_MAX) {
+                        return 0;
+                    }
+                } else {
+                    magnitude = (uint64_t)(tls_layout->thread_pointer -
+                                           symbol_address);
+                    if (magnitude > (uint64_t)INT64_MAX + 1) {
+                        return 0;
+                    }
+                    value = UINT64_C(0) - magnitude;
+                }
+            }
+        }
+        *(volatile uint64_t *)target = value;
+        if (*(volatile const uint64_t *)target != value) {
+            return 0;
+        }
+        ++evidence->tls;
     }
     return 1;
 }
@@ -1177,6 +1519,74 @@ static int dynamic_symbol_name(const LoadedObject *object,
     *name = candidate;
     *name_length = length;
     return 1;
+}
+
+static int find_exported_tls_symbol(const LoadedObject *object,
+                                    const char *expected_name,
+                                    size_t expected_name_length,
+                                    const Elf64Symbol **symbol) {
+    uint32_t symbol_count = 0;
+    if (object->tls_program == NULL ||
+        !dynamic_symbol_count(object, &symbol_count)) {
+        return 0;
+    }
+    const Elf64Symbol *symbols =
+        (const Elf64Symbol *)object->dynamic.symbol_table;
+    for (uint32_t index = 1; index < symbol_count; ++index) {
+        if (symbols[index].section_index == SYMBOL_UNDEFINED ||
+            (symbols[index].information & 0x0f) != SYMBOL_TLS ||
+            (symbols[index].information >> 4) != SYMBOL_BIND_GLOBAL ||
+            symbols[index].other != SYMBOL_VISIBILITY_DEFAULT ||
+            symbols[index].size == 0 ||
+            symbols[index].value > object->tls_program->memory_size ||
+            symbols[index].size >
+                object->tls_program->memory_size - symbols[index].value) {
+            continue;
+        }
+        const char *name = NULL;
+        size_t name_length = 0;
+        if (dynamic_symbol_name(object, &symbols[index], &name,
+                                &name_length) &&
+            name_length == expected_name_length &&
+            bytes_equal(name, expected_name, name_length)) {
+            *symbol = &symbols[index];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int resolve_global_tls_symbol(const ObjectGraph *graph,
+                                     size_t requester_index,
+                                     const char *name, size_t name_length,
+                                     size_t *provider_index,
+                                     const Elf64Symbol **provider_symbol) {
+    if (requester_index >= graph->object_count || name_length == 0 ||
+        name_length > MAXIMUM_SYMBOL_NAME_BYTES) {
+        return 0;
+    }
+    const LoadedObject *requester = &graph->objects[requester_index];
+    if (requester->dynamic.has_symbolic &&
+        find_exported_tls_symbol(requester, name, name_length,
+                                 provider_symbol)) {
+        *provider_index = requester_index;
+        return 1;
+    }
+    for (size_t index = 0; index < graph->object_count; ++index) {
+        if (index != requester_index &&
+            find_exported_tls_symbol(&graph->objects[index], name,
+                                     name_length, provider_symbol)) {
+            *provider_index = index;
+            return 1;
+        }
+    }
+    if (!requester->dynamic.has_symbolic &&
+        find_exported_tls_symbol(requester, name, name_length,
+                                 provider_symbol)) {
+        *provider_index = requester_index;
+        return 1;
+    }
+    return 0;
 }
 
 static int resolve_global_symbol(const ObjectGraph *graph,
@@ -1261,14 +1671,16 @@ static int apply_external_relocations(ObjectGraph *graph,
 }
 
 static int relocate_graph(ObjectGraph *graph,
+                          const StaticTlsLayout *tls_layout,
                           RelocationEvidence *evidence) {
     evidence->relative = 0;
     evidence->external = 0;
+    evidence->tls = 0;
     for (size_t index = 0; index < graph->relocation_count; ++index) {
         size_t object_index = graph->relocation_order[index];
         if (object_index >= graph->object_count ||
-            !apply_relative_relocations(&graph->objects[object_index],
-                                        evidence)) {
+            !apply_object_relocations(graph, object_index, tls_layout,
+                                      evidence)) {
             return 0;
         }
     }
@@ -1365,12 +1777,19 @@ static void load_shared_object(const ObjectName *name, uintptr_t base,
     object->temporary_size = temporary_size;
     object->header = header;
     object->headers = headers;
+    object->tls_program = NULL;
     object->load_count = 0;
     size_t load_count = 0;
     for (size_t index = 0; index < header->program_header_count; ++index) {
         const Elf64ProgramHeader *program = &headers[index];
         if (program->type != PROGRAM_LOAD) {
-            if (program->type != PROGRAM_DYNAMIC) {
+            if (program->type == PROGRAM_TLS) {
+                if (object->tls_program != NULL) {
+                    fail_with(shared_elf_failure,
+                              sizeof(shared_elf_failure) - 1);
+                }
+                object->tls_program = program;
+            } else if (program->type != PROGRAM_DYNAMIC) {
                 fail_with(shared_elf_failure,
                           sizeof(shared_elf_failure) - 1);
             }
@@ -1432,6 +1851,28 @@ static void load_shared_object(const ObjectName *name, uintptr_t base,
         fail_with(shared_elf_failure, sizeof(shared_elf_failure) - 1);
     }
     object->load_count = load_count;
+    if (object->tls_program != NULL) {
+        const Elf64ProgramHeader *tls = object->tls_program;
+        uintptr_t template_address = 0;
+        if (tls->memory_size == 0 || tls->file_size > tls->memory_size ||
+            tls->memory_size > MAXIMUM_STATIC_TLS_BYTES ||
+            tls->file_size > SIZE_MAX || tls->memory_size > SIZE_MAX ||
+            tls->flags != PROGRAM_READABLE ||
+            !is_power_of_two(tls->alignment) ||
+            tls->alignment > MAXIMUM_TLS_ALIGNMENT ||
+            tls->virtual_address % tls->alignment !=
+                tls->offset % tls->alignment ||
+            tls->offset > (uint64_t)file_size ||
+            tls->file_size > (uint64_t)file_size - tls->offset ||
+            !tls_program_matches_load(object, tls) ||
+            !checked_add(base, tls->virtual_address, &template_address) ||
+            !mapped_range_contains(object->loads, object->load_count,
+                                   template_address,
+                                   (size_t)tls->memory_size,
+                                   PROGRAM_READABLE)) {
+            fail_with(shared_elf_failure, sizeof(shared_elf_failure) - 1);
+        }
+    }
     if (!parse_shared_dynamic(object) || !validate_dynamic_symbols(object)) {
         fail_with(shared_dynamic_failure,
                   sizeof(shared_dynamic_failure) - 1);
@@ -1502,7 +1943,7 @@ static int load_dependency_graph(const DependencyNames *roots,
     return compute_relocation_order(graph);
 }
 
-static int seal_and_release_graph(const ObjectGraph *graph) {
+static int seal_graph(const ObjectGraph *graph) {
     for (size_t index = 0; index < graph->relocation_count; ++index) {
         size_t object_index = graph->relocation_order[index];
         if (object_index >= graph->object_count ||
@@ -1510,6 +1951,49 @@ static int seal_and_release_graph(const ObjectGraph *graph) {
             return 0;
         }
     }
+    return 1;
+}
+
+static int call_initializer(const LoadedObject *object, uintptr_t address,
+                            InitializerEvidence *evidence) {
+    if (!mapped_range_contains(object->loads, object->load_count, address, 1,
+                               PROGRAM_EXECUTABLE)) {
+        return 0;
+    }
+    typedef void (*Initializer)(void);
+    Initializer initializer = (Initializer)address;
+    initializer();
+    ++evidence->calls;
+    return 1;
+}
+
+static int run_initializers(const ObjectGraph *graph,
+                            InitializerEvidence *evidence) {
+    evidence->calls = 0;
+    for (size_t index = 0; index < graph->relocation_count; ++index) {
+        size_t object_index = graph->relocation_order[index];
+        if (object_index >= graph->object_count) {
+            return 0;
+        }
+        const LoadedObject *object = &graph->objects[object_index];
+        if (object->dynamic.has_init_function &&
+            !call_initializer(object, object->dynamic.init_function,
+                              evidence)) {
+            return 0;
+        }
+        const uintptr_t *array =
+            (const uintptr_t *)object->dynamic.init_array;
+        size_t count = object->dynamic.init_array_size / sizeof(*array);
+        for (size_t initializer = 0; initializer < count; ++initializer) {
+            if (!call_initializer(object, array[initializer], evidence)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int release_graph(const ObjectGraph *graph) {
     for (size_t index = 0; index < graph->object_count; ++index) {
         if (!release_shared_snapshot(&graph->objects[index])) {
             return 0;
@@ -1643,9 +2127,18 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
                       sizeof(multi_object_marker) - 1)) {
         fail_with(shared_graph_failure, sizeof(shared_graph_failure) - 1);
     }
+    StaticTlsLayout tls_layout;
+    if (!install_static_tls(&graph, &tls_layout) ||
+        tls_layout.object_count != 1 || tls_layout.payload_size != 8 ||
+        graph.objects[3].tls_instance == 0 ||
+        graph.objects[3].tls_instance + sizeof(uint64_t) !=
+            tls_layout.thread_pointer) {
+        fail_with(shared_tls_failure, sizeof(shared_tls_failure) - 1);
+    }
     RelocationEvidence evidence;
-    if (!relocate_graph(&graph, &evidence) || evidence.relative != 1 ||
-        evidence.external != 4 ||
+    if (!relocate_graph(&graph, &tls_layout, &evidence) ||
+        evidence.relative != 5 || evidence.external != 4 ||
+        evidence.tls != 1 ||
         !write_marker(relocation_marker, sizeof(relocation_marker) - 1)) {
         fail_with(shared_relocation_failure,
                   sizeof(shared_relocation_failure) - 1);
@@ -1661,22 +2154,46 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
                               &shared_symbol)) {
         fail_with(shared_symbol_failure, sizeof(shared_symbol_failure) - 1);
     }
-    if (!seal_and_release_graph(&graph)) {
+    if (!seal_graph(&graph)) {
+        fail_with(shared_map_failure, sizeof(shared_map_failure) - 1);
+    }
+    InitializerEvidence initializer_evidence;
+    if (!run_initializers(&graph, &initializer_evidence) ||
+        initializer_evidence.calls != 4 ||
+        *(volatile const uint64_t *)graph.objects[3].tls_instance !=
+            UINT64_C(0x1111111111111111)) {
+        fail_with(shared_initializer_failure,
+                  sizeof(shared_initializer_failure) - 1);
+    }
+    if (!release_graph(&graph)) {
         fail_with(shared_map_failure, sizeof(shared_map_failure) - 1);
     }
     typedef uint64_t (*SharedProbe)(uint64_t);
     SharedProbe shared_probe = (SharedProbe)shared_symbol;
     const uint64_t input = UINT64_C(0x1122334455667788);
+    const uint64_t core = UINT64_C(0x1020304050607080) +
+                          UINT64_C(0x1111111111111111) +
+                          UINT64_C(0x2222222222222222);
     const uint64_t provider =
-        input + UINT64_C(0x1111222233334444) +
-        UINT64_C(0x1020304050607080);
+        input + UINT64_C(0x1111222233334444) + core +
+        UINT64_C(0x3333333333333333);
     const uint64_t observer =
-        (input ^ UINT64_C(0x0f0ff0f05a5aa5a5)) +
-        UINT64_C(0x1020304050607080);
+        (input ^ UINT64_C(0x0f0ff0f05a5aa5a5)) + core +
+        UINT64_C(0x4444444444444444);
     const uint64_t expected =
-        provider ^ observer ^ UINT64_C(0xa5a55a5af0f00f0f);
-    if (shared_probe(input) != expected ||
-        !write_marker(external_marker, sizeof(external_marker) - 1)) {
+        provider ^ observer ^ UINT64_C(0xa5a55a5af0f00f0f) ^
+        UINT64_C(0x5555555555555555);
+    if (shared_probe(input) != expected) {
+        fail_with(shared_call_failure, sizeof(shared_call_failure) - 1);
+    }
+    if (!write_marker(static_tls_marker, sizeof(static_tls_marker) - 1)) {
+        fail_with(shared_tls_failure, sizeof(shared_tls_failure) - 1);
+    }
+    if (!write_marker(initializer_marker, sizeof(initializer_marker) - 1)) {
+        fail_with(shared_initializer_failure,
+                  sizeof(shared_initializer_failure) - 1);
+    }
+    if (!write_marker(external_marker, sizeof(external_marker) - 1)) {
         fail_with(shared_call_failure, sizeof(shared_call_failure) - 1);
     }
     if (!write_marker(pass_marker, sizeof(pass_marker) - 1)) {

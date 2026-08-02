@@ -4,16 +4,13 @@ PHDRS
     rodata PT_LOAD FLAGS(4);
     data PT_LOAD FLAGS(6);
     dynamic PT_DYNAMIC FLAGS(4);
+    tls PT_TLS FLAGS(4);
 }
 
 SECTIONS
 {
     . = SIZEOF_HEADERS;
-    .text :
-    {
-        *(.text .text.*)
-        *(.plt .plt.*)
-    } :text
+    .text : { *(.text .text.*) } :text
 
     . = ALIGN(4K);
     .rodata : { *(.rodata .rodata.*) } :rodata
@@ -21,7 +18,6 @@ SECTIONS
     .dynsym : { *(.dynsym) } :rodata
     .dynstr : { *(.dynstr) } :rodata
     .rela.dyn : { *(.rela.dyn) } :rodata
-    .rela.plt : { *(.rela.plt) } :rodata
     .dynamic : { *(.dynamic) } :rodata :dynamic
 
     . = ALIGN(4K);
@@ -36,6 +32,8 @@ SECTIONS
         KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
         KEEP(*(.init_array))
     } :data
+    .tdata : { *(.tdata .tdata.*) } :data :tls
+    .tbss (NOLOAD) : { *(.tbss .tbss.*) } :data :tls
     .bss (NOLOAD) : { *(.bss .bss.*) *(COMMON) } :data
 
     /DISCARD/ :
@@ -44,5 +42,7 @@ SECTIONS
         *(.eh_frame*)
         *(.note*)
         *(.gnu.hash*)
+        *(.rela.plt*)
+        *(.plt*)
     }
 }

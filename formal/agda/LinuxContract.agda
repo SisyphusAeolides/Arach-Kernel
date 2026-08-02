@@ -36,6 +36,7 @@ data Gate : Set where
   crossObjectCall : Gate
   boundedObjectClosure breadthFirstDiscovery : Gate
   duplicateDependencyCoalescing acyclicRelocationOrder globalSymbolScope : Gate
+  staticTlsLayout tlsRelocation initializerOrder : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -206,6 +207,14 @@ record MultiObjectGraphCertificate : Set where
     acyclicRelocationOrderEvidence : Measurement acyclicRelocationOrder
     globalSymbolScopeEvidence : Measurement globalSymbolScope
 
+record RuntimeInitializationCertificate : Set where
+  constructor runtimeInitializationCertificate
+  field
+    multiObjectGraph : MultiObjectGraphCertificate
+    staticTlsLayoutEvidence : Measurement staticTlsLayout
+    tlsRelocationEvidence : Measurement tlsRelocation
+    initializerOrderEvidence : Measurement initializerOrder
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -317,3 +326,10 @@ multiObjectGraphRequiresDependencyGraph :
   MultiObjectGraphCertificate -> DependencyGraphCertificate
 multiObjectGraphRequiresDependencyGraph certificate =
   MultiObjectGraphCertificate.dependencyGraph certificate
+
+-- Runtime initialization structurally retains bounded closure, provider-first
+-- relocation, and deterministic process-global symbol scope.
+runtimeInitializationRequiresMultiObjectGraph :
+  RuntimeInitializationCertificate -> MultiObjectGraphCertificate
+runtimeInitializationRequiresMultiObjectGraph certificate =
+  RuntimeInitializationCertificate.multiObjectGraph certificate
