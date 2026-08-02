@@ -8,19 +8,24 @@ const PASS: &[u8] = b"ARACH_C0_RING3_SYSCALL_PASS\n";
 const THREAD_PASS: &[u8] = b"ARACH_C1_THREAD_FUTEX_PASS\n";
 const ROBUST_PASS: &[u8] = b"ARACH_C1_ROBUST_FUTEX_PASS\n";
 const SIGNAL_PASS: &[u8] = b"ARACH_C1_SIGNAL_RETURN_PASS\n";
+const FILE_MMAP_PASS: &[u8] = b"ARACH_C2_FILE_MMAP_PASS\n";
+const MPROTECT_PASS: &[u8] = b"ARACH_C2_MPROTECT_PASS\n";
 const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
 const PANIC: &[u8] = b"ARACH_C0_RING3_PANIC\n";
 const EXEC_PATH: &[u8] = b"/exec-target\0";
 const RUNTIME_LINKER_PATH: &[u8] = b"/arach-ld.so\0";
+const MMAP_PATH: &[u8] = b"/mmap-probe\0";
 const EXEC_ARG0: &[u8] = b"exec-target\0";
 const EXEC_ENV0: &[u8] = b"ARACH_EXEC_TRANSACTION=1\0";
 const EXEC_TARGET: &[u8] = include_bytes!(env!("ARACH_EXEC_TARGET_IMAGE_PATH"));
 const RUNTIME_LINKER: &[u8] = include_bytes!(env!("ARACH_RUNTIME_LINKER_IMAGE_PATH"));
+const MAPPED_CODE: &[u8] = &[0xb8, 42, 0, 0, 0, 0xc3];
 
 const SYS_WRITE: usize = 1;
 const SYS_READ: usize = 0;
 const SYS_CLOSE: usize = 3;
 const SYS_MMAP: usize = 9;
+const SYS_MPROTECT: usize = 10;
 const SYS_MUNMAP: usize = 11;
 const SYS_BRK: usize = 12;
 const SYS_RT_SIGACTION: usize = 13;
@@ -71,6 +76,7 @@ const ARCH_GET_FS: usize = 0x1003;
 
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
+const PROT_EXEC: usize = 0x4;
 const MAP_PRIVATE: usize = 0x02;
 const MAP_ANONYMOUS: usize = 0x20;
 
@@ -526,6 +532,83 @@ pub extern "C" fn _start() -> ! {
     }
     // SAFETY: The address and length exactly describe the mapping above.
     if unsafe { linux_syscall3(SYS_MUNMAP, mapped as usize, 4096, 0) } != 0 {
+        fail();
+    }
+
+    // Snapshot a regular file into private frames independently of the file
+    // cursor. The six bytes encode `mov eax, 42; ret` for this x86-64 probe.
+    let mapped_file = unsafe {
+        linux_syscall3(
+            SYS_OPEN,
+            MMAP_PATH.as_ptr() as usize,
+            O_CREAT | O_EXCL | O_RDWR,
+            0,
+        )
+    };
+    if mapped_file < 3 || !write_all(mapped_file as usize, MAPPED_CODE) {
+        fail();
+    }
+    let mapped_code = unsafe {
+        linux_syscall6(
+            SYS_MMAP,
+            0,
+            4096,
+            PROT_READ,
+            MAP_PRIVATE,
+            mapped_file as usize,
+            0,
+        )
+    };
+    if mapped_code <= 0 || mapped_code as usize & 0xfff != 0 {
+        fail();
+    }
+    // SAFETY: The file mapping is read-only and spans one complete page.
+    unsafe {
+        for (index, expected) in MAPPED_CODE.iter().copied().enumerate() {
+            if core::ptr::read_volatile((mapped_code as *const u8).add(index)) != expected {
+                fail();
+            }
+        }
+        if core::ptr::read_volatile((mapped_code as *const u8).add(4095)) != 0 {
+            fail();
+        }
+    }
+    if unsafe { linux_syscall1(SYS_CLOSE, mapped_file as usize) } != 0
+        || !write_all(1, FILE_MMAP_PASS)
+    {
+        fail();
+    }
+
+    // W+X is rejected without changing the mapping. The admitted whole-range
+    // R-to-RX transition must survive the syscall-return CR3 reload before
+    // control is transferred into the mapped file bytes.
+    if unsafe {
+        linux_syscall3(
+            SYS_MPROTECT,
+            mapped_code as usize,
+            4096,
+            PROT_READ | PROT_WRITE | PROT_EXEC,
+        )
+    } != -22
+        || unsafe {
+            linux_syscall3(
+                SYS_MPROTECT,
+                mapped_code as usize,
+                4096,
+                PROT_READ | PROT_EXEC,
+            )
+        } != 0
+    {
+        fail();
+    }
+    // SAFETY: The preceding transition made the complete mapped page RX, and
+    // the snapshotted instruction sequence has the declared C ABI signature.
+    let mapped_entry: extern "C" fn() -> u32 =
+        unsafe { core::mem::transmute(mapped_code as usize) };
+    if mapped_entry() != 42 || !write_all(1, MPROTECT_PASS) {
+        fail();
+    }
+    if unsafe { linux_syscall3(SYS_MUNMAP, mapped_code as usize, 4096, 0) } != 0 {
         fail();
     }
 

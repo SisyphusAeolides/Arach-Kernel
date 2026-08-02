@@ -19,6 +19,8 @@ data Gate : Set where
   atomicImageExchange execStateReset deferredImageReap rollbackPreservesImage : Gate
   atomicExecutablePairSnapshot measuredRuntimeLinker compositeImageInstall : Gate
   linuxAuxiliaryVector runtimeLinkerEntry mainEntryTransfer : Gate
+  generationBoundDescriptorSnapshot privateFileMapping : Gate
+  writeXorExecuteTransition mappedCodeEntry : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -113,6 +115,15 @@ record DynamicExecCertificate : Set where
     runtimeLinkerEntryEvidence : Measurement runtimeLinkerEntry
     mainEntryTransferEvidence : Measurement mainEntryTransfer
 
+record FileMappingCertificate : Set where
+  constructor fileMappingCertificate
+  field
+    dynamicExec : DynamicExecCertificate
+    generationBoundDescriptorSnapshotEvidence : Measurement generationBoundDescriptorSnapshot
+    privateFileMappingEvidence : Measurement privateFileMapping
+    writeXorExecuteTransitionEvidence : Measurement writeXorExecuteTransition
+    mappedCodeEntryEvidence : Measurement mappedCodeEntry
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -150,3 +161,10 @@ dynamicExecRequiresStaticReplacement :
   DynamicExecCertificate -> ExecReplacementCertificate
 dynamicExecRequiresStaticReplacement certificate =
   DynamicExecCertificate.staticReplacement certificate
+
+-- File mapping qualification structurally retains the measured dynamic-entry
+-- contract on which its process image and runtime root depend.
+fileMappingRequiresDynamicExec :
+  FileMappingCertificate -> DynamicExecCertificate
+fileMappingRequiresDynamicExec certificate =
+  FileMappingCertificate.dynamicExec certificate

@@ -63,6 +63,13 @@ pub struct FileSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileRangeSnapshot {
+    pub inode_id: u32,
+    pub file_bytes: usize,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilePairSnapshot {
     pub executable: FileSnapshot,
     pub interpreter: FileSnapshot,
@@ -356,6 +363,40 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
         };
         self.handles[handle_index].cursor = cursor + copied;
         Ok(copied)
+    }
+
+    /// Copies a regular-file range through an exact generation-owned handle
+    /// without changing that handle's cursor. The file identity, complete
+    /// length, and copied bytes all come from the same namespace lock hold.
+    pub fn read_handle_range_snapshot(
+        &mut self,
+        owner: ProcessHandle,
+        token: u64,
+        offset: usize,
+        output: &mut [u8],
+    ) -> Result<FileRangeSnapshot, VfsError> {
+        self.ensure_initialized()?;
+        let handle_index = self.find_handle(owner, token)?;
+        let handle = self.handles[handle_index];
+        if handle.open_flags & flags::READ_INTENT == 0 {
+            return Err(VfsError::PermissionDenied);
+        }
+        let node_index = usize::from(handle.node);
+        let node = &self.nodes[node_index];
+        if node.kind != NodeKind::File {
+            return Err(VfsError::NotFile);
+        }
+        if offset > node.content_len {
+            return Err(VfsError::InvalidSeek);
+        }
+        let inode_id = u32::try_from(node_index + 1).map_err(|_| VfsError::Capacity)?;
+        let copied = core::cmp::min(output.len(), node.content_len - offset);
+        output[..copied].copy_from_slice(&node.content[offset..offset + copied]);
+        Ok(FileRangeSnapshot {
+            inode_id,
+            file_bytes: node.content_len,
+            bytes: copied,
+        })
     }
 
     pub fn write(
@@ -776,6 +817,17 @@ pub fn read(owner: ProcessHandle, token: u64, output: &mut [u8]) -> Result<usize
     KERNEL_VFS.lock().read(owner, token, output)
 }
 
+pub fn read_handle_range_snapshot(
+    owner: ProcessHandle,
+    token: u64,
+    offset: usize,
+    output: &mut [u8],
+) -> Result<FileRangeSnapshot, VfsError> {
+    KERNEL_VFS
+        .lock()
+        .read_handle_range_snapshot(owner, token, offset, output)
+}
+
 pub fn write(owner: ProcessHandle, token: u64, input: &[u8], now: u64) -> Result<usize, VfsError> {
     KERNEL_VFS.lock().write(owner, token, input, now)
 }
@@ -980,6 +1032,51 @@ mod tests {
             })
         );
         assert_eq!(&snapshot[..6], b"abc\0\0z");
+    }
+
+    #[test]
+    fn handle_range_snapshot_is_generation_bound_and_cursor_stable() {
+        let mut vfs = TestVfs::new();
+        let exact_owner = owner(12, 4);
+        let handle = vfs
+            .open(
+                exact_owner,
+                b"/mapped",
+                flags::READ_INTENT | flags::WRITE_INTENT | flags::CREATE_INTENT,
+                1,
+            )
+            .unwrap();
+        vfs.write(exact_owner, handle, b"abcdef", 2).unwrap();
+        vfs.seek(exact_owner, handle, 2, seek::FROM_START).unwrap();
+        let mut range = [0_u8; 3];
+        assert_eq!(
+            vfs.read_handle_range_snapshot(exact_owner, handle, 1, &mut range),
+            Ok(FileRangeSnapshot {
+                inode_id: 2,
+                file_bytes: 6,
+                bytes: 3,
+            })
+        );
+        assert_eq!(&range, b"bcd");
+        let mut cursor_byte = [0_u8; 1];
+        assert_eq!(vfs.read(exact_owner, handle, &mut cursor_byte), Ok(1));
+        assert_eq!(cursor_byte, [b'c']);
+
+        let recycled = owner(12, 5);
+        assert_eq!(
+            vfs.read_handle_range_snapshot(recycled, handle, 0, &mut range),
+            Err(VfsError::InvalidHandle)
+        );
+        vfs.close(exact_owner, handle).unwrap();
+
+        let write_only = vfs
+            .open(exact_owner, b"/mapped", flags::WRITE_INTENT, 3)
+            .unwrap();
+        assert_eq!(
+            vfs.read_handle_range_snapshot(exact_owner, write_only, 0, &mut range),
+            Err(VfsError::PermissionDenied)
+        );
+        vfs.close(exact_owner, write_only).unwrap();
     }
 
     #[test]

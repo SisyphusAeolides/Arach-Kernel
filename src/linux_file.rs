@@ -5,7 +5,7 @@
 //! underlying VFS continues to enforce the process-owned capability. The table
 //! is fixed-capacity and allocation-free.
 
-use crate::akashic_vfs::{self, NodeKind, Stat, VfsError};
+use crate::akashic_vfs::{self, FileRangeSnapshot, NodeKind, Stat, VfsError};
 use crate::linux_eventfd::{READY_IN, READY_OUT};
 use crate::process::lifecycle::ProcessHandle;
 use crate::sync::SpinLock;
@@ -180,6 +180,19 @@ pub fn read(owner: ProcessHandle, fd: u32, output: &mut [u8]) -> Result<usize, F
     akashic_vfs::read(owner, slot.capability, output).map_err(FileError::from)
 }
 
+/// Takes a position-independent file snapshot through a descriptor owned by
+/// this exact process generation. The descriptor cursor is left unchanged.
+pub fn snapshot_range(
+    owner: ProcessHandle,
+    fd: u32,
+    offset: usize,
+    output: &mut [u8],
+) -> Result<FileRangeSnapshot, FileError> {
+    let slot = slot_for(owner, fd)?;
+    akashic_vfs::read_handle_range_snapshot(owner, slot.capability, offset, output)
+        .map_err(FileError::from)
+}
+
 pub fn write(owner: ProcessHandle, fd: u32, input: &[u8], now: u64) -> Result<usize, FileError> {
     let slot = slot_for(owner, fd)?;
     akashic_vfs::write(owner, slot.capability, input, now).map_err(FileError::from)
@@ -280,6 +293,10 @@ mod tests {
         pid: 0x4105,
         generation: 7,
     };
+    const SNAPSHOT_OWNER: ProcessHandle = ProcessHandle {
+        pid: 0x4106,
+        generation: 7,
+    };
 
     #[test]
     fn regular_file_round_trip_uses_linux_descriptors() {
@@ -296,6 +313,35 @@ mod tests {
         assert_eq!(&output[..5], b"arach");
         assert_eq!(fstat(ROUND_TRIP_OWNER, fd).unwrap().size_bytes, 5);
         close(ROUND_TRIP_OWNER, fd).unwrap();
+        unlink(path).unwrap();
+    }
+
+    #[test]
+    fn descriptor_snapshot_preserves_cursor_and_access_mode() {
+        let path = b"/linux-file-snapshot";
+        let fd = open(SNAPSHOT_OWNER, path, O_CREAT | O_EXCL | O_RDWR, 1).unwrap();
+        assert_eq!(write(SNAPSHOT_OWNER, fd, b"mapped-bytes", 2), Ok(12));
+        assert_eq!(
+            seek(SNAPSHOT_OWNER, fd, 3, akashic_vfs::seek::FROM_START),
+            Ok(3)
+        );
+        let mut snapshot = [0_u8; 6];
+        let range = snapshot_range(SNAPSHOT_OWNER, fd, 1, &mut snapshot).unwrap();
+        assert_ne!(range.inode_id, 0);
+        assert_eq!(range.file_bytes, 12);
+        assert_eq!(range.bytes, 6);
+        assert_eq!(&snapshot, b"apped-");
+        let mut current = [0_u8; 1];
+        assert_eq!(read(SNAPSHOT_OWNER, fd, &mut current), Ok(1));
+        assert_eq!(current, [b'p']);
+        close(SNAPSHOT_OWNER, fd).unwrap();
+
+        let write_only = open(SNAPSHOT_OWNER, path, O_WRONLY, 3).unwrap();
+        assert_eq!(
+            snapshot_range(SNAPSHOT_OWNER, write_only, 0, &mut snapshot),
+            Err(FileError::Vfs(VfsError::PermissionDenied))
+        );
+        close(SNAPSHOT_OWNER, write_only).unwrap();
         unlink(path).unwrap();
     }
 

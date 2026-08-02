@@ -40,12 +40,18 @@ containing all of the following evidence from the same bundle:
 - `ARACH_C1_SIGNAL_RETURN_PASS` was emitted after a blocked self-signal became
   pending, unmasking delivered an x86-64 `SA_SIGINFO` frame, and the handler
   returned through the kernel's exact-frame `rt_sigreturn` path;
+- `ARACH_C2_FILE_MMAP_PASS` was emitted after a generation-bound descriptor
+  snapshot populated a private page, retained zero fill, and survived source
+  descriptor close;
+- `ARACH_C2_MPROTECT_PASS` was emitted after W+X rejection, an exact R-to-RX
+  transition, syscall-return TLB flush, and execution from the mapped page;
 - `ARACH_C1_EXIT_GROUP_ARMED` was emitted only after an independently
   scheduled cloned peer woke the leader and blocked; Push then emitted
   `[PID 1] child 2 exited with status 0` only after `exit_group` retired that
   peer and published the leader as the sole waitable process zombie;
 - `ARACH_C1_LINUX_SYSCALL_PASS` was emitted after the Linux personality
-  exercised identity, anonymous memory, `brk`, shared-address-space clone,
+  exercised identity, anonymous and private file memory, `mprotect`, `brk`,
+  shared-address-space clone,
   shared descriptor access, independent private robust-futex and
   clear-child-tid block/wake paths, kernel owner-death publication, measured
   signal delivery/return, bounded whole-group exit, and clean supervisor reap;

@@ -4,8 +4,9 @@ This bounded `no_std` ELF is qualification input, not a desktop or production
 service. It is launched with Arach's Linux x86-64 execution personality and
 proves the first live userspace slice: `write`, `read`, `close`, `eventfd2`,
 `poll`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `getpid`, `gettid`,
-`getppid`, anonymous `mmap`, exact-range `munmap`, `brk`, private `futex`, and
-transactional static/`PT_INTERP` `execve`, and `exit_group`.
+`getppid`, anonymous and eager private file `mmap`, exact-range `mprotect` and
+`munmap`, `brk`, private `futex`, transactional static/`PT_INTERP` `execve`, and
+`exit_group`.
 The probe checks both normal and semaphore eventfd semantics, including
 non-sleeping `EAGAIN` on an empty counter, and verifies that poll/epoll
 readiness clears after the eventfd is drained. Its single-process futex gate
@@ -14,6 +15,12 @@ wake. It writes
 `ARACH_C0_RING3_SYSCALL_PASS` after entering ring 3 and
 `ARACH_C1_LINUX_SYSCALL_PASS` only after every Linux operation succeeds. Both
 markers must come from the exact measured bundle.
+
+Before that aggregate marker, the probe writes a six-byte x86-64 function to an
+Akashic regular file, maps it read-only, verifies the snapshot and zero-filled
+tail, closes the descriptor, rejects W+X, changes the complete VMA to RX, and
+executes it. `ARACH_C2_FILE_MMAP_PASS` and `ARACH_C2_MPROTECT_PASS` distinguish
+those two live gates.
 
 The probe writes a PIE main ELF and a separately built freestanding C runtime
 linker into Akashic VFS, then calls `execve` with bounded argv and environment

@@ -53,6 +53,10 @@ data Gate
   | LinuxAuxiliaryVector
   | RuntimeLinkerEntry
   | MainEntryTransfer
+  | GenerationBoundDescriptorSnapshot
+  | PrivateFileMapping
+  | WriteXorExecuteTransition
+  | MappedCodeEntry
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -171,6 +175,18 @@ record DynamicExecCertificate where
   runtimeLinkerEntry : Measurement RuntimeLinkerEntry
   mainEntryTransfer : Measurement MainEntryTransfer
 
+||| Runtime file mapping remains downstream of measured dynamic entry. A
+||| certificate must retain the exact descriptor-generation snapshot, private
+||| frame ownership, rollback-safe W^X transition, and observed mapped entry.
+public export
+record FileMappingCertificate where
+  constructor MkFileMappingCertificate
+  dynamicExec : DynamicExecCertificate
+  generationBoundDescriptorSnapshot : Measurement GenerationBoundDescriptorSnapshot
+  privateFileMapping : Measurement PrivateFileMapping
+  writeXorExecuteTransition : Measurement WriteXorExecuteTransition
+  mappedCodeEntry : Measurement MappedCodeEntry
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -211,3 +227,10 @@ public export
 dynamicExecRequiresStaticReplacement :
   DynamicExecCertificate -> ExecReplacementCertificate
 dynamicExecRequiresStaticReplacement certificate = certificate.staticReplacement
+
+||| File-backed executable mappings cannot be projected without the complete
+||| measured dynamic-execution contract that precedes them.
+public export
+fileMappingRequiresDynamicExec :
+  FileMappingCertificate -> DynamicExecCertificate
+fileMappingRequiresDynamicExec certificate = certificate.dynamicExec

@@ -387,6 +387,9 @@ static CREST_PRESENT_STAGING: SpinLock<[u8; MAXIMUM_CREST_PRESENT_BYTES]> =
 static AKASHIC_IO_STAGING: SpinLock<[u8; MAXIMUM_AKASHIC_IO_BYTES]> =
     SpinLock::new([0; MAXIMUM_AKASHIC_IO_BYTES]);
 #[cfg(target_os = "none")]
+static MMAP_FILE_STAGING: SpinLock<[u8; crate::akashic_vfs::MAXIMUM_FILE_BYTES]> =
+    SpinLock::new([0; crate::akashic_vfs::MAXIMUM_FILE_BYTES]);
+#[cfg(target_os = "none")]
 static EXEC_STAGING: SpinLock<ExecStaging> = SpinLock::new(ExecStaging::EMPTY);
 
 #[cfg(target_os = "none")]
@@ -1399,6 +1402,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::ArchPrctl) => linux_arch_prctl(arguments),
         Some(crate::process::abi::LinuxSyscall::ClockGettime) => linux_clock_gettime(arguments),
         Some(crate::process::abi::LinuxSyscall::Mmap) => linux_mmap(arguments),
+        Some(crate::process::abi::LinuxSyscall::Mprotect) => linux_mprotect(arguments),
         Some(crate::process::abi::LinuxSyscall::Munmap) => linux_munmap(arguments),
         Some(crate::process::abi::LinuxSyscall::Brk) => linux_brk(arguments),
         Some(crate::process::abi::LinuxSyscall::Eventfd2) => linux_eventfd2(arguments),
@@ -2361,35 +2365,87 @@ fn linux_epoll_pwait(arguments: [u64; 6]) -> isize {
 
 #[cfg(target_os = "none")]
 fn linux_mmap(arguments: [u64; 6]) -> isize {
-    const PROT_READ: u64 = 0x1;
-    const PROT_WRITE: u64 = 0x2;
-    const PROT_EXEC: u64 = 0x4;
     const MAP_PRIVATE: u64 = 0x02;
     const MAP_ANONYMOUS: u64 = 0x20;
     const MAP_STACK: u64 = 0x20_000;
     const MAP_NORESERVE: u64 = 0x4000;
     let [hint, length, prot, flags, fd, offset] = arguments;
+    let Some(permissions) = linux_mapping_permissions(prot) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(length) = usize::try_from(length) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let Some(rounded_length) = length
+        .checked_add(PAGE_SIZE - 1)
+        .map(|value| value & !(PAGE_SIZE - 1))
+    else {
+        return ERROR_INVALID_ARGUMENT;
+    };
     if length == 0
-        || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
-        || prot & PROT_READ == 0
-        || prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0
-        || flags & (MAP_PRIVATE | MAP_ANONYMOUS) != (MAP_PRIVATE | MAP_ANONYMOUS)
+        || length > crate::process::x86_64::LINUX_MMAP_MAXIMUM_BYTES
+        || flags & MAP_PRIVATE == 0
         || flags & !(MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_NORESERVE) != 0
-        || fd != u64::MAX
-        || offset != 0
     {
         return ERROR_INVALID_ARGUMENT;
     }
-    let permissions = crate::process::install::MappingPermissions {
-        readable: true,
-        writable: prot & PROT_WRITE != 0,
-        executable: prot & PROT_EXEC != 0,
+
+    let result = if flags & MAP_ANONYMOUS != 0 {
+        if fd != u64::MAX || offset != 0 {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        crate::process::runtime::linux_mmap_current(hint, length, permissions)
+    } else {
+        if flags & MAP_STACK != 0
+            || offset & (PAGE_SIZE as u64 - 1) != 0
+            || rounded_length > crate::akashic_vfs::MAXIMUM_FILE_BYTES
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        let Ok(fd) = u32::try_from(fd) else {
+            return ERROR_BAD_FILE_DESCRIPTOR;
+        };
+        let Ok(offset) = usize::try_from(offset) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let owner = match current_akashic_owner() {
+            Ok(owner) => owner,
+            Err(error) => return error,
+        };
+        let mut staging = MMAP_FILE_STAGING.lock();
+        let snapshot = match crate::linux_file::snapshot_range(
+            owner,
+            fd,
+            offset,
+            &mut staging[..rounded_length],
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return map_linux_file_error(error),
+        };
+        let Some(remaining) = snapshot.file_bytes.checked_sub(offset) else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        let Some(file_span) = remaining
+            .checked_add(PAGE_SIZE - 1)
+            .map(|value| value & !(PAGE_SIZE - 1))
+        else {
+            return ERROR_INVALID_ARGUMENT;
+        };
+        if snapshot.inode_id == 0
+            || remaining == 0
+            || rounded_length > file_span
+            || snapshot.bytes != rounded_length.min(remaining)
+        {
+            return ERROR_INVALID_ARGUMENT;
+        }
+        crate::process::runtime::linux_mmap_file_current(
+            hint,
+            length,
+            permissions,
+            &staging[..snapshot.bytes],
+        )
     };
-    match crate::process::runtime::linux_mmap_current(
-        hint,
-        usize::try_from(length).unwrap_or(usize::MAX),
-        permissions,
-    ) {
+    match result {
         Ok(address) => isize::try_from(address).unwrap_or(-75),
         Err(crate::process::runtime::ProcessRuntimeError::Backend(
             crate::process::x86_64::FrameBackedError::CapacityExceeded,
@@ -2399,6 +2455,44 @@ fn linux_mmap(arguments: [u64; 6]) -> isize {
         )) => ERROR_OUT_OF_MEMORY,
         Err(_) => ERROR_INVALID_ARGUMENT,
     }
+}
+
+#[cfg(target_os = "none")]
+fn linux_mprotect(arguments: [u64; 6]) -> isize {
+    let [address, length, prot, _, _, _] = arguments;
+    let Some(permissions) = linux_mapping_permissions(prot) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let Ok(length) = usize::try_from(length) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    match crate::process::runtime::linux_mprotect_current(address, length, permissions) {
+        Ok(()) => 0,
+        Err(crate::process::runtime::ProcessRuntimeError::Backend(
+            crate::process::x86_64::FrameBackedError::Memory(_),
+        )) => ERROR_OUT_OF_MEMORY,
+        Err(_) => ERROR_INVALID_ARGUMENT,
+    }
+}
+
+#[cfg(target_os = "none")]
+const fn linux_mapping_permissions(
+    prot: u64,
+) -> Option<crate::process::install::MappingPermissions> {
+    const PROT_READ: u64 = 0x1;
+    const PROT_WRITE: u64 = 0x2;
+    const PROT_EXEC: u64 = 0x4;
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
+        || prot & PROT_READ == 0
+        || prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0
+    {
+        return None;
+    }
+    Some(crate::process::install::MappingPermissions {
+        readable: true,
+        writable: prot & PROT_WRITE != 0,
+        executable: prot & PROT_EXEC != 0,
+    })
 }
 
 #[cfg(target_os = "none")]

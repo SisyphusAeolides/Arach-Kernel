@@ -19,6 +19,8 @@ const PAGE_ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
 const ENTRY_PRESENT: u64 = 1 << 0;
 const ENTRY_WRITABLE: u64 = 1 << 1;
 const ENTRY_USER: u64 = 1 << 2;
+const ENTRY_ACCESSED: u64 = 1 << 5;
+const ENTRY_DIRTY: u64 = 1 << 6;
 const ENTRY_HUGE: u64 = 1 << 7;
 const ENTRY_NO_EXECUTE: u64 = 1 << 63;
 const USER_PML4_ENTRIES: usize = 256;
@@ -303,8 +305,8 @@ pub struct FrameBackedMapping {
 struct MappingRecord {
     occupied: bool,
     sealed: bool,
-    /// Runtime anonymous mappings may be removed by Linux `munmap`.  Static
-    /// ELF and bootstrap mappings remain owned for the process lifetime.
+    /// Runtime private mappings may be removed by Linux `munmap`. Static ELF
+    /// and bootstrap mappings remain owned for the process lifetime.
     releasable: bool,
     /// The process heap is a runtime VMA with `brk` growth semantics rather
     /// than an ordinary `mmap` range.  It is never accepted by `munmap`.
@@ -647,19 +649,39 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         Ok(())
     }
 
-    /// Map a bounded anonymous Linux mapping into a committed process.
-    ///
-    /// This is deliberately narrower than the eventual Linux `mmap` ABI:
-    /// file-backed mappings, fixed mappings, and write/execute pages are not
-    /// admitted.  Every returned address has real zeroed frames and user PTEs
-    /// behind it, so a caller cannot receive an address that merely looks
-    /// allocated and then fault on first access.
+    /// Maps a bounded anonymous private Linux range into a committed process.
+    /// Every returned address has real zeroed frames and user PTEs behind it.
     pub fn linux_mmap_anonymous(
         &mut self,
         process: &ProcessImageHandle,
         hint: u64,
         length: usize,
         permissions: MappingPermissions,
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        self.linux_mmap_private(process, hint, length, permissions, &[])
+    }
+
+    /// Eagerly snapshots initialized bytes into a bounded private mapping.
+    /// The remaining bytes in the page-rounded range stay allocator-zeroed,
+    /// and no reference to the source descriptor survives this transaction.
+    pub fn linux_mmap_file_private(
+        &mut self,
+        process: &ProcessImageHandle,
+        hint: u64,
+        length: usize,
+        permissions: MappingPermissions,
+        initialized: &[u8],
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        self.linux_mmap_private(process, hint, length, permissions, initialized)
+    }
+
+    fn linux_mmap_private(
+        &mut self,
+        process: &ProcessImageHandle,
+        hint: u64,
+        length: usize,
+        permissions: MappingPermissions,
+        initialized: &[u8],
     ) -> Result<u64, FrameBackedError<Memory::Error>> {
         let slot_index = self.process_slot(process)?;
         if self.active_slot.is_some()
@@ -674,6 +696,9 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             .checked_add(PAGE_SIZE - 1)
             .map(|value| value & !(PAGE_SIZE - 1))
             .ok_or(FrameBackedError::InvalidRange)?;
+        if initialized.len() > length {
+            return Err(FrameBackedError::InvalidRange);
+        }
         let pages_needed = length / PAGE_SIZE;
         let mapping_index = (0..self.slots[slot_index].mapping_count)
             .find(|index| !self.slots[slot_index].mappings[*index].occupied)
@@ -690,6 +715,10 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         let page_start = self
             .free_page_run(slot_index, pages_needed)
             .ok_or(FrameBackedError::CapacityExceeded)?;
+        let first_page =
+            u16::try_from(page_start).map_err(|_| FrameBackedError::CapacityExceeded)?;
+        let page_count =
+            u16::try_from(pages_needed).map_err(|_| FrameBackedError::CapacityExceeded)?;
         let base = self.find_linux_mmap_base(slot_index, hint, length)?;
 
         // Keep the mapping record empty until all leaf entries have been
@@ -718,19 +747,20 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
                     return Err(error);
                 }
             };
-            let entry = frame.as_u64()
-                | ENTRY_PRESENT
-                | ENTRY_USER
-                | if permissions.writable {
-                    ENTRY_WRITABLE
-                } else {
-                    0
+            let source_start = page * PAGE_SIZE;
+            if source_start < initialized.len() {
+                let source_end = (source_start + PAGE_SIZE).min(initialized.len());
+                if let Err(error) =
+                    self.memory
+                        .write_bytes(frame, 0, &initialized[source_start..source_end])
+                {
+                    let original = FrameBackedError::Memory(error);
+                    self.release_owned_frame(slot_index, frame)?;
+                    self.rollback_linux_mapping_pages(slot_index, page_start, allocated)?;
+                    return Err(original);
                 }
-                | if permissions.executable {
-                    0
-                } else {
-                    ENTRY_NO_EXECUTE
-                };
+            }
+            let entry = user_mapping_entry(frame, permissions);
             if let Err(error) = self.memory.write_entry(table, index, entry) {
                 self.release_owned_frame(slot_index, frame)?;
                 self.rollback_linux_mapping_pages(slot_index, page_start, allocated)?;
@@ -751,10 +781,8 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             generation: self.slots[slot_index].generation,
             virtual_address: base,
             memory_size: length,
-            first_page: u16::try_from(page_start)
-                .map_err(|_| FrameBackedError::CapacityExceeded)?,
-            page_count: u16::try_from(pages_needed)
-                .map_err(|_| FrameBackedError::CapacityExceeded)?,
+            first_page,
+            page_count,
             permissions,
         };
         self.slots[slot_index].mapping_count =
@@ -789,7 +817,139 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         self.linux_mmap_anonymous(&process, hint, length, permissions)
     }
 
-    /// Remove one complete anonymous mapping. Partial unmaps are intentionally
+    pub fn linux_mmap_file_for_root(
+        &mut self,
+        address_space_root: u64,
+        hint: u64,
+        length: usize,
+        permissions: MappingPermissions,
+        initialized: &[u8],
+    ) -> Result<u64, FrameBackedError<Memory::Error>> {
+        let process = self
+            .slots
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| {
+                slot.phase == SpacePhase::Committed
+                    && slot.generation != 0
+                    && slot.process_info.address_space_root == Some(address_space_root)
+            })
+            .map(|(index, slot)| ProcessImageHandle::new(index as u16, slot.generation))
+            .ok_or(FrameBackedError::InvalidHandle)?;
+        self.linux_mmap_file_private(&process, hint, length, permissions, initialized)
+    }
+
+    /// Changes one complete private mapping while preserving W^X. Partial
+    /// ranges are rejected until VMA split/merge bookkeeping is admitted.
+    /// Every leaf is preflighted before mutation, and a failed write restores
+    /// all leaves already changed before the mapping record can be updated.
+    pub fn linux_mprotect(
+        &mut self,
+        process: &ProcessImageHandle,
+        virtual_address: u64,
+        length: usize,
+        permissions: MappingPermissions,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let slot_index = self.process_slot(process)?;
+        if self.active_slot.is_some()
+            || virtual_address & (PAGE_SIZE as u64 - 1) != 0
+            || length == 0
+            || !permissions.readable
+            || permissions.writable && permissions.executable
+        {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        let length = length
+            .checked_add(PAGE_SIZE - 1)
+            .map(|value| value & !(PAGE_SIZE - 1))
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let mapping_index = self.slots[slot_index]
+            .mappings
+            .iter()
+            .position(|mapping| {
+                mapping.occupied
+                    && mapping.sealed
+                    && mapping.releasable
+                    && !mapping.heap
+                    && mapping.generation == self.slots[slot_index].generation
+                    && mapping.virtual_address == virtual_address
+                    && mapping.memory_size == length
+            })
+            .ok_or(FrameBackedError::InvalidRange)?;
+        let mapping = self.slots[slot_index].mappings[mapping_index];
+        if usize::from(mapping.page_count)
+            .checked_mul(PAGE_SIZE)
+            .is_none_or(|mapped_bytes| mapped_bytes != mapping.memory_size)
+            || usize::from(mapping.first_page)
+                .checked_add(usize::from(mapping.page_count))
+                .is_none_or(|end| end > self.slots[slot_index].pages.len())
+        {
+            return Err(FrameBackedError::CorruptHierarchy);
+        }
+        for page in 0..usize::from(mapping.page_count) {
+            let (_, _, entry) = self.checked_mapping_leaf(slot_index, mapping, page)?;
+            if normalized_user_mapping_entry(entry)
+                != user_mapping_entry(
+                    self.frame_for_mapping_page(slot_index, mapping, page)?,
+                    mapping.permissions,
+                )
+            {
+                return Err(FrameBackedError::CorruptHierarchy);
+            }
+        }
+        if mapping.permissions == permissions {
+            return Ok(());
+        }
+
+        for page in 0..usize::from(mapping.page_count) {
+            let (table, index, entry) = self.checked_mapping_leaf(slot_index, mapping, page)?;
+            let updated = replace_user_mapping_permissions(entry, permissions);
+            if let Err(error) = self.memory.write_entry(table, index, updated) {
+                let original = FrameBackedError::Memory(error);
+                self.rollback_mapping_permissions(slot_index, mapping, page)?;
+                return Err(original);
+            }
+            match self.memory.read_entry(table, index) {
+                Ok(observed)
+                    if normalized_user_mapping_entry(observed)
+                        == normalized_user_mapping_entry(updated) => {}
+                Ok(_) => {
+                    self.rollback_mapping_permissions(slot_index, mapping, page + 1)?;
+                    return Err(FrameBackedError::CorruptHierarchy);
+                }
+                Err(error) => {
+                    let original = FrameBackedError::Memory(error);
+                    self.rollback_mapping_permissions(slot_index, mapping, page + 1)?;
+                    return Err(original);
+                }
+            }
+        }
+        self.slots[slot_index].mappings[mapping_index].permissions = permissions;
+        Ok(())
+    }
+
+    pub fn linux_mprotect_for_root(
+        &mut self,
+        address_space_root: u64,
+        virtual_address: u64,
+        length: usize,
+        permissions: MappingPermissions,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        let process = self
+            .slots
+            .iter()
+            .enumerate()
+            .find(|(_, slot)| {
+                slot.phase == SpacePhase::Committed
+                    && slot.generation != 0
+                    && slot.process_info.address_space_root == Some(address_space_root)
+            })
+            .map(|(index, slot)| ProcessImageHandle::new(index as u16, slot.generation))
+            .ok_or(FrameBackedError::InvalidHandle)?;
+        self.linux_mprotect(&process, virtual_address, length, permissions)
+    }
+
+    /// Remove one complete private mapping. Partial unmaps are intentionally
     /// rejected until the VMA split/merge bookkeeping is implemented.
     pub fn linux_munmap(
         &mut self,
@@ -1522,6 +1682,62 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         Ok(())
     }
 
+    fn checked_mapping_leaf(
+        &self,
+        slot_index: usize,
+        mapping: MappingRecord,
+        page: usize,
+    ) -> Result<(PhysicalAddress, usize, u64), FrameBackedError<Memory::Error>> {
+        let page_index = usize::from(mapping.first_page)
+            .checked_add(page)
+            .ok_or(FrameBackedError::CorruptHierarchy)?;
+        let record = *self.slots[slot_index]
+            .pages
+            .get(page_index)
+            .ok_or(FrameBackedError::CorruptHierarchy)?;
+        let expected_address = mapping
+            .virtual_address
+            .checked_add((page * PAGE_SIZE) as u64)
+            .ok_or(FrameBackedError::CorruptHierarchy)?;
+        if record.virtual_address != expected_address || record.frame.as_u64() == 0 {
+            return Err(FrameBackedError::CorruptHierarchy);
+        }
+        let (table, index) = self.leaf_slot(slot_index, record.virtual_address)?;
+        let entry = self
+            .memory
+            .read_entry(table, index)
+            .map_err(FrameBackedError::Memory)?;
+        if entry & (PAGE_ADDRESS_MASK | ENTRY_PRESENT | ENTRY_USER | ENTRY_HUGE)
+            != record.frame.as_u64() | ENTRY_PRESENT | ENTRY_USER
+        {
+            return Err(FrameBackedError::CorruptHierarchy);
+        }
+        Ok((table, index, entry))
+    }
+
+    fn rollback_mapping_permissions(
+        &mut self,
+        slot_index: usize,
+        mapping: MappingRecord,
+        changed_pages: usize,
+    ) -> Result<(), FrameBackedError<Memory::Error>> {
+        for page in 0..changed_pages {
+            let (table, index, entry) = self.checked_mapping_leaf(slot_index, mapping, page)?;
+            let restored = replace_user_mapping_permissions(entry, mapping.permissions);
+            self.memory
+                .write_entry(table, index, restored)
+                .map_err(FrameBackedError::Memory)?;
+            let observed = self
+                .memory
+                .read_entry(table, index)
+                .map_err(FrameBackedError::Memory)?;
+            if normalized_user_mapping_entry(observed) != normalized_user_mapping_entry(restored) {
+                return Err(FrameBackedError::CorruptHierarchy);
+            }
+        }
+        Ok(())
+    }
+
     fn release_owned_frame(
         &mut self,
         slot_index: usize,
@@ -2105,6 +2321,40 @@ pub enum FrameBackedError<MemoryError> {
     ActiveProcess,
 }
 
+const fn user_mapping_entry(frame: PhysicalAddress, permissions: MappingPermissions) -> u64 {
+    frame.as_u64()
+        | ENTRY_PRESENT
+        | ENTRY_USER
+        | if permissions.writable {
+            ENTRY_WRITABLE
+        } else {
+            0
+        }
+        | if permissions.executable {
+            0
+        } else {
+            ENTRY_NO_EXECUTE
+        }
+}
+
+const fn replace_user_mapping_permissions(entry: u64, permissions: MappingPermissions) -> u64 {
+    (entry & !(ENTRY_WRITABLE | ENTRY_NO_EXECUTE))
+        | if permissions.writable {
+            ENTRY_WRITABLE
+        } else {
+            0
+        }
+        | if permissions.executable {
+            0
+        } else {
+            ENTRY_NO_EXECUTE
+        }
+}
+
+const fn normalized_user_mapping_entry(entry: u64) -> u64 {
+    entry & !(ENTRY_ACCESSED | ENTRY_DIRTY)
+}
+
 fn page_indices<MemoryError>(address: u64) -> Result<[usize; 4], FrameBackedError<MemoryError>> {
     if address >= 0x0000_8000_0000_0000 {
         return Err(FrameBackedError::InvalidUserRange);
@@ -2151,6 +2401,7 @@ mod tests {
         frames: [[u8; PAGE_SIZE]; FRAMES],
         allocated: [bool; FRAMES],
         fail_release_once: bool,
+        fail_write_entry_after: Option<usize>,
     }
 
     impl<const FRAMES: usize> TestMemory<FRAMES> {
@@ -2159,6 +2410,7 @@ mod tests {
                 frames: [[0; PAGE_SIZE]; FRAMES],
                 allocated: [false; FRAMES],
                 fail_release_once: false,
+                fail_write_entry_after: None,
             }
         }
 
@@ -2230,6 +2482,13 @@ mod tests {
             index: usize,
             value: u64,
         ) -> Result<(), Self::Error> {
+            if let Some(remaining) = self.fail_write_entry_after {
+                if remaining == 0 {
+                    self.fail_write_entry_after = None;
+                    return Err(TestMemoryError::WriteFailed);
+                }
+                self.fail_write_entry_after = Some(remaining - 1);
+            }
             let (frame, range) = self.range(table, index * 8, 8)?;
             self.frames[frame][range].copy_from_slice(&value.to_le_bytes());
             Ok(())
@@ -2337,6 +2596,7 @@ mod tests {
         Exhausted,
         Invalid,
         ReleaseFailed,
+        WriteFailed,
     }
 
     fn catalog() -> FractalCatalog {
@@ -2711,6 +2971,121 @@ mod tests {
             ),
             Err(FrameBackedError::InvalidRange)
         );
+    }
+
+    #[test]
+    fn linux_file_mapping_copies_bytes_and_mprotect_rolls_back_exactly() {
+        let mut memory = Box::new(TestMemory::<176>::new());
+        memory
+            .write_entry(
+                PhysicalAddress::new(0),
+                256,
+                0x1234_5000 | ENTRY_PRESENT | ENTRY_WRITABLE,
+            )
+            .unwrap();
+        let authority = unsafe { Authority::assume_root() };
+        let install_control = authority.grant::<ProcessInstallControl>();
+        let mut backend =
+            FrameBackedAddressSpace::new(memory, PhysicalAddress::new(0), &install_control);
+        let catalog = catalog();
+        let mut image_bytes = [0_u8; MINIMAL_X86_64_ELF_BYTES];
+        let image = prepare_user_image(
+            catalog.materialize(1, &mut image_bytes).unwrap(),
+            &authority.grant::<UserlandImageControl>(),
+        )
+        .unwrap();
+        let installed = install_user_image(image, &mut backend, &install_control).unwrap();
+
+        let mut initialized = [0_u8; PAGE_SIZE + 7];
+        for (index, byte) in initialized.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(17).wrapping_add(3);
+        }
+        let writable = MappingPermissions {
+            readable: true,
+            writable: true,
+            executable: false,
+        };
+        let executable = MappingPermissions {
+            readable: true,
+            writable: false,
+            executable: true,
+        };
+        let mapped = backend
+            .linux_mmap_file_private(&installed.process, 0, PAGE_SIZE * 2, writable, &initialized)
+            .unwrap();
+        let mut first = [0_u8; 32];
+        read_user_bytes(&backend, &installed.process, mapped, &mut first);
+        assert_eq!(first, initialized[..first.len()]);
+        let mut second = [0_u8; 7];
+        read_user_bytes(
+            &backend,
+            &installed.process,
+            mapped + PAGE_SIZE as u64,
+            &mut second,
+        );
+        assert_eq!(second, initialized[PAGE_SIZE..]);
+
+        let slot_index = backend.process_slot(&installed.process).unwrap();
+        let mut leaves = [(PhysicalAddress::new(0), 0_usize); 2];
+        for (page, leaf) in leaves.iter_mut().enumerate() {
+            *leaf = backend
+                .leaf_slot(slot_index, mapped + (page * PAGE_SIZE) as u64)
+                .unwrap();
+            let entry = backend.memory().read_entry(leaf.0, leaf.1).unwrap();
+            backend
+                .memory_mut()
+                .write_entry(leaf.0, leaf.1, entry | ENTRY_ACCESSED | ENTRY_DIRTY)
+                .unwrap();
+        }
+
+        backend
+            .linux_mprotect(&installed.process, mapped, PAGE_SIZE * 2, executable)
+            .unwrap();
+        for (table, index) in leaves {
+            let entry = backend.memory().read_entry(table, index).unwrap();
+            assert_eq!(entry & ENTRY_WRITABLE, 0);
+            assert_eq!(entry & ENTRY_NO_EXECUTE, 0);
+            assert_eq!(
+                entry & (ENTRY_ACCESSED | ENTRY_DIRTY),
+                ENTRY_ACCESSED | ENTRY_DIRTY
+            );
+        }
+        assert_eq!(
+            backend.linux_mprotect(&installed.process, mapped, PAGE_SIZE, writable),
+            Err(FrameBackedError::InvalidRange)
+        );
+        assert_eq!(
+            backend.linux_mprotect(
+                &installed.process,
+                mapped,
+                PAGE_SIZE * 2,
+                MappingPermissions {
+                    readable: true,
+                    writable: true,
+                    executable: true,
+                },
+            ),
+            Err(FrameBackedError::InvalidRange)
+        );
+
+        backend.memory_mut().fail_write_entry_after = Some(1);
+        assert_eq!(
+            backend.linux_mprotect(&installed.process, mapped, PAGE_SIZE * 2, writable),
+            Err(FrameBackedError::Memory(TestMemoryError::WriteFailed))
+        );
+        for (table, index) in leaves {
+            let entry = backend.memory().read_entry(table, index).unwrap();
+            assert_eq!(entry & ENTRY_WRITABLE, 0);
+            assert_eq!(entry & ENTRY_NO_EXECUTE, 0);
+        }
+        backend
+            .linux_mprotect(&installed.process, mapped, PAGE_SIZE * 2, writable)
+            .unwrap();
+        for (table, index) in leaves {
+            let entry = backend.memory().read_entry(table, index).unwrap();
+            assert_ne!(entry & ENTRY_WRITABLE, 0);
+            assert_ne!(entry & ENTRY_NO_EXECUTE, 0);
+        }
     }
 
     #[test]

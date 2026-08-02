@@ -88,9 +88,11 @@ The first Linux personality slice is now exercised by the measured C0 probe:
 user-copy and generation-safe lifecycle paths. The monotonic clock is advanced
 by the calibrated periodic timer rather than exposing an unscaled TSC, and the
 initial single-root credential calls return the authenticated boot identity.
-Anonymous private `mmap`/exact-range `munmap` and the bounded `brk` heap
-allocate and reclaim real zeroed user pages with W^X checks; the probe writes
-and reads a returned page before unmapping it. A bounded, process-owned
+Anonymous and eager Akashic-file-backed private `mmap`, whole-VMA
+`mprotect`/`munmap`, and the bounded `brk` heap allocate and reclaim real user
+pages with W^X checks. File snapshots are generation-bound and
+position-independent; the probe closes the source descriptor before executing a
+mapped RX instruction sequence. A bounded, process-owned
 `eventfd2` table now implements the eight-byte counter ABI, semaphore mode,
 ownership checks, close, and non-sleeping `EAGAIN` behavior. The Linux
 personality also implements non-sleeping `poll(2)` plus level/edge `epoll(7)`
@@ -99,8 +101,8 @@ monotonic timerfd implementation now covers create, settime, gettime,
 expiration reads, ownership, close, periodic expiry accounting, and readiness
 generation for edge-triggered epoll. These are real wake primitives for early
 COSMIC services, not a claim that every descriptor family is unified yet.
-File-backed mappings, `mprotect`, shared-object dependency loading and
-relocation remain gated. Every other decoded
+General VMA split/merge, shared mappings, demand paging, shared-object dependency
+loading and relocation remain gated. Every other decoded
 Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.
 
@@ -116,8 +118,8 @@ caught signal handlers and close-on-exec objects reset only after publication,
 and the former hierarchy is reclaimed only after CR3 points at the replacement.
 The admitted slice remains single-threaded at exec and each Akashic file is
 bounded to 64 KiB. This is the first `PT_INTERP` handoff slice, not completion
-of C2: general `DT_NEEDED` discovery, shared-object relocation, file-backed
-mapping, `mprotect`, ASLR, and production entropy remain fail-closed.
+of C2: general `DT_NEEDED` discovery, shared-object relocation, general file
+mapping semantics, ASLR, and production entropy remain fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,
 filesystem context, descriptor ownership, signal-handler identity, and SysV

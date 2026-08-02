@@ -378,6 +378,58 @@ pub fn linux_mmap_current(
         .map_err(ProcessRuntimeError::Backend)
 }
 
+/// Services one eager private file mapping against the exact lifecycle root.
+/// `initialized` is already a descriptor-authorized immutable snapshot; the
+/// backend copies it into newly owned frames before publishing the VMA.
+#[cfg(target_os = "none")]
+pub fn linux_mmap_file_current(
+    hint: u64,
+    length: usize,
+    permissions: crate::process::install::MappingPermissions,
+    initialized: &[u8],
+) -> Result<u64, ProcessRuntimeError> {
+    let snapshot = crate::process::lifecycle::current_handle()
+        .and_then(crate::process::lifecycle::snapshot_exact)
+        .ok_or(ProcessRuntimeError::Unavailable)?;
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    runtime
+        .backend
+        .linux_mmap_file_for_root(
+            snapshot.launch.address_space_root,
+            hint,
+            length,
+            permissions,
+            initialized,
+        )
+        .map_err(ProcessRuntimeError::Backend)
+}
+
+/// Changes one complete private VMA for the exact lifecycle-published root.
+/// The architecture return gate reloads that root before Ring 3 resumes,
+/// flushing stale non-global translations after the page-table transaction.
+#[cfg(target_os = "none")]
+pub fn linux_mprotect_current(
+    virtual_address: u64,
+    length: usize,
+    permissions: crate::process::install::MappingPermissions,
+) -> Result<(), ProcessRuntimeError> {
+    let snapshot = crate::process::lifecycle::current_handle()
+        .and_then(crate::process::lifecycle::snapshot_exact)
+        .ok_or(ProcessRuntimeError::Unavailable)?;
+    let mut runtime = RUNTIME.lock();
+    let runtime = runtime.as_mut().ok_or(ProcessRuntimeError::Unavailable)?;
+    runtime
+        .backend
+        .linux_mprotect_for_root(
+            snapshot.launch.address_space_root,
+            virtual_address,
+            length,
+            permissions,
+        )
+        .map_err(ProcessRuntimeError::Backend)
+}
+
 #[cfg(target_os = "none")]
 pub fn linux_munmap_current(
     virtual_address: u64,

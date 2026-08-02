@@ -51,6 +51,34 @@ derives the required KPI from that source's conftests and behavioral tests.
 
 ## Current state
 
+### Generation-bound private file mappings
+
+The admitted file-backed `mmap` profile is an eager `MAP_PRIVATE` snapshot of a
+regular Akashic file. The Linux descriptor must belong to the exact thread-group
+generation and carry read authority. One VFS lock hold validates that capability,
+captures inode identity and file length, and copies the page-aligned source range
+without changing the descriptor cursor. The syscall then allocates private
+zeroed frames, copies the snapshot, zero-fills the final partial page, and only
+publishes the VMA after every frame and PTE succeeds. Closing the descriptor does
+not affect the resulting mapping.
+
+`mprotect` currently accepts only one complete releasable VMA and the R, RW, and
+RX profiles. It preflights every generation-owned leaf, preserves hardware
+accessed/dirty state, rejects W+X, and restores already changed leaves if a later
+PTE write fails. The syscall return gate reloads the selected CR3 before Ring 3
+resumes, flushing stale local non-global translations. Partial VMA changes,
+`PROT_NONE`, `MAP_SHARED`, `MAP_FIXED`, non-Akashic files, demand paging, and
+pages wholly beyond EOF remain fail-closed.
+
+The measured Rust probe writes `mov eax, 42; ret` to a regular file, maps it
+read-only, validates copied bytes and zero fill, closes the descriptor, proves a
+W+X request is rejected, transitions the whole page to RX, and calls the mapped
+entry. QEMU must observe `ARACH_C2_FILE_MMAP_PASS` followed by
+`ARACH_C2_MPROTECT_PASS`. Host fault injection separately proves a failed
+multi-page permission update rolls back to the original leaf permissions. Idris
+2 and Agda retain descriptor snapshot, private ownership, W^X transition, and
+mapped-entry evidence in a downstream file-mapping certificate.
+
 ### Transactional static and interpreter process replacement
 
 The first `execve` profile admits one running Linux thread-group leader with no
@@ -79,7 +107,8 @@ dispositions, pending/frame state, robust and child-TID registrations, FS
 base, and close-on-exec descriptors. The architecture return gate changes CR3
 before it reclaims the deferred old hierarchy.
 
-The measured QEMU chain requires `ARACH_C2_RUNTIME_LINKER_ENTER`, then
+The measured QEMU chain requires the file-mapping markers above, followed by
+`ARACH_C1_LINUX_SYSCALL_PASS`, `ARACH_C2_RUNTIME_LINKER_ENTER`, then
 `ARACH_C2_RUNTIME_LINKER_PASS`, then `ARACH_C1_EXECVE_PASS`. The freestanding C
 runtime-linker probe validates the kernel-generated auxiliary vector and jumps
 to `AT_ENTRY`; the Rust main image then supplies the existing live-peer
@@ -87,11 +116,11 @@ to `AT_ENTRY`; the Rust main image then supplies the existing live-peer
 atomic pair snapshots, independent measurements, composite installation,
 auxiliary-vector bytes, lifecycle epoch invalidation, registry exchange,
 close-on-exec families, signal reset, rollback ownership, and process-pool
-recycling. Idris 2 and Agda make the new gates fields of a downstream dynamic
-exec certificate. This qualifies the kernel-to-interpreter handoff, not full
-dynamic linking: ELF dependency discovery, shared-library relocation,
-file-backed `mmap`, `mprotect`, demand paging, ASLR, and cryptographically
-qualified process entropy remain separate acceptance gates.
+recycling. Idris 2 and Agda make those gates fields of a downstream dynamic exec
+certificate. This qualifies the kernel-to-interpreter handoff, not full dynamic
+linking: ELF dependency discovery, shared-library relocation, general VMA
+splitting, demand paging, ASLR, and cryptographically qualified process entropy
+remain separate acceptance gates.
 
 The current tree passes external-Kbuild and static load-admission gates against
 real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux

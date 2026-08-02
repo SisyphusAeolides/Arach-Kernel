@@ -44,7 +44,8 @@ The Linux personality currently covers:
 - identity and lifecycle calls used by the measured probe, including distinct
   `getpid`/`gettid`, bounded pthread-style `clone`, `getppid`, `exit`, and
   bounded multi-member `exit_group`;
-- `write`, anonymous `mmap`/`munmap`, and `brk`;
+- `write`, anonymous and eager Akashic-file-backed private `mmap`, whole-range
+  W^X `mprotect`/`munmap`, and `brk`;
 - bounded thread-group-owned `eventfd`, `timerfd`, `poll`, and `epoll` paths;
 - bounded Akashic VFS-backed `open`, `openat`, `read`, `write`, `close`,
   `stat`, `fstat`, `lseek`, and `unlinkat` paths;
@@ -86,7 +87,7 @@ restart remain future compatibility slices.
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
-| Linux userspace compatibility | Identity, memory, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, transactional static and measured `PT_INTERP` execution, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add shared-object relocation, file-backed `mmap`/`mprotect`, expand signal delivery, complete individual leader-exit semantics, unify descriptors, and add persistent storage |
+| Linux userspace compatibility | Identity, anonymous and eager private file mappings, whole-range W^X protection transitions, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, transactional static and measured `PT_INTERP` execution, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add `DT_NEEDED` discovery and relocation, general VMA split/merge and demand paging, expand signal delivery, complete individual leader-exit semantics, unify descriptors, and add persistent storage |
 | System bootstrap | The pinned Granite/Arach/Push C0 bundle executes under QEMU/OVMF and emits measured ring-3 syscall evidence | Promote the measured bootstrap into a native Push service graph and qualified COSMIC login/session path |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -96,9 +97,8 @@ restart remain future compatibility slices.
 The current critical path is:
 
 1. Keep the measured C0 QEMU/OVMF path green.
-2. Extend the measured runtime-linker handoff to shared-object relocation,
-   file-backed mappings, and `mprotect` without weakening generation
-   isolation, rollback, or W^X.
+2. Extend the measured runtime-linker handoff to `DT_NEEDED` discovery and
+   shared-object relocation on the qualified private mapping/protection path.
 3. Unify Linux descriptor ownership and add persistent block-backed storage.
 4. Connect qualified modules and the native Push service graph to a complete
    COSMIC session.
