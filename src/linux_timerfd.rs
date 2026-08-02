@@ -1,8 +1,9 @@
 //! Bounded Linux `timerfd(2)` objects.
 //!
 //! Timerfds are the first time-based descriptor in the Linux personality. The
-//! table is intentionally fixed-capacity and process-owned, just like the
-//! eventfd bridge. Expiry is evaluated lazily from the monotonic clock: a
+//! backend table is intentionally fixed-capacity and process-owned, while
+//! `linux_fd` assigns public descriptors. Expiry is evaluated lazily from the
+//! monotonic clock: a
 //! timer never needs an interrupt-time allocation, while `read`, `poll`, and
 //! `epoll` all observe the same expiration count and transition generation.
 

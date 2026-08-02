@@ -14,6 +14,10 @@ data Gate : Set where
   privateFutexBlock clearChildTidWake : Gate
   robustListRegistration ownerDeathPublication robustFutexWake : Gate
   signalDisposition signalMaskAndPending rtSignalFrame rtSignalReturn : Gate
+  unifiedDescriptorNamespace generationBoundOpenObject : Gate
+  descriptorAliasLifetime descriptorLocalCloseOnExec : Gate
+  pipeAtomicTransfer pipeEndpointLifetime pollEpollPipeReadiness : Gate
+  epollWatchLifetime execDescriptorInheritance : Gate
   threadGroupSnapshot peerGenerationRetirement leaderZombiePublication supervisorReap : Gate
   immutableFileSnapshot boundedExecVectors measuredStaticImage inactiveActivation : Gate
   atomicImageExchange execStateReset deferredImageReap rollbackPreservesImage : Gate
@@ -86,10 +90,24 @@ record SignalReturnCertificate : Set where
     rtSignalFrameEvidence : Measurement rtSignalFrame
     rtSignalReturnEvidence : Measurement rtSignalReturn
 
+record DescriptorPipeCertificate : Set where
+  constructor descriptorPipeCertificate
+  field
+    signalReturn : SignalReturnCertificate
+    unifiedDescriptorNamespaceEvidence : Measurement unifiedDescriptorNamespace
+    generationBoundOpenObjectEvidence : Measurement generationBoundOpenObject
+    descriptorAliasLifetimeEvidence : Measurement descriptorAliasLifetime
+    descriptorLocalCloseOnExecEvidence : Measurement descriptorLocalCloseOnExec
+    pipeAtomicTransferEvidence : Measurement pipeAtomicTransfer
+    pipeEndpointLifetimeEvidence : Measurement pipeEndpointLifetime
+    pollEpollPipeReadinessEvidence : Measurement pollEpollPipeReadiness
+    epollWatchLifetimeEvidence : Measurement epollWatchLifetime
+    execDescriptorInheritanceEvidence : Measurement execDescriptorInheritance
+
 record GroupExitCertificate : Set where
   constructor groupExitCertificate
   field
-    signalReturn : SignalReturnCertificate
+    descriptorPipe : DescriptorPipeCertificate
     threadGroupSnapshotEvidence : Measurement threadGroupSnapshot
     peerGenerationRetirementEvidence : Measurement peerGenerationRetirement
     leaderZombiePublicationEvidence : Measurement leaderZombiePublication
@@ -168,9 +186,24 @@ robustExitRequiresThreadWake certificate = RobustExitCertificate.threadWake cert
 signalReturnRequiresRobustExit : SignalReturnCertificate -> RobustExitCertificate
 signalReturnRequiresRobustExit certificate = SignalReturnCertificate.robustExit certificate
 
--- Whole-group termination structurally retains qualified signal return.
+-- Descriptor and pipe qualification structurally retains signal return.
+descriptorPipeRequiresSignalReturn :
+  DescriptorPipeCertificate -> SignalReturnCertificate
+descriptorPipeRequiresSignalReturn certificate =
+  DescriptorPipeCertificate.signalReturn certificate
+
+-- Whole-group termination structurally retains the descriptor and pipe
+-- boundary used by the replacement image.
+groupExitRequiresDescriptorPipe :
+  GroupExitCertificate -> DescriptorPipeCertificate
+groupExitRequiresDescriptorPipe certificate =
+  GroupExitCertificate.descriptorPipe certificate
+
+-- The prior signal qualification remains projectable through that boundary.
 groupExitRequiresSignalReturn : GroupExitCertificate -> SignalReturnCertificate
-groupExitRequiresSignalReturn certificate = GroupExitCertificate.signalReturn certificate
+groupExitRequiresSignalReturn certificate =
+  DescriptorPipeCertificate.signalReturn
+    (GroupExitCertificate.descriptorPipe certificate)
 
 -- Image replacement cannot be projected without the prior group-lifecycle
 -- qualification on which its single-threaded admission rule depends.

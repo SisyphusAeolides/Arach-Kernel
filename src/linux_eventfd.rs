@@ -2,11 +2,11 @@
 //!
 //! The first Linux userspace services need one reliable wake primitive before
 //! epoll, timerfd, and device file descriptors can be layered on top.  This
-//! module deliberately owns only eventfd state: it does not pretend to be a
-//! general file descriptor table.  Descriptors are process-owned, have a
-//! stable bounded lifetime, and return `EAGAIN` instead of sleeping when an
-//! operation would block.  The latter is an explicit kernel contract while
-//! scheduler wait queues are still being brought up.
+//! module deliberately owns only eventfd state; `linux_fd` owns the public
+//! descriptor and open-object lifetime. Backend handles are process-owned and
+//! return `EAGAIN` instead of sleeping when an operation would block. The
+//! latter is an explicit kernel contract while scheduler wait queues are still
+//! being brought up.
 
 use crate::sync::SpinLock;
 

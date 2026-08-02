@@ -94,14 +94,19 @@ pages with W^X checks. File snapshots are generation-bound and
 position-independent; the probe closes the source descriptor before executing a
 mapped RX instruction sequence. A bounded, process-owned
 `eventfd2` table now implements the eight-byte counter ABI, semaphore mode,
-ownership checks, close, and non-sleeping `EAGAIN` behavior. The Linux
-personality also implements non-sleeping `poll(2)` plus level/edge `epoll(7)`
-control and wait over eventfds and timerfds. A bounded, process-owned
+ownership checks, close, and non-sleeping `EAGAIN` behavior. Regular files,
+eventfds, timerfds, epoll objects, anonymous pipes, and standard streams now
+share one dense, generation-bound descriptor/open-object table. `dup`,
+`dup2`, `dup3`, bounded `fcntl`, per-descriptor close-on-exec, pipe
+EOF/HUP/EPIPE, duplicate-aware epoll lifetime, last-close watch removal, and
+non-retargeting descriptor reuse are measured. The Linux
+personality implements non-sleeping `poll(2)` plus level/edge `epoll(7)`
+control and wait over those supported wake objects. A bounded, process-owned
 monotonic timerfd implementation now covers create, settime, gettime,
 expiration reads, ownership, close, periodic expiry accounting, and readiness
 generation for edge-triggered epoll. These are real wake primitives for early
-COSMIC services, not a claim that every descriptor family is unified yet.
-General VMA split/merge, shared mappings, demand paging, and general
+COSMIC services. Scheduler-backed blocking pipe operations, `SIGPIPE`, Unix
+sockets, general VMA split/merge, shared mappings, demand paging, and general
 multi-library linking remain gated. Every other decoded
 Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.

@@ -51,6 +51,43 @@ derives the required KPI from that source's conftests and behavioral tests.
 
 ## Current state
 
+### Unified descriptors and anonymous pipes
+
+Each exact thread-group leader generation owns one dense table of 128 public
+Linux descriptors. Descriptors reference separately generation-tagged open
+objects, so regular files, eventfds, timerfds, epoll instances, pipes, and the
+three standard streams cannot collide. `dup`, `dup2`, `dup3`, `F_DUPFD`, and
+`F_DUPFD_CLOEXEC` add references to the same open object; descriptor flags
+remain local while status flags, file position, and inode identity remain
+shared. A close racing an active operation marks the object closing and defers
+backend reclamation until the active lease ends.
+
+Epoll stores the open-object key and retains its own reference instead of
+storing a recyclable public fd. Closing one duplicated descriptor leaves the
+watch attached while another alias remains; closing the last descriptor
+removes every watch for that object before the number can be reused. Closing
+the epoll instance releases every retained key. Nested epoll graphs remain
+fail-closed, and adding a regular file returns Linux `EPERM`. Error and hangup
+events are delivered independently of the requested interest mask.
+
+Anonymous `pipe`/`pipe2` endpoints share an allocation-free 4 KiB ring. Writes
+within `PIPE_BUF` commit completely or return `EAGAIN`; reads preserve byte
+order, the final writer close produces EOF and `POLLHUP`, and a write after the
+last reader closes returns `EPIPE`. Poll and epoll observe the same readiness
+generation. The measured probe also proves that one alias survives `execve`
+while a second alias to the same eventfd is independently removed by
+close-on-exec. `ARACH_C1_PIPE_DESCRIPTOR_PASS` records this complete live
+path. Host tests additionally prove duplicate-aware watch lifetime, automatic
+last-close removal, and non-retargeting after descriptor reuse.
+
+This is not yet the complete blocking contract. A pipe operation that would
+sleep returns `EAGAIN` even when `O_NONBLOCK` is clear, and `EPIPE` does not yet
+queue `SIGPIPE`. Scheduler-backed waits, asynchronous interruption, `splice`,
+named FIFOs, Unix sockets, SCM rights, and process-shared descriptor tables
+across fork remain later gates. Idris 2 and Agda require unified namespace,
+generation, alias, close-on-exec, pipe lifetime/readiness, epoll retention, and
+exec inheritance measurements before downstream lifecycle qualification.
+
 ### Generation-bound private file mappings
 
 The admitted file-backed `mmap` profile is an eager `MAP_PRIVATE` snapshot of a
@@ -108,7 +145,8 @@ base, and close-on-exec descriptors. The architecture return gate changes CR3
 before it reclaims the deferred old hierarchy.
 
 The measured QEMU chain requires the file-mapping markers above, followed by
-`ARACH_C1_LINUX_SYSCALL_PASS`, `ARACH_C2_RUNTIME_LINKER_ENTER`,
+`ARACH_C1_PIPE_DESCRIPTOR_PASS`, `ARACH_C1_LINUX_SYSCALL_PASS`,
+`ARACH_C2_RUNTIME_LINKER_ENTER`,
 `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_SHARED_RELOCATION_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,
 `ARACH_C2_RUNTIME_LINKER_PASS`, and then `ARACH_C1_EXECVE_PASS`. The

@@ -1,9 +1,9 @@
-//! Bounded Linux regular-file descriptors backed by Akashic VFS.
+//! Bounded Linux regular-file open objects backed by Akashic VFS.
 //!
-//! Linux descriptor numbers are deliberately separate from Akashic capability
-//! tokens. Each descriptor is bound to one exact PID generation, while the
-//! underlying VFS continues to enforce the process-owned capability. The table
-//! is fixed-capacity and allocation-free.
+//! `linux_fd` assigns the public descriptor number. This module's private
+//! backend handle remains separate from the Akashic capability token and bound
+//! to one exact PID generation. The table is fixed-capacity and
+//! allocation-free.
 
 use crate::akashic_vfs::{self, FileRangeSnapshot, NodeKind, Stat, VfsError};
 use crate::linux_eventfd::{READY_IN, READY_OUT};

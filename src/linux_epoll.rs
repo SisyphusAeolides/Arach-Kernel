@@ -1,13 +1,14 @@
 //! Bounded Linux `epoll(7)` readiness for the kernel-owned wake descriptors.
 //!
-//! This is intentionally a narrow first descriptor bridge.  It implements
-//! the userspace-visible epoll control/event ABI for eventfds and timerfds,
-//! with level and edge-triggered watches, while refusing to masquerade as a
-//! general file or device descriptor backend. The fixed tables keep every
-//! allocation and readiness scan bounded until the full descriptor layer
-//! exists.
+//! Watches retain generation-tagged unified open objects rather than public
+//! descriptor numbers. A watch follows the open description while any
+//! descriptor alias remains and is removed on the last descriptor close, so
+//! descriptor reuse cannot retarget it. Every allocation and readiness scan
+//! remains bounded.
 
 use crate::linux_eventfd;
+use crate::linux_fd::ObjectKey;
+use crate::process::lifecycle::ProcessHandle;
 use crate::sync::SpinLock;
 
 pub const EPOLL_CLOEXEC: u32 = 0x80000;
@@ -25,7 +26,7 @@ pub const EPOLLET: u32 = 1 << 31;
 const EPOLL_INTEREST_MASK: u32 = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLET;
 
 const MAXIMUM_EPOLL_OBJECTS: usize = 16;
-const MAXIMUM_EPOLL_WATCHES: usize = 32;
+pub const MAXIMUM_EPOLL_WATCHES: usize = 32;
 const EPOLL_BASE: u32 = 0x1000;
 
 pub const MAXIMUM_READY_EVENTS: usize = MAXIMUM_EPOLL_WATCHES;
@@ -47,7 +48,8 @@ pub struct ReadyEvent {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Watch {
-    fd: u32,
+    target: ObjectKey,
+    registration: u64,
     events: u32,
     data: u64,
     last_ready: u32,
@@ -57,7 +59,8 @@ struct Watch {
 
 impl Watch {
     const EMPTY: Self = Self {
-        fd: 0,
+        target: ObjectKey::EMPTY,
+        registration: 0,
         events: 0,
         data: 0,
         last_ready: 0,
@@ -66,26 +69,31 @@ impl Watch {
     };
 
     const fn occupied(self) -> bool {
-        self.fd != 0
+        !self.target.is_empty()
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct EpollSlot {
-    owner: u32,
+    owner: ProcessHandle,
     flags: u32,
+    next_registration: u64,
     watches: [Watch; MAXIMUM_EPOLL_WATCHES],
 }
 
 impl EpollSlot {
     const EMPTY: Self = Self {
-        owner: 0,
+        owner: ProcessHandle {
+            pid: 0,
+            generation: 0,
+        },
         flags: 0,
+        next_registration: 0,
         watches: [Watch::EMPTY; MAXIMUM_EPOLL_WATCHES],
     };
 
     const fn occupied(self) -> bool {
-        self.owner != 0
+        self.owner.pid != 0 && self.owner.generation != 0
     }
 }
 
@@ -108,38 +116,13 @@ const fn fd_for_index(index: usize) -> u32 {
     EPOLL_BASE + index as u32
 }
 
-#[inline]
-fn monotonic_now_ns() -> u64 {
-    #[cfg(target_os = "none")]
-    {
-        crate::interrupts::monotonic_nanoseconds()
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        // Host-side epoll tests use eventfds, whose readiness is independent
-        // of time. Timerfd tests exercise explicit timestamps directly in
-        // `linux_timerfd`; keeping the host wrapper deterministic avoids a
-        // std dependency in this no_std module.
-        0
-    }
-}
-
-fn target_readiness(owner: u32, fd: u32) -> Option<(u32, u64)> {
-    if let Ok(ready) = linux_eventfd::readiness(owner, fd) {
-        let generation = linux_eventfd::readiness_generation(owner, fd).unwrap_or(0);
-        return Some((ready, generation));
-    }
-    let now = monotonic_now_ns();
-    if let Ok(ready) = crate::linux_timerfd::readiness(owner, fd, now) {
-        let generation = crate::linux_timerfd::readiness_generation(owner, fd, now).unwrap_or(0);
-        return Some((ready, generation));
-    }
-    None
+fn target_readiness(owner: ProcessHandle, target: ObjectKey) -> Option<(u32, u64)> {
+    crate::linux_fd::readiness_by_key(owner, target).ok()
 }
 
 /// Allocate an epoll instance owned by `owner`.
-pub fn create(owner: u32, flags: u32) -> Result<u32, EpollError> {
-    if owner == 0 || flags & !EPOLL_ALLOWED_FLAGS != 0 {
+pub fn create(owner: ProcessHandle, flags: u32) -> Result<u32, EpollError> {
+    if owner.pid == 0 || owner.generation == 0 || flags & !EPOLL_ALLOWED_FLAGS != 0 {
         return Err(EpollError::InvalidArgument);
     }
     let mut table = EPOLLS.lock();
@@ -153,24 +136,27 @@ pub fn create(owner: u32, flags: u32) -> Result<u32, EpollError> {
     *slot = EpollSlot {
         owner,
         flags,
+        next_registration: 0,
         watches: [Watch::EMPTY; MAXIMUM_EPOLL_WATCHES],
     };
     Ok(fd_for_index(index))
 }
 
-/// Add, modify, or remove one supported wake-descriptor watch. Validating the target before
-/// taking the epoll table lock keeps the lock order independent of eventfd
-/// operations and prevents a close/readiness race from becoming a deadlock.
+/// Add, modify, or remove one supported wake-descriptor watch. Add and modify
+/// validate the target before taking the epoll table lock, keeping lock order
+/// independent of backend operations. Delete accepts the exact stored key so
+/// an add/last-close race can roll back a just-published watch.
 pub fn ctl(
-    owner: u32,
+    owner: ProcessHandle,
     epfd: u32,
     operation: u32,
-    fd: u32,
+    target: ObjectKey,
     events: u32,
     data: u64,
 ) -> Result<(), EpollError> {
-    let target_is_valid = target_readiness(owner, fd).is_some();
-    if !target_is_valid || fd == epfd || events & !EPOLL_INTEREST_MASK != 0 {
+    if events & !EPOLL_INTEREST_MASK != 0
+        || operation != EPOLL_CTL_DEL && target_readiness(owner, target).is_none()
+    {
         return Err(EpollError::InvalidArgument);
     }
     let index = index_for_fd(epfd).ok_or(EpollError::BadFileDescriptor)?;
@@ -179,17 +165,24 @@ pub fn ctl(
     if !slot.occupied() || slot.owner != owner {
         return Err(EpollError::BadFileDescriptor);
     }
-    let existing = slot.watches.iter().position(|watch| watch.fd == fd);
+    let existing = slot.watches.iter().position(|watch| watch.target == target);
     match operation {
         EPOLL_CTL_ADD => {
             if existing.is_some() {
                 return Err(EpollError::AlreadyExists);
             }
-            let Some(watch) = slot.watches.iter_mut().find(|watch| !watch.occupied()) else {
+            let Some(position) = slot.watches.iter().position(|watch| !watch.occupied()) else {
                 return Err(EpollError::Capacity);
             };
-            *watch = Watch {
-                fd,
+            let registration = slot
+                .next_registration
+                .checked_add(1)
+                .filter(|registration| *registration != 0)
+                .ok_or(EpollError::Capacity)?;
+            slot.next_registration = registration;
+            slot.watches[position] = Watch {
+                target,
+                registration,
                 events,
                 data,
                 last_ready: 0,
@@ -202,8 +195,15 @@ pub fn ctl(
             let Some(position) = existing else {
                 return Err(EpollError::NotFound);
             };
+            let registration = slot
+                .next_registration
+                .checked_add(1)
+                .filter(|registration| *registration != 0)
+                .ok_or(EpollError::Capacity)?;
+            slot.next_registration = registration;
             slot.watches[position] = Watch {
-                fd,
+                target,
+                registration,
                 events,
                 data,
                 last_ready: 0,
@@ -227,7 +227,11 @@ pub fn ctl(
 /// but treated as a bounded probe; scheduler wait queues will own sleeping
 /// once ordinary file descriptors are implemented.  Level-triggered watches
 /// repeat while ready; edge-triggered watches report only a 0→ready change.
-pub fn wait(owner: u32, epfd: u32, output: &mut [ReadyEvent]) -> Result<usize, EpollError> {
+pub fn wait(
+    owner: ProcessHandle,
+    epfd: u32,
+    output: &mut [ReadyEvent],
+) -> Result<usize, EpollError> {
     if output.is_empty() {
         return Err(EpollError::InvalidArgument);
     }
@@ -249,11 +253,11 @@ pub fn wait(owner: u32, epfd: u32, output: &mut [ReadyEvent]) -> Result<usize, E
         if !watch.occupied() {
             continue;
         }
-        let (ready, generation, invalid) = match target_readiness(owner, watch.fd) {
+        let (ready, generation, invalid) = match target_readiness(owner, watch.target) {
             Some((ready, generation)) => (ready, generation, false),
             None => (EPOLLERR | EPOLLHUP, 0, true),
         };
-        let interested = ready & (watch.events & !EPOLLET);
+        let interested = ready & ((watch.events & !EPOLLET) | EPOLLERR | EPOLLHUP);
         let edge = watch.events & EPOLLET != 0;
         let should_report = if invalid {
             true
@@ -262,7 +266,8 @@ pub fn wait(owner: u32, epfd: u32, output: &mut [ReadyEvent]) -> Result<usize, E
         } else {
             interested != 0
         };
-        if should_report && count < output.len() {
+        let emitted = should_report && count < output.len();
+        if emitted {
             let mut event_bits = interested;
             if invalid {
                 event_bits |= EPOLLERR | EPOLLHUP;
@@ -274,8 +279,11 @@ pub fn wait(owner: u32, epfd: u32, output: &mut [ReadyEvent]) -> Result<usize, E
             count += 1;
         }
         watch.last_ready = interested;
-        if edge && (should_report || interested == 0) {
-            watch.edge_seen = should_report || watch.edge_seen;
+        if edge && emitted {
+            watch.edge_seen = true;
+            watch.last_generation = generation;
+        } else if edge && interested == 0 {
+            watch.edge_seen = false;
             watch.last_generation = generation;
         }
     }
@@ -286,11 +294,9 @@ pub fn wait(owner: u32, epfd: u32, output: &mut [ReadyEvent]) -> Result<usize, E
         return Err(EpollError::BadFileDescriptor);
     }
     for watch in &watches {
-        if let Some(current) = slot
-            .watches
-            .iter_mut()
-            .find(|current| current.fd == watch.fd)
-        {
+        if let Some(current) = slot.watches.iter_mut().find(|current| {
+            current.target == watch.target && current.registration == watch.registration
+        }) {
             current.last_ready = watch.last_ready;
             current.last_generation = watch.last_generation;
             current.edge_seen = watch.edge_seen;
@@ -300,7 +306,7 @@ pub fn wait(owner: u32, epfd: u32, output: &mut [ReadyEvent]) -> Result<usize, E
 }
 
 /// Return readiness for `poll(2)` when the descriptor is an epoll object.
-pub fn readiness(owner: u32, epfd: u32) -> Result<u32, EpollError> {
+pub fn readiness(owner: ProcessHandle, epfd: u32) -> Result<u32, EpollError> {
     let index = index_for_fd(epfd).ok_or(EpollError::BadFileDescriptor)?;
     let watches = {
         let table = EPOLLS.lock();
@@ -313,72 +319,79 @@ pub fn readiness(owner: u32, epfd: u32) -> Result<u32, EpollError> {
     for watch in &watches {
         if watch.occupied() {
             let (ready, generation) =
-                target_readiness(owner, watch.fd).unwrap_or((EPOLLERR | EPOLLHUP, 0));
+                target_readiness(owner, watch.target).unwrap_or((EPOLLERR | EPOLLHUP, 0));
             let edge = watch.events & EPOLLET != 0;
             let edge_pending = !edge || !watch.edge_seen || watch.last_generation != generation;
-            if ready & (watch.events & !EPOLLET) != 0 && edge_pending {
+            if ready & ((watch.events & !EPOLLET) | EPOLLERR | EPOLLHUP) != 0 && edge_pending {
                 return Ok(EPOLLIN);
             }
         }
     }
-    Ok(EPOLLOUT)
+    Ok(0)
 }
 
 /// Close one epoll instance owned by `owner`.
-pub fn close(owner: u32, epfd: u32) -> Result<(), EpollError> {
+pub fn close(
+    owner: ProcessHandle,
+    epfd: u32,
+    watched: &mut [ObjectKey],
+) -> Result<usize, EpollError> {
     let index = index_for_fd(epfd).ok_or(EpollError::BadFileDescriptor)?;
     let mut table = EPOLLS.lock();
     let slot = &mut table[index];
     if !slot.occupied() || slot.owner != owner {
         return Err(EpollError::BadFileDescriptor);
     }
+    let count = slot.watches.iter().filter(|watch| watch.occupied()).count();
+    if count > watched.len() {
+        return Err(EpollError::Capacity);
+    }
+    for (cursor, watch) in slot
+        .watches
+        .iter()
+        .filter(|watch| watch.occupied())
+        .enumerate()
+    {
+        watched[cursor] = watch.target;
+    }
     *slot = EpollSlot::EMPTY;
-    Ok(())
+    Ok(count)
 }
 
-/// Reclaim epoll instances owned by an exiting process.
-pub fn close_all(owner: u32) -> usize {
-    if owner == 0 {
-        return 0;
-    }
+/// Remove every watch for an open object whose last public descriptor closed.
+/// The caller drops the corresponding retained object references after this
+/// table lock is released.
+pub(crate) fn remove_target(owner: ProcessHandle, target: ObjectKey) -> usize {
     let mut table = EPOLLS.lock();
-    let mut closed = 0;
-    for slot in table.iter_mut() {
-        if slot.owner == owner {
-            *slot = EpollSlot::EMPTY;
-            closed += 1;
+    let mut removed = 0;
+    for slot in table.iter_mut().filter(|slot| slot.owner == owner) {
+        for watch in &mut slot.watches {
+            if watch.target == target {
+                *watch = Watch::EMPTY;
+                removed += 1;
+            }
         }
     }
-    closed
-}
-
-pub fn close_on_exec(owner: u32) -> usize {
-    if owner == 0 {
-        return 0;
-    }
-    let mut table = EPOLLS.lock();
-    let mut closed = 0;
-    for slot in table.iter_mut() {
-        if slot.owner == owner && slot.flags & EPOLL_CLOEXEC != 0 {
-            *slot = EpollSlot::EMPTY;
-            closed += 1;
-        }
-    }
-    closed
+    removed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const OWNER: ProcessHandle = ProcessHandle {
+        pid: 0x5301,
+        generation: 3,
+    };
+
     #[test]
     fn level_watch_reports_eventfd_readiness_until_consumed() {
-        let owner = 0x2001;
-        let eventfd = linux_eventfd::create(owner, 1, 0).unwrap();
-        let epfd = create(owner, 0).unwrap();
-        ctl(owner, epfd, EPOLL_CTL_ADD, eventfd, EPOLLIN, 0x55).unwrap();
+        let eventfd = crate::linux_fd::eventfd(OWNER, 1, 0).unwrap();
+        let epfd = crate::linux_fd::epoll_create(OWNER, 0).unwrap();
+        crate::linux_fd::epoll_ctl(OWNER, epfd, EPOLL_CTL_ADD, eventfd, EPOLLIN, 0x55).unwrap();
+        assert_eq!(crate::linux_fd::readiness(OWNER, epfd, 0), Ok(EPOLLIN));
         let mut output = [ReadyEvent { events: 0, data: 0 }; 1];
-        assert_eq!(wait(owner, epfd, &mut output), Ok(1));
+        assert_eq!(crate::linux_fd::epoll_wait(OWNER, epfd, &mut output), Ok(1));
         assert_eq!(
             output[0],
             ReadyEvent {
@@ -386,57 +399,75 @@ mod tests {
                 data: 0x55
             }
         );
-        assert_eq!(wait(owner, epfd, &mut output), Ok(1));
-        linux_eventfd::read(owner, eventfd).unwrap();
-        assert_eq!(wait(owner, epfd, &mut output), Ok(0));
-        close_all(owner);
-        linux_eventfd::close(owner, eventfd).unwrap();
+        assert_eq!(crate::linux_fd::epoll_wait(OWNER, epfd, &mut output), Ok(1));
+        let mut value = [0_u8; 8];
+        crate::linux_fd::read(OWNER, eventfd, &mut value, 0).unwrap();
+        assert_eq!(crate::linux_fd::epoll_wait(OWNER, epfd, &mut output), Ok(0));
+        assert_eq!(crate::linux_fd::readiness(OWNER, epfd, 0), Ok(0));
+        crate::linux_fd::close_all(OWNER);
     }
 
     #[test]
     fn edge_watch_reports_only_a_new_ready_transition() {
-        let owner = 0x2002;
-        let eventfd = linux_eventfd::create(owner, 0, 0).unwrap();
-        let epfd = create(owner, 0).unwrap();
-        ctl(owner, epfd, EPOLL_CTL_ADD, eventfd, EPOLLIN | EPOLLET, 7).unwrap();
+        let owner = ProcessHandle {
+            pid: 0x5302,
+            generation: 3,
+        };
+        let eventfd = crate::linux_fd::eventfd(owner, 0, 0).unwrap();
+        let epfd = crate::linux_fd::epoll_create(owner, 0).unwrap();
+        crate::linux_fd::epoll_ctl(owner, epfd, EPOLL_CTL_ADD, eventfd, EPOLLIN | EPOLLET, 7)
+            .unwrap();
         let mut output = [ReadyEvent { events: 0, data: 0 }; 1];
-        assert_eq!(wait(owner, epfd, &mut output), Ok(0));
-        linux_eventfd::write(owner, eventfd, 1).unwrap();
-        assert_eq!(wait(owner, epfd, &mut output), Ok(1));
-        assert_eq!(wait(owner, epfd, &mut output), Ok(0));
-        linux_eventfd::read(owner, eventfd).unwrap();
-        linux_eventfd::write(owner, eventfd, 1).unwrap();
-        assert_eq!(wait(owner, epfd, &mut output), Ok(1));
-        close_all(owner);
-        linux_eventfd::close(owner, eventfd).unwrap();
+        assert_eq!(crate::linux_fd::epoll_wait(owner, epfd, &mut output), Ok(0));
+        let value = 1_u64.to_ne_bytes();
+        crate::linux_fd::write(owner, eventfd, &value, 0).unwrap();
+        assert_eq!(crate::linux_fd::epoll_wait(owner, epfd, &mut output), Ok(1));
+        assert_eq!(crate::linux_fd::epoll_wait(owner, epfd, &mut output), Ok(0));
+        let mut drained = [0_u8; 8];
+        crate::linux_fd::read(owner, eventfd, &mut drained, 0).unwrap();
+        crate::linux_fd::write(owner, eventfd, &value, 0).unwrap();
+        assert_eq!(crate::linux_fd::epoll_wait(owner, epfd, &mut output), Ok(1));
+        crate::linux_fd::close_all(owner);
     }
 
     #[test]
-    fn ctl_rejects_duplicate_and_cross_owner_targets() {
-        let owner = 0x2003;
-        let other = 0x2004;
-        let eventfd = linux_eventfd::create(owner, 0, 0).unwrap();
-        let epfd = create(owner, 0).unwrap();
-        assert_eq!(
-            ctl(other, epfd, EPOLL_CTL_ADD, eventfd, EPOLLIN, 0),
-            Err(EpollError::InvalidArgument)
-        );
-        ctl(owner, epfd, EPOLL_CTL_ADD, eventfd, EPOLLIN, 0).unwrap();
-        assert_eq!(
-            ctl(owner, epfd, EPOLL_CTL_ADD, eventfd, EPOLLIN, 0),
-            Err(EpollError::AlreadyExists)
-        );
-        close_all(owner);
-        linux_eventfd::close(owner, eventfd).unwrap();
+    fn edge_watch_beyond_output_capacity_remains_pending() {
+        let owner = ProcessHandle {
+            pid: 0x5303,
+            generation: 3,
+        };
+        let first = crate::linux_fd::eventfd(owner, 1, 0).unwrap();
+        let second = crate::linux_fd::eventfd(owner, 1, 0).unwrap();
+        let epfd = crate::linux_fd::epoll_create(owner, 0).unwrap();
+        crate::linux_fd::epoll_ctl(owner, epfd, EPOLL_CTL_ADD, first, EPOLLIN | EPOLLET, 1)
+            .unwrap();
+        crate::linux_fd::epoll_ctl(owner, epfd, EPOLL_CTL_ADD, second, EPOLLIN | EPOLLET, 2)
+            .unwrap();
+
+        let mut output = [ReadyEvent { events: 0, data: 0 }; 1];
+        assert_eq!(crate::linux_fd::epoll_wait(owner, epfd, &mut output), Ok(1));
+        assert_eq!(output[0].data, 1);
+        assert_eq!(crate::linux_fd::epoll_wait(owner, epfd, &mut output), Ok(1));
+        assert_eq!(output[0].data, 2);
+        assert_eq!(crate::linux_fd::epoll_wait(owner, epfd, &mut output), Ok(0));
+        crate::linux_fd::close_all(owner);
     }
 
     #[test]
-    fn exec_closes_only_flagged_epoll_instances() {
-        let owner = 0x2005;
-        let flagged = create(owner, EPOLL_CLOEXEC).unwrap();
-        let retained = create(owner, 0).unwrap();
-        assert_eq!(close_on_exec(owner), 1);
-        assert_eq!(close(owner, flagged), Err(EpollError::BadFileDescriptor));
-        close(owner, retained).unwrap();
+    fn pipe_hup_is_reported_without_explicit_interest() {
+        let owner = ProcessHandle {
+            pid: 0x5304,
+            generation: 3,
+        };
+        let (reader, writer) = crate::linux_fd::pipe(owner, crate::linux_file::O_NONBLOCK).unwrap();
+        let epfd = crate::linux_fd::epoll_create(owner, 0).unwrap();
+        crate::linux_fd::epoll_ctl(owner, epfd, EPOLL_CTL_ADD, reader, EPOLLIN, 0x77).unwrap();
+        crate::linux_fd::close(owner, writer).unwrap();
+
+        let mut output = [ReadyEvent { events: 0, data: 0 }; 1];
+        assert_eq!(crate::linux_fd::epoll_wait(owner, epfd, &mut output), Ok(1));
+        assert_eq!(output[0].events, EPOLLHUP);
+        assert_eq!(output[0].data, 0x77);
+        crate::linux_fd::close_all(owner);
     }
 }

@@ -45,14 +45,18 @@ containing all of the following evidence from the same bundle:
   descriptor close;
 - `ARACH_C2_MPROTECT_PASS` was emitted after W+X rejection, an exact R-to-RX
   transition, syscall-return TLB flush, and execution from the mapped page;
+- `ARACH_C1_PIPE_DESCRIPTOR_PASS` was emitted after dense descriptor
+  allocation, open-object duplication, descriptor-local close-on-exec,
+  pipe poll/epoll readiness, EOF/HUP/EPIPE, and replacement-image inheritance
+  all completed;
 - `ARACH_C1_EXIT_GROUP_ARMED` was emitted only after an independently
   scheduled cloned peer woke the leader and blocked; Push then emitted
   `[PID 1] child 2 exited with status 0` only after `exit_group` retired that
   peer and published the leader as the sole waitable process zombie;
 - `ARACH_C1_LINUX_SYSCALL_PASS` was emitted after the Linux personality
   exercised identity, anonymous and private file memory, `mprotect`, `brk`,
-  shared-address-space clone,
-  shared descriptor access, independent private robust-futex and
+  shared-address-space clone, unified descriptor/open-object and pipe access,
+  independent private robust-futex and
   clear-child-tid block/wake paths, kernel owner-death publication, measured
   signal delivery/return, bounded whole-group exit, and clean supervisor reap;
 - `ARACH_C2_RUNTIME_LINKER_ENTER` was emitted by the separately measured C

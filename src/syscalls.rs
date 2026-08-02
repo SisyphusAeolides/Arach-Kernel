@@ -42,6 +42,10 @@ const ERROR_NOT_DIRECTORY: isize = -20;
 const ERROR_IS_DIRECTORY: isize = -21;
 #[cfg(any(target_os = "none", test))]
 const ERROR_FILE_TOO_LARGE: isize = -27;
+#[cfg(target_os = "none")]
+const ERROR_ILLEGAL_SEEK: isize = -29;
+#[cfg(target_os = "none")]
+const ERROR_BROKEN_PIPE: isize = -32;
 #[cfg(any(target_os = "none", test))]
 const ERROR_NO_SPACE: isize = -28;
 #[cfg(any(target_os = "none", test))]
@@ -687,14 +691,8 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         return complete_schedule_decision(decision);
     }
     let process_owner = crate::process::lifecycle::current_thread_group_handle().unwrap_or(exiting);
-    let _ = crate::linux_file::close_all(process_owner);
+    let _ = crate::linux_fd::close_all(process_owner);
     let _ = crate::akashic_vfs::close_all(process_owner);
-    // Linux descriptors are process-owned. Reclaim the bounded eventfd set
-    // before publishing the zombie transition so an exiting service cannot
-    // leak wake objects into a later PID generation.
-    let _ = crate::linux_epoll::close_all(process_owner.pid);
-    let _ = crate::linux_timerfd::close_all(process_owner.pid);
-    let _ = crate::linux_eventfd::close_all(process_owner.pid);
     let decision = match crate::process::lifecycle::schedule_exit(exit_code) {
         Ok(decision) => decision,
         Err(_) => crate::arch::x86_64::halt(),
@@ -740,11 +738,8 @@ fn schedule_linux_exit_group_return(
         cleanup_linux_thread_exit(owner, (owner == leader).then_some(leader));
     }
 
-    let _ = crate::linux_file::close_all(leader);
+    let _ = crate::linux_fd::close_all(leader);
     let _ = crate::akashic_vfs::close_all(leader);
-    let _ = crate::linux_epoll::close_all(leader.pid);
-    let _ = crate::linux_timerfd::close_all(leader.pid);
-    let _ = crate::linux_eventfd::close_all(leader.pid);
     let decision = match crate::process::lifecycle::schedule_exit_group(exit_code) {
         Ok(decision) => decision,
         Err(_) => crate::arch::x86_64::halt(),
@@ -1012,10 +1007,7 @@ fn schedule_linux_execve_return(
     let _ = crate::linux_robust::take_robust_list(current);
     let _ = crate::linux_thread::take_clear_child_tid(current);
     crate::linux_signal::reset_for_exec(current);
-    let _ = crate::linux_file::close_on_exec(current);
-    let _ = crate::linux_epoll::close_on_exec(current.pid);
-    let _ = crate::linux_timerfd::close_on_exec(current.pid);
-    let _ = crate::linux_eventfd::close_on_exec(current.pid);
+    let _ = crate::linux_fd::close_on_exec(current);
     scheduled
 }
 
@@ -1366,7 +1358,13 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Stat) => linux_stat(arguments),
         Some(crate::process::abi::LinuxSyscall::Fstat) => linux_fstat(arguments),
         Some(crate::process::abi::LinuxSyscall::Poll) => linux_poll(arguments),
+        Some(crate::process::abi::LinuxSyscall::Pipe) => linux_pipe(arguments, 0),
         Some(crate::process::abi::LinuxSyscall::Lseek) => linux_lseek(arguments),
+        Some(crate::process::abi::LinuxSyscall::Dup) => linux_dup(arguments),
+        Some(crate::process::abi::LinuxSyscall::Dup2) => linux_dup2(arguments),
+        Some(crate::process::abi::LinuxSyscall::Dup3) => linux_dup3(arguments),
+        Some(crate::process::abi::LinuxSyscall::Pipe2) => linux_pipe(arguments, arguments[1]),
+        Some(crate::process::abi::LinuxSyscall::Fcntl) => linux_fcntl(arguments),
         Some(crate::process::abi::LinuxSyscall::Getpid) => {
             crate::process::lifecycle::current_thread_group() as isize
         }
@@ -1718,15 +1716,13 @@ fn linux_eventfd2(arguments: [u64; 6]) -> isize {
     let Ok(flags) = u32::try_from(arguments[1]) else {
         return ERROR_INVALID_ARGUMENT;
     };
-    let owner = crate::process::lifecycle::current_thread_group();
-    if owner == 0 {
-        return -13;
-    }
-    match crate::linux_eventfd::create(owner, initial, flags) {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::eventfd(owner, initial, flags) {
         Ok(fd) => fd as isize,
-        Err(crate::linux_eventfd::EventFdError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
-        Err(crate::linux_eventfd::EventFdError::Capacity) => -28,
-        Err(_) => -5,
+        Err(error) => map_linux_descriptor_error(error),
     }
 }
 
@@ -1784,15 +1780,13 @@ fn linux_timerfd_create(arguments: [u64; 6]) -> isize {
     let Ok(flags) = u32::try_from(arguments[1]) else {
         return ERROR_INVALID_ARGUMENT;
     };
-    let owner = crate::process::lifecycle::current_thread_group();
-    if owner == 0 {
-        return -13;
-    }
-    match crate::linux_timerfd::create(owner, clockid, flags) {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::timerfd_create(owner, clockid, flags) {
         Ok(fd) => fd as isize,
-        Err(crate::linux_timerfd::TimerFdError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
-        Err(crate::linux_timerfd::TimerFdError::Capacity) => -28,
-        Err(_) => -5,
+        Err(error) => map_linux_descriptor_error(error),
     }
 }
 
@@ -1808,15 +1802,14 @@ fn linux_timerfd_settime(arguments: [u64; 6]) -> isize {
         Ok(value) => value,
         Err(error) => return error,
     };
-    let owner = crate::process::lifecycle::current_thread_group();
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
     let now = crate::interrupts::monotonic_nanoseconds();
-    let old = match crate::linux_timerfd::settime(owner, fd, flags, new_value, now) {
+    let old = match crate::linux_fd::timerfd_settime(owner, fd, flags, new_value, now) {
         Ok(value) => value,
-        Err(crate::linux_timerfd::TimerFdError::InvalidArgument) => return ERROR_INVALID_ARGUMENT,
-        Err(crate::linux_timerfd::TimerFdError::BadFileDescriptor) => {
-            return ERROR_BAD_FILE_DESCRIPTOR;
-        }
-        Err(_) => return -5,
+        Err(error) => return map_linux_descriptor_error(error),
     };
     if arguments[3] != 0 {
         if let Err(error) = write_itimerspec(arguments[3], old) {
@@ -1831,17 +1824,17 @@ fn linux_timerfd_gettime(arguments: [u64; 6]) -> isize {
     let Ok(fd) = u32::try_from(arguments[0]) else {
         return ERROR_BAD_FILE_DESCRIPTOR;
     };
-    let owner = crate::process::lifecycle::current_thread_group();
-    let value = match crate::linux_timerfd::gettime(
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let value = match crate::linux_fd::timerfd_gettime(
         owner,
         fd,
         crate::interrupts::monotonic_nanoseconds(),
     ) {
         Ok(value) => value,
-        Err(crate::linux_timerfd::TimerFdError::BadFileDescriptor) => {
-            return ERROR_BAD_FILE_DESCRIPTOR;
-        }
-        Err(_) => return -5,
+        Err(error) => return map_linux_descriptor_error(error),
     };
     match write_itimerspec(arguments[1], value) {
         Ok(()) => 0,
@@ -1854,103 +1847,51 @@ fn linux_read(arguments: [u64; 6]) -> isize {
     let Ok(fd) = u32::try_from(arguments[0]) else {
         return ERROR_BAD_FILE_DESCRIPTOR;
     };
-    let owner_handle = match current_akashic_owner() {
+    let owner = match current_akashic_owner() {
         Ok(owner) => owner,
         Err(error) => return error,
     };
     let length = core::cmp::min(arguments[2], MAXIMUM_AKASHIC_IO_BYTES as u64) as usize;
-    {
-        let mut staging = AKASHIC_IO_STAGING.lock();
-        match crate::linux_file::read(owner_handle, fd, &mut staging[..length]) {
-            Ok(copied) => {
-                return if copy_to_user(arguments[1], &staging[..copied]).is_ok() {
-                    copied as isize
-                } else {
-                    ERROR_BAD_ADDRESS
-                };
-            }
-            Err(crate::linux_file::FileError::BadFileDescriptor) => {}
-            Err(error) => return map_linux_file_error(error),
-        }
-    }
-
-    if arguments[2] != core::mem::size_of::<u64>() as u64 {
-        return ERROR_INVALID_ARGUMENT;
-    }
-    let owner = owner_handle.pid;
-    match crate::linux_eventfd::read(owner, fd) {
-        Ok(value) => {
-            if copy_value_to_user(arguments[1], &value).is_err() {
-                ERROR_BAD_ADDRESS
-            } else {
-                core::mem::size_of::<u64>() as isize
-            }
-        }
-        Err(crate::linux_eventfd::EventFdError::WouldBlock) => ERROR_TRY_AGAIN,
-        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => {
-            match crate::linux_timerfd::read(owner, fd, crate::interrupts::monotonic_nanoseconds())
-            {
-                Ok(value) => {
-                    if copy_value_to_user(arguments[1], &value).is_err() {
-                        ERROR_BAD_ADDRESS
-                    } else {
-                        core::mem::size_of::<u64>() as isize
-                    }
-                }
-                Err(crate::linux_timerfd::TimerFdError::WouldBlock) => ERROR_TRY_AGAIN,
-                Err(crate::linux_timerfd::TimerFdError::BadFileDescriptor) => {
-                    ERROR_BAD_FILE_DESCRIPTOR
-                }
-                Err(_) => ERROR_IO,
-            }
-        }
-        Err(_) => ERROR_IO,
+    let mut staging = AKASHIC_IO_STAGING.lock();
+    let copied = match crate::linux_fd::read(
+        owner,
+        fd,
+        &mut staging[..length],
+        crate::interrupts::monotonic_nanoseconds(),
+    ) {
+        Ok(copied) => copied,
+        Err(error) => return map_linux_descriptor_error(error),
+    };
+    if copied != 0 && copy_to_user(arguments[1], &staging[..copied]).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        copied as isize
     }
 }
 
 #[cfg(target_os = "none")]
 fn linux_write(arguments: [u64; 6]) -> isize {
-    if arguments[0] == 1 || arguments[0] == 2 {
-        return write_from_user(arguments);
-    }
     let Ok(fd) = u32::try_from(arguments[0]) else {
         return ERROR_BAD_FILE_DESCRIPTOR;
     };
-    let owner_handle = match current_akashic_owner() {
+    let owner = match current_akashic_owner() {
         Ok(owner) => owner,
         Err(error) => return error,
     };
-    if crate::linux_file::is_open(owner_handle, fd) {
-        let length = core::cmp::min(arguments[2], MAXIMUM_AKASHIC_IO_BYTES as u64) as usize;
-        let mut staging = AKASHIC_IO_STAGING.lock();
-        if copy_from_user(arguments[1], &mut staging[..length]).is_err() {
-            return ERROR_BAD_ADDRESS;
-        }
-        return match crate::linux_file::write(
-            owner_handle,
-            fd,
-            &staging[..length],
-            crate::interrupts::monotonic_nanoseconds(),
-        ) {
-            Ok(written) => written as isize,
-            Err(error) => map_linux_file_error(error),
-        };
-    }
-
-    if arguments[2] != core::mem::size_of::<u64>() as u64 {
-        return ERROR_INVALID_ARGUMENT;
-    }
-    let mut bytes = [0_u8; core::mem::size_of::<u64>()];
-    if copy_from_user(arguments[1], &mut bytes).is_err() {
+    let length = core::cmp::min(arguments[2], MAXIMUM_AKASHIC_IO_BYTES as u64) as usize;
+    let mut staging = AKASHIC_IO_STAGING.lock();
+    if length != 0 && copy_from_user(arguments[1], &mut staging[..length]).is_err() {
         return ERROR_BAD_ADDRESS;
     }
-    let value = u64::from_ne_bytes(bytes);
-    match crate::linux_eventfd::write(owner_handle.pid, fd, value) {
-        Ok(()) => core::mem::size_of::<u64>() as isize,
-        Err(crate::linux_eventfd::EventFdError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
-        Err(crate::linux_eventfd::EventFdError::Overflow) => ERROR_TRY_AGAIN,
-        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => ERROR_BAD_FILE_DESCRIPTOR,
-        Err(_) => ERROR_IO,
+    match crate::linux_fd::write(
+        owner,
+        fd,
+        &staging[..length],
+        crate::interrupts::monotonic_nanoseconds(),
+    ) {
+        Ok(crate::linux_fd::WriteResult::Bytes(written)) => written as isize,
+        Ok(crate::linux_fd::WriteResult::Console) => write_console_bytes(&staging[..length]),
+        Err(error) => map_linux_descriptor_error(error),
     }
 }
 
@@ -1959,35 +1900,148 @@ fn linux_close(arguments: [u64; 6]) -> isize {
     let Ok(fd) = u32::try_from(arguments[0]) else {
         return ERROR_BAD_FILE_DESCRIPTOR;
     };
-    let owner_handle = match current_akashic_owner() {
+    let owner = match current_akashic_owner() {
         Ok(owner) => owner,
         Err(error) => return error,
     };
-    match crate::linux_file::close(owner_handle, fd) {
-        Ok(()) => return 0,
-        Err(crate::linux_file::FileError::BadFileDescriptor) => {}
-        Err(error) => return map_linux_file_error(error),
-    }
-
-    let owner = owner_handle.pid;
-    match crate::linux_eventfd::close(owner, fd) {
+    match crate::linux_fd::close(owner, fd) {
         Ok(()) => 0,
-        Err(crate::linux_eventfd::EventFdError::BadFileDescriptor) => {
-            match crate::linux_timerfd::close(owner, fd) {
-                Ok(()) => 0,
-                Err(crate::linux_timerfd::TimerFdError::BadFileDescriptor) => {
-                    match crate::linux_epoll::close(owner, fd) {
-                        Ok(()) => 0,
-                        Err(crate::linux_epoll::EpollError::BadFileDescriptor) => {
-                            ERROR_BAD_FILE_DESCRIPTOR
-                        }
-                        Err(_) => ERROR_IO,
-                    }
-                }
-                Err(_) => ERROR_IO,
-            }
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_pipe(arguments: [u64; 6], raw_flags: u64) -> isize {
+    let Ok(flags) = u32::try_from(raw_flags) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let (reader, writer) = match crate::linux_fd::pipe(owner, flags) {
+        Ok(pair) => pair,
+        Err(error) => return map_linux_descriptor_error(error),
+    };
+    let mut encoded = [0_u8; 8];
+    encoded[..4].copy_from_slice(&(reader as i32).to_ne_bytes());
+    encoded[4..].copy_from_slice(&(writer as i32).to_ne_bytes());
+    if copy_to_user(arguments[0], &encoded).is_err() {
+        let _ = crate::linux_fd::close(owner, reader);
+        let _ = crate::linux_fd::close(owner, writer);
+        ERROR_BAD_ADDRESS
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_dup(arguments: [u64; 6]) -> isize {
+    let Ok(old_fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::duplicate(owner, old_fd, 0, false) {
+        Ok(fd) => fd as isize,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_dup2(arguments: [u64; 6]) -> isize {
+    let (Ok(old_fd), Ok(new_fd)) = (u32::try_from(arguments[0]), u32::try_from(arguments[1]))
+    else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::duplicate_to(owner, old_fd, new_fd, false, false) {
+        Ok(fd) => fd as isize,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_dup3(arguments: [u64; 6]) -> isize {
+    let (Ok(old_fd), Ok(new_fd)) = (u32::try_from(arguments[0]), u32::try_from(arguments[1]))
+    else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let Ok(flags) = u32::try_from(arguments[2]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if flags & !crate::linux_file::O_CLOEXEC != 0 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::duplicate_to(
+        owner,
+        old_fd,
+        new_fd,
+        flags & crate::linux_file::O_CLOEXEC != 0,
+        true,
+    ) {
+        Ok(fd) => fd as isize,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_fcntl(arguments: [u64; 6]) -> isize {
+    const F_DUPFD: u64 = 0;
+    const F_GETFD: u64 = 1;
+    const F_SETFD: u64 = 2;
+    const F_GETFL: u64 = 3;
+    const F_SETFL: u64 = 4;
+    const F_DUPFD_CLOEXEC: u64 = 1030;
+
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let result = match arguments[1] {
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            let Ok(minimum) = u32::try_from(arguments[2]) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            crate::linux_fd::duplicate(owner, fd, minimum, arguments[1] == F_DUPFD_CLOEXEC)
         }
-        Err(_) => ERROR_IO,
+        F_GETFD => crate::linux_fd::descriptor_flags(owner, fd),
+        F_SETFD => {
+            let Ok(flags) = u32::try_from(arguments[2]) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            return match crate::linux_fd::set_descriptor_flags(owner, fd, flags) {
+                Ok(()) => 0,
+                Err(error) => map_linux_descriptor_error(error),
+            };
+        }
+        F_GETFL => crate::linux_fd::status_flags(owner, fd),
+        F_SETFL => {
+            let Ok(flags) = u32::try_from(arguments[2]) else {
+                return ERROR_INVALID_ARGUMENT;
+            };
+            return match crate::linux_fd::set_status_flags(owner, fd, flags) {
+                Ok(()) => 0,
+                Err(error) => map_linux_descriptor_error(error),
+            };
+        }
+        _ => return ERROR_INVALID_ARGUMENT,
+    };
+    match result {
+        Ok(value) => value as isize,
+        Err(error) => map_linux_descriptor_error(error),
     }
 }
 
@@ -2020,14 +2074,14 @@ fn linux_open_path(pointer: u64, flags: u32, dirfd: Option<i64>) -> isize {
         Ok(owner) => owner,
         Err(error) => return error,
     };
-    match crate::linux_file::open(
+    match crate::linux_fd::open(
         owner,
         &path[..length],
         flags,
         crate::interrupts::monotonic_nanoseconds(),
     ) {
         Ok(fd) => fd as isize,
-        Err(error) => map_linux_file_error(error),
+        Err(error) => map_linux_descriptor_error(error),
     }
 }
 
@@ -2053,11 +2107,11 @@ fn linux_fstat(arguments: [u64; 6]) -> isize {
         Ok(owner) => owner,
         Err(error) => return error,
     };
-    let stat = match crate::linux_file::fstat(owner, fd) {
+    let stat = match crate::linux_fd::metadata(owner, fd) {
         Ok(stat) => stat,
-        Err(error) => return map_linux_file_error(error),
+        Err(error) => return map_linux_descriptor_error(error),
     };
-    write_linux_stat(arguments[1], stat, u64::from(fd) + 1)
+    write_linux_descriptor_stat(arguments[1], stat)
 }
 
 #[cfg(target_os = "none")]
@@ -2072,9 +2126,9 @@ fn linux_lseek(arguments: [u64; 6]) -> isize {
         Ok(owner) => owner,
         Err(error) => return error,
     };
-    match crate::linux_file::seek(owner, fd, arguments[1] as i64, whence) {
+    match crate::linux_fd::seek(owner, fd, arguments[1] as i64, whence) {
         Ok(offset) => isize::try_from(offset).unwrap_or(isize::MAX),
-        Err(error) => map_linux_file_error(error),
+        Err(error) => map_linux_descriptor_error(error),
     }
 }
 
@@ -2140,18 +2194,40 @@ fn copy_linux_path(
 
 #[cfg(target_os = "none")]
 fn write_linux_stat(destination: u64, stat: crate::akashic_vfs::Stat, inode: u64) -> isize {
-    let (mode, links) = match stat.kind {
-        crate::akashic_vfs::NodeKind::File => (0o100_644, 1),
-        crate::akashic_vfs::NodeKind::Directory => (0o040_755, 2),
+    let mode = match stat.kind {
+        crate::akashic_vfs::NodeKind::File => 0o100_644,
+        crate::akashic_vfs::NodeKind::Directory => 0o040_755,
     };
-    let seconds = core::cmp::min(stat.modified_ticks / 1_000_000_000, i64::MAX as u64) as i64;
-    let nanoseconds = (stat.modified_ticks % 1_000_000_000) as i64;
-    let size = core::cmp::min(stat.size_bytes, i64::MAX as u64) as i64;
+    write_linux_descriptor_stat(
+        destination,
+        crate::linux_fd::DescriptorMetadata {
+            mode,
+            size_bytes: stat.size_bytes,
+            created_ticks: stat.created_ticks,
+            modified_ticks: stat.modified_ticks,
+            inode,
+        },
+    )
+}
+
+#[cfg(target_os = "none")]
+fn write_linux_descriptor_stat(
+    destination: u64,
+    metadata: crate::linux_fd::DescriptorMetadata,
+) -> isize {
+    let links = if metadata.mode & 0o170_000 == 0o040_000 {
+        2
+    } else {
+        1
+    };
+    let seconds = core::cmp::min(metadata.modified_ticks / 1_000_000_000, i64::MAX as u64) as i64;
+    let nanoseconds = (metadata.modified_ticks % 1_000_000_000) as i64;
+    let size = core::cmp::min(metadata.size_bytes, i64::MAX as u64) as i64;
     let encoded = LinuxStat {
         st_dev: 1,
-        st_ino: inode.max(1),
+        st_ino: metadata.inode.max(1),
         st_nlink: links,
-        st_mode: mode,
+        st_mode: metadata.mode,
         st_uid: 0,
         st_gid: 0,
         pad0: 0,
@@ -2195,6 +2271,24 @@ fn map_linux_file_error(error: crate::linux_file::FileError) -> isize {
 }
 
 #[cfg(target_os = "none")]
+fn map_linux_descriptor_error(error: crate::linux_fd::DescriptorError) -> isize {
+    match error {
+        crate::linux_fd::DescriptorError::InvalidArgument => ERROR_INVALID_ARGUMENT,
+        crate::linux_fd::DescriptorError::BadFileDescriptor => ERROR_BAD_FILE_DESCRIPTOR,
+        crate::linux_fd::DescriptorError::Capacity => ERROR_TOO_MANY_OPEN_FILES,
+        crate::linux_fd::DescriptorError::WouldBlock => ERROR_TRY_AGAIN,
+        crate::linux_fd::DescriptorError::BrokenPipe => ERROR_BROKEN_PIPE,
+        crate::linux_fd::DescriptorError::IllegalSeek => ERROR_ILLEGAL_SEEK,
+        crate::linux_fd::DescriptorError::AlreadyExists => ERROR_ALREADY_EXISTS,
+        crate::linux_fd::DescriptorError::NotFound => ERROR_NO_ENTRY,
+        crate::linux_fd::DescriptorError::OperationNotPermitted => ERROR_OPERATION_NOT_PERMITTED,
+        crate::linux_fd::DescriptorError::PermissionDenied => ERROR_PERMISSION_DENIED,
+        crate::linux_fd::DescriptorError::Io => ERROR_IO,
+        crate::linux_fd::DescriptorError::File(error) => map_linux_file_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
 fn linux_descriptor_revents(
     owner: crate::process::lifecycle::ProcessHandle,
     fd: i32,
@@ -2206,19 +2300,11 @@ fn linux_descriptor_revents(
     let Ok(fd) = u32::try_from(fd) else {
         return LINUX_POLLNVAL;
     };
-    let ready = if let Ok(ready) = crate::linux_file::readiness(owner, fd) {
-        ready
-    } else if let Ok(ready) = crate::linux_eventfd::readiness(owner.pid, fd) {
-        ready
-    } else if let Ok(ready) =
-        crate::linux_timerfd::readiness(owner.pid, fd, crate::interrupts::monotonic_nanoseconds())
-    {
-        ready
-    } else if let Ok(ready) = crate::linux_epoll::readiness(owner.pid, fd) {
-        ready
-    } else {
-        return LINUX_POLLNVAL;
-    };
+    let ready =
+        match crate::linux_fd::readiness(owner, fd, crate::interrupts::monotonic_nanoseconds()) {
+            Ok(ready) => ready,
+            Err(_) => return LINUX_POLLNVAL,
+        };
     let mut revents = (ready as u16) & requested;
     revents |= (ready as u16) & (LINUX_POLLERR | LINUX_POLLHUP);
     revents
@@ -2272,15 +2358,13 @@ fn linux_epoll_create1(arguments: [u64; 6]) -> isize {
     let Ok(flags) = u32::try_from(arguments[0]) else {
         return ERROR_INVALID_ARGUMENT;
     };
-    let owner = crate::process::lifecycle::current_thread_group();
-    if owner == 0 {
-        return -13;
-    }
-    match crate::linux_epoll::create(owner, flags) {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::epoll_create(owner, flags) {
         Ok(fd) => fd as isize,
-        Err(crate::linux_epoll::EpollError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
-        Err(crate::linux_epoll::EpollError::Capacity) => -28,
-        Err(_) => -5,
+        Err(error) => map_linux_descriptor_error(error),
     }
 }
 
@@ -2305,14 +2389,13 @@ fn linux_epoll_ctl(arguments: [u64; 6]) -> isize {
         events = u32::from_ne_bytes(encoded[0..4].try_into().unwrap());
         data = u64::from_ne_bytes(encoded[4..12].try_into().unwrap());
     }
-    let owner = crate::process::lifecycle::current_thread_group();
-    match crate::linux_epoll::ctl(owner, epfd, operation, fd, events, data) {
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::epoll_ctl(owner, epfd, operation, fd, events, data) {
         Ok(()) => 0,
-        Err(crate::linux_epoll::EpollError::BadFileDescriptor) => ERROR_BAD_FILE_DESCRIPTOR,
-        Err(crate::linux_epoll::EpollError::InvalidArgument) => ERROR_INVALID_ARGUMENT,
-        Err(crate::linux_epoll::EpollError::AlreadyExists) => -17,
-        Err(crate::linux_epoll::EpollError::NotFound) => -2,
-        Err(crate::linux_epoll::EpollError::Capacity) => -28,
+        Err(error) => map_linux_descriptor_error(error),
     }
 }
 
@@ -2327,18 +2410,15 @@ fn linux_epoll_wait(arguments: [u64; 6]) -> isize {
     if maxevents == 0 || maxevents > crate::linux_epoll::MAXIMUM_READY_EVENTS {
         return ERROR_INVALID_ARGUMENT;
     }
-    let owner = crate::process::lifecycle::current_thread_group();
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
     let mut ready = [crate::linux_epoll::ReadyEvent { events: 0, data: 0 };
         crate::linux_epoll::MAXIMUM_READY_EVENTS];
-    let count = match crate::linux_epoll::wait(owner, epfd, &mut ready[..maxevents]) {
+    let count = match crate::linux_fd::epoll_wait(owner, epfd, &mut ready[..maxevents]) {
         Ok(count) => count,
-        Err(crate::linux_epoll::EpollError::BadFileDescriptor) => {
-            return ERROR_BAD_FILE_DESCRIPTOR;
-        }
-        Err(crate::linux_epoll::EpollError::InvalidArgument) => {
-            return ERROR_INVALID_ARGUMENT;
-        }
-        Err(_) => return -5,
+        Err(error) => return map_linux_descriptor_error(error),
     };
     let mut encoded = [0_u8; crate::linux_epoll::MAXIMUM_READY_EVENTS * 12];
     for (index, event) in ready[..count].iter().enumerate() {
@@ -2413,14 +2493,14 @@ fn linux_mmap(arguments: [u64; 6]) -> isize {
             Err(error) => return error,
         };
         let mut staging = MMAP_FILE_STAGING.lock();
-        let snapshot = match crate::linux_file::snapshot_range(
+        let snapshot = match crate::linux_fd::snapshot_range(
             owner,
             fd,
             offset,
             &mut staging[..rounded_length],
         ) {
             Ok(snapshot) => snapshot,
-            Err(error) => return map_linux_file_error(error),
+            Err(error) => return map_linux_descriptor_error(error),
         };
         let Some(remaining) = snapshot.file_bytes.checked_sub(offset) else {
             return ERROR_INVALID_ARGUMENT;
@@ -2984,12 +3064,20 @@ fn write_from_user(arguments: [u64; 6]) -> isize {
     if copy_from_user(arguments[1], &mut bytes[..length]).is_err() {
         return ERROR_BAD_ADDRESS;
     }
+    write_console_bytes(&bytes[..length])
+}
+
+#[cfg(target_os = "none")]
+fn write_console_bytes(bytes: &[u8]) -> isize {
+    if bytes.len() > MAXIMUM_WRITE_BYTES {
+        return ERROR_INVALID_ARGUMENT;
+    }
     // SAFETY: The syscall gate serializes this bootstrap CPU and COM1 is the
     // kernel's established debug sink. User bytes are copied before I/O.
     let mut serial = unsafe { SerialPort::initialize(COM1) };
-    serial.write_bytes(&bytes[..length]);
+    serial.write_bytes(bytes);
     WRITE_HITS.fetch_add(1, Ordering::AcqRel);
-    length as isize
+    bytes.len() as isize
 }
 
 #[cfg(target_os = "none")]

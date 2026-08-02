@@ -35,6 +35,15 @@ data Gate
   | SignalMaskAndPending
   | RtSignalFrame
   | RtSignalReturn
+  | UnifiedDescriptorNamespace
+  | GenerationBoundOpenObject
+  | DescriptorAliasLifetime
+  | DescriptorLocalCloseOnExec
+  | PipeAtomicTransfer
+  | PipeEndpointLifetime
+  | PollEpollPipeReadiness
+  | EpollWatchLifetime
+  | ExecDescriptorInheritance
   | ThreadGroupSnapshot
   | PeerGenerationRetirement
   | LeaderZombiePublication
@@ -140,13 +149,32 @@ record SignalReturnCertificate where
   rtSignalFrame : Measurement RtSignalFrame
   rtSignalReturn : Measurement RtSignalReturn
 
+||| Runtime evidence for the unified descriptor and anonymous-pipe boundary.
+||| Public descriptor reuse cannot change an epoll target, a watch follows an
+||| open object while descriptor aliases remain, the last descriptor close
+||| detaches it, and exec inheritance is impossible to claim without
+||| independently measured close-on-exec behavior.
+public export
+record DescriptorPipeCertificate where
+  constructor MkDescriptorPipeCertificate
+  signalReturn : SignalReturnCertificate
+  unifiedDescriptorNamespace : Measurement UnifiedDescriptorNamespace
+  generationBoundOpenObject : Measurement GenerationBoundOpenObject
+  descriptorAliasLifetime : Measurement DescriptorAliasLifetime
+  descriptorLocalCloseOnExec : Measurement DescriptorLocalCloseOnExec
+  pipeAtomicTransfer : Measurement PipeAtomicTransfer
+  pipeEndpointLifetime : Measurement PipeEndpointLifetime
+  pollEpollPipeReadiness : Measurement PollEpollPipeReadiness
+  epollWatchLifetime : Measurement EpollWatchLifetime
+  execDescriptorInheritance : Measurement ExecDescriptorInheritance
+
 ||| Runtime evidence that exit_group consumes one bounded exact-generation
 ||| snapshot, retires every non-leader TID, publishes one waitable leader
 ||| zombie, and is observed by the external supervisor.
 public export
 record GroupExitCertificate where
   constructor MkGroupExitCertificate
-  signalReturn : SignalReturnCertificate
+  descriptorPipe : DescriptorPipeCertificate
   threadGroupSnapshot : Measurement ThreadGroupSnapshot
   peerGenerationRetirement : Measurement PeerGenerationRetirement
   leaderZombiePublication : Measurement LeaderZombiePublication
@@ -245,10 +273,20 @@ public export
 signalReturnRequiresRobustExit : SignalReturnCertificate -> RobustExitCertificate
 signalReturnRequiresRobustExit certificate = certificate.robustExit
 
-||| Whole-group termination remains downstream of qualified signal return.
+||| Unified descriptor qualification remains downstream of signal return.
+public export
+descriptorPipeRequiresSignalReturn : DescriptorPipeCertificate -> SignalReturnCertificate
+descriptorPipeRequiresSignalReturn certificate = certificate.signalReturn
+
+||| Whole-group termination remains downstream of the descriptor and pipe
+||| boundary used by the replacement image.
+public export
+groupExitRequiresDescriptorPipe : GroupExitCertificate -> DescriptorPipeCertificate
+groupExitRequiresDescriptorPipe certificate = certificate.descriptorPipe
+
 public export
 groupExitRequiresSignalReturn : GroupExitCertificate -> SignalReturnCertificate
-groupExitRequiresSignalReturn certificate = certificate.signalReturn
+groupExitRequiresSignalReturn certificate = certificate.descriptorPipe.signalReturn
 
 ||| Image replacement remains downstream of qualified whole-group lifecycle
 ||| behavior, even though the admitted first slice requires one group member.

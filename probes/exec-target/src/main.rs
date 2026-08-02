@@ -8,7 +8,9 @@ const EXEC_PASS: &[u8] = b"ARACH_C1_EXECVE_PASS\n";
 const EXIT_GROUP_ARMED: &[u8] = b"ARACH_C1_EXIT_GROUP_ARMED\n";
 const EXPECTED_ARG0: &[u8] = b"exec-target";
 const EXPECTED_ENV0: &[u8] = b"ARACH_EXEC_TRANSACTION=1";
+const SYS_READ: usize = 0;
 const SYS_WRITE: usize = 1;
+const SYS_CLOSE: usize = 3;
 const SYS_CLONE: usize = 56;
 const SYS_EXIT: usize = 60;
 const SYS_GETPID: usize = 39;
@@ -177,6 +179,21 @@ extern "C" fn arach_exec_start(stack: *const usize) -> ! {
         || unsafe { stack.add(2).read() } != 0
         || !unsafe { stack_string_matches(stack.add(3).read(), EXPECTED_ENV0) }
         || unsafe { stack.add(4).read() } != 0
+    {
+        fail();
+    }
+    let mut inherited_value = 0_u64;
+    if unsafe { syscall1(SYS_CLOSE, 126) } != -9
+        || unsafe {
+            syscall3(
+                SYS_READ,
+                125,
+                &mut inherited_value as *mut _ as usize,
+                core::mem::size_of::<u64>(),
+            )
+        } != core::mem::size_of::<u64>() as isize
+        || inherited_value != 1
+        || unsafe { syscall1(SYS_CLOSE, 125) } != 0
     {
         fail();
     }

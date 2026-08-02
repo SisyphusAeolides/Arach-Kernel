@@ -8,6 +8,7 @@ const PASS: &[u8] = b"ARACH_C0_RING3_SYSCALL_PASS\n";
 const THREAD_PASS: &[u8] = b"ARACH_C1_THREAD_FUTEX_PASS\n";
 const ROBUST_PASS: &[u8] = b"ARACH_C1_ROBUST_FUTEX_PASS\n";
 const SIGNAL_PASS: &[u8] = b"ARACH_C1_SIGNAL_RETURN_PASS\n";
+const PIPE_PASS: &[u8] = b"ARACH_C1_PIPE_DESCRIPTOR_PASS\n";
 const FILE_MMAP_PASS: &[u8] = b"ARACH_C2_FILE_MMAP_PASS\n";
 const MPROTECT_PASS: &[u8] = b"ARACH_C2_MPROTECT_PASS\n";
 const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
@@ -28,6 +29,10 @@ const MAPPED_CODE: &[u8] = &[0xb8, 42, 0, 0, 0, 0xc3];
 const SYS_WRITE: usize = 1;
 const SYS_READ: usize = 0;
 const SYS_CLOSE: usize = 3;
+const SYS_FCNTL: usize = 72;
+const SYS_DUP: usize = 32;
+const SYS_DUP3: usize = 292;
+const SYS_PIPE2: usize = 293;
 const SYS_MMAP: usize = 9;
 const SYS_MPROTECT: usize = 10;
 const SYS_MUNMAP: usize = 11;
@@ -61,11 +66,18 @@ const SYS_OPEN: usize = 2;
 const O_RDWR: usize = 0x2;
 const O_CREAT: usize = 0x40;
 const O_EXCL: usize = 0x80;
+const O_NONBLOCK: usize = 0x800;
+const O_CLOEXEC: usize = 0x8_0000;
 
 const EFD_SEMAPHORE: usize = 0x1;
 const POLLIN: u16 = 0x001;
+const POLLHUP: u16 = 0x010;
 const EPOLLIN: u32 = 0x001;
+const EPOLLHUP: u32 = 0x010;
 const EPOLL_CTL_ADD: usize = 1;
+const F_GETFD: usize = 1;
+const F_SETFD: usize = 2;
+const FD_CLOEXEC: usize = 1;
 const FUTEX_WAIT_PRIVATE: usize = 128;
 const FUTEX_WAKE_PRIVATE: usize = 129;
 const FUTEX_WAITERS: u32 = 0x8000_0000;
@@ -1034,16 +1046,23 @@ pub extern "C" fn _start() -> ! {
     {
         fail();
     }
-    if unsafe { linux_syscall1(SYS_CLOSE, epfd as usize) } != 0
+    if unsafe { linux_syscall1(SYS_CLOSE, eventfd as usize) } != 0 {
+        fail();
+    }
+    let replacement_event = unsafe { linux_syscall3(SYS_EVENTFD2, 1, 0, 0) };
+    epoll_out.fill(0);
+    if replacement_event != eventfd
         || unsafe {
-            linux_syscall3(
-                SYS_READ,
-                eventfd as usize,
-                &mut event_value as *mut _ as usize,
-                core::mem::size_of::<u64>(),
+            linux_syscall4(
+                SYS_EPOLL_WAIT,
+                epfd as usize,
+                epoll_out.as_mut_ptr() as usize,
+                1,
+                0,
             )
-        } != -11
-        || unsafe { linux_syscall1(SYS_CLOSE, eventfd as usize) } != 0
+        } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, replacement_event as usize) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, epfd as usize) } != 0
     {
         fail();
     }
@@ -1068,6 +1087,174 @@ pub extern "C" fn _start() -> ! {
         }
     }
     if unsafe { linux_syscall1(SYS_CLOSE, semaphore as usize) } != 0 {
+        fail();
+    }
+
+    // A single dense descriptor namespace now carries regular files,
+    // eventfds, epoll objects, and pipes. The pipe endpoint is watched by
+    // both poll and epoll, while dup retains the same open object after the
+    // original writer descriptor closes.
+    let mut pipe_fds = [-1_i32; 2];
+    if unsafe { linux_syscall3(SYS_PIPE2, pipe_fds.as_mut_ptr() as usize, O_NONBLOCK, 0) } != 0
+        || pipe_fds[0] < 3
+        || pipe_fds[1] < 3
+        || pipe_fds[0] == pipe_fds[1]
+    {
+        fail();
+    }
+    let pipe_reader = pipe_fds[0] as usize;
+    let pipe_writer = pipe_fds[1] as usize;
+    if unsafe { linux_syscall3(SYS_FCNTL, pipe_reader, F_GETFD, 0) } != 0
+        || unsafe { linux_syscall3(SYS_FCNTL, pipe_reader, F_SETFD, FD_CLOEXEC) } != 0
+        || unsafe { linux_syscall3(SYS_FCNTL, pipe_reader, F_GETFD, 0) } != FD_CLOEXEC as isize
+    {
+        fail();
+    }
+    let writer_alias = unsafe { linux_syscall1(SYS_DUP, pipe_writer) };
+    if writer_alias < 3
+        || writer_alias as usize == pipe_writer
+        || unsafe { linux_syscall1(SYS_CLOSE, pipe_writer) } != 0
+    {
+        fail();
+    }
+
+    let pipe_epfd = unsafe { linux_syscall3(SYS_EPOLL_CREATE1, 0, 0, 0) };
+    if pipe_epfd < 3 {
+        fail();
+    }
+    epoll_spec[0..4].copy_from_slice(&EPOLLIN.to_ne_bytes());
+    epoll_spec[4..12].copy_from_slice(&0x7069_7065_u64.to_ne_bytes());
+    if unsafe {
+        linux_syscall4(
+            SYS_EPOLL_CTL,
+            pipe_epfd as usize,
+            EPOLL_CTL_ADD,
+            pipe_reader,
+            epoll_spec.as_ptr() as usize,
+        )
+    } != 0
+    {
+        fail();
+    }
+    epoll_out.fill(0);
+    if unsafe {
+        linux_syscall4(
+            SYS_EPOLL_WAIT,
+            pipe_epfd as usize,
+            epoll_out.as_mut_ptr() as usize,
+            1,
+            0,
+        )
+    } != 0
+    {
+        fail();
+    }
+
+    const PIPE_PAYLOAD: &[u8] = b"unified-pipe";
+    if !write_all(writer_alias as usize, PIPE_PAYLOAD) {
+        fail();
+    }
+    let mut pipe_poll = LinuxPollFd {
+        fd: pipe_reader as i32,
+        events: POLLIN as i16,
+        revents: 0,
+    };
+    epoll_out.fill(0);
+    if unsafe { linux_syscall3(SYS_POLL, &mut pipe_poll as *mut _ as usize, 1, 0) } != 1
+        || pipe_poll.revents & POLLIN as i16 == 0
+        || unsafe {
+            linux_syscall4(
+                SYS_EPOLL_WAIT,
+                pipe_epfd as usize,
+                epoll_out.as_mut_ptr() as usize,
+                1,
+                0,
+            )
+        } != 1
+        || u64::from_ne_bytes(epoll_out[4..12].try_into().unwrap()) != 0x7069_7065
+    {
+        fail();
+    }
+    let mut pipe_output = [0_u8; PIPE_PAYLOAD.len()];
+    if unsafe {
+        linux_syscall3(
+            SYS_READ,
+            pipe_reader,
+            pipe_output.as_mut_ptr() as usize,
+            pipe_output.len(),
+        )
+    } != PIPE_PAYLOAD.len() as isize
+        || pipe_output != PIPE_PAYLOAD
+    {
+        fail();
+    }
+
+    if unsafe { linux_syscall3(SYS_DUP3, writer_alias as usize, 127, O_CLOEXEC) } != 127
+        || unsafe { linux_syscall3(SYS_FCNTL, 127, F_GETFD, 0) } != FD_CLOEXEC as isize
+        || unsafe { linux_syscall1(SYS_CLOSE, writer_alias as usize) } != 0
+        || !write_all(127, b"x")
+    {
+        fail();
+    }
+    let mut one = [0_u8; 1];
+    if unsafe { linux_syscall3(SYS_READ, pipe_reader, one.as_mut_ptr() as usize, 1) } != 1
+        || one != [b'x']
+        || unsafe { linux_syscall1(SYS_CLOSE, 127) } != 0
+        || unsafe { linux_syscall3(SYS_READ, pipe_reader, one.as_mut_ptr() as usize, 1) } != 0
+    {
+        fail();
+    }
+    pipe_poll.revents = 0;
+    epoll_out.fill(0);
+    if unsafe { linux_syscall3(SYS_POLL, &mut pipe_poll as *mut _ as usize, 1, 0) } != 1
+        || pipe_poll.revents & POLLHUP as i16 == 0
+        || unsafe {
+            linux_syscall4(
+                SYS_EPOLL_WAIT,
+                pipe_epfd as usize,
+                epoll_out.as_mut_ptr() as usize,
+                1,
+                0,
+            )
+        } != 1
+        || u32::from_ne_bytes(epoll_out[0..4].try_into().unwrap()) & EPOLLHUP == 0
+        || u64::from_ne_bytes(epoll_out[4..12].try_into().unwrap()) != 0x7069_7065
+        || unsafe { linux_syscall1(SYS_CLOSE, pipe_epfd as usize) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, pipe_reader) } != 0
+    {
+        fail();
+    }
+
+    let mut broken_pipe = [-1_i32; 2];
+    if unsafe { linux_syscall3(SYS_PIPE2, broken_pipe.as_mut_ptr() as usize, O_NONBLOCK, 0) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, broken_pipe[0] as usize) } != 0
+        || unsafe {
+            linux_syscall3(
+                SYS_WRITE,
+                broken_pipe[1] as usize,
+                b"x".as_ptr() as usize,
+                1,
+            )
+        } != -32
+        || unsafe { linux_syscall1(SYS_CLOSE, broken_pipe[1] as usize) } != 0
+    {
+        fail();
+    }
+
+    // Descriptor 125 survives exec as an alias of this eventfd; descriptor
+    // 126 names the same open object but is independently close-on-exec.
+    let inherited_event = unsafe { linux_syscall3(SYS_EVENTFD2, 1, 0, 0) };
+    if inherited_event < 3
+        || unsafe { linux_syscall3(SYS_DUP3, inherited_event as usize, 125, 0) } != 125
+        || unsafe { linux_syscall3(SYS_DUP3, inherited_event as usize, 126, O_CLOEXEC) } != 126
+        || unsafe { linux_syscall1(SYS_CLOSE, inherited_event as usize) } != 0
+    {
+        fail();
+    }
+
+    let wrote =
+        unsafe { linux_syscall3(SYS_WRITE, 1, PIPE_PASS.as_ptr() as usize, PIPE_PASS.len()) };
+    if wrote != PIPE_PASS.len() as isize {
         fail();
     }
 

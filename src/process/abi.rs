@@ -31,6 +31,7 @@ pub enum LinuxSyscall {
     Stat,
     Fstat,
     Poll,
+    Pipe,
     Lseek,
     Mmap,
     Mprotect,
@@ -44,6 +45,7 @@ pub enum LinuxSyscall {
     Dup,
     Dup2,
     Dup3,
+    Pipe2,
     Nanosleep,
     Getpid,
     Getppid,
@@ -111,6 +113,7 @@ impl LinuxSyscall {
             4 => Some(Self::Stat),
             5 => Some(Self::Fstat),
             7 => Some(Self::Poll),
+            22 => Some(Self::Pipe),
             8 => Some(Self::Lseek),
             9 => Some(Self::Mmap),
             10 => Some(Self::Mprotect),
@@ -170,6 +173,8 @@ impl LinuxSyscall {
             288 => Some(Self::Accept4),
             290 => Some(Self::Eventfd2),
             291 => Some(Self::EpollCreate1),
+            292 => Some(Self::Dup3),
+            293 => Some(Self::Pipe2),
             294 => Some(Self::InotifyInit1),
             254 => Some(Self::InotifyAddWatch),
             255 => Some(Self::InotifyRmWatch),
@@ -236,6 +241,9 @@ mod tests {
             Some(LinuxSyscall::TimerfdGettime)
         );
         assert_eq!(LinuxSyscall::from_number(7), Some(LinuxSyscall::Poll));
+        assert_eq!(LinuxSyscall::from_number(22), Some(LinuxSyscall::Pipe));
+        assert_eq!(LinuxSyscall::from_number(292), Some(LinuxSyscall::Dup3));
+        assert_eq!(LinuxSyscall::from_number(293), Some(LinuxSyscall::Pipe2));
         assert_eq!(
             LinuxSyscall::from_number(232),
             Some(LinuxSyscall::EpollWait)

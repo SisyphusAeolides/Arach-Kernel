@@ -3,7 +3,8 @@
 This bounded `no_std` ELF is qualification input, not a desktop or production
 service. It is launched with Arach's Linux x86-64 execution personality and
 proves the first live userspace slice: `write`, `read`, `close`, `eventfd2`,
-`poll`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `getpid`, `gettid`,
+`pipe2`, `dup`, `dup3`, `fcntl`, `poll`, `epoll_create1`, `epoll_ctl`,
+`epoll_wait`, `getpid`, `gettid`,
 `getppid`, anonymous and eager private file `mmap`, exact-range `mprotect` and
 `munmap`, `brk`, private `futex`, transactional static/`PT_INTERP` `execve`, and
 `exit_group`.
@@ -15,6 +16,14 @@ wake. It writes
 `ARACH_C0_RING3_SYSCALL_PASS` after entering ring 3 and
 `ARACH_C1_LINUX_SYSCALL_PASS` only after every Linux operation succeeds. Both
 markers must come from the exact measured bundle.
+
+`ARACH_C1_PIPE_DESCRIPTOR_PASS` is emitted only after the probe observes a
+dense collision-free namespace, descriptor-local `FD_CLOEXEC`, a duplicated
+writer surviving original-fd close, pipe readiness through both poll and
+epoll, automatic watch removal before descriptor reuse, bounded transfer,
+EOF/HUP, and EPIPE. It leaves aliases at fixed fds
+125 and 126 before `execve`; the replacement image proves that 125 retained
+the shared eventfd while close-on-exec independently removed 126.
 
 Before that aggregate marker, the probe writes a six-byte x86-64 function to an
 Akashic regular file, maps it read-only, verifies the snapshot and zero-filled
