@@ -36,7 +36,8 @@ data Gate : Set where
   crossObjectCall : Gate
   boundedObjectClosure breadthFirstDiscovery : Gate
   duplicateDependencyCoalescing acyclicRelocationOrder globalSymbolScope : Gate
-  staticTlsLayout tlsRelocation initializerOrder : Gate
+  staticTlsLayout tlsRelocation dynamicTlsVector tlsResolver : Gate
+  generalDynamicTlsAccess initializerOrder : Gate
   boundedSymbolVersionTables exactSymbolVersionResolution : Gate
   finalizerHandoff reverseFinalizerOrder : Gate
 
@@ -215,6 +216,9 @@ record RuntimeInitializationCertificate : Set where
     multiObjectGraph : MultiObjectGraphCertificate
     staticTlsLayoutEvidence : Measurement staticTlsLayout
     tlsRelocationEvidence : Measurement tlsRelocation
+    dynamicTlsVectorEvidence : Measurement dynamicTlsVector
+    tlsResolverEvidence : Measurement tlsResolver
+    generalDynamicTlsAccessEvidence : Measurement generalDynamicTlsAccess
     initializerOrderEvidence : Measurement initializerOrder
 
 record RuntimeFinalizationCertificate : Set where
@@ -346,7 +350,7 @@ runtimeInitializationRequiresMultiObjectGraph certificate =
   RuntimeInitializationCertificate.multiObjectGraph certificate
 
 -- Finalization and version binding structurally retain the complete bounded
--- runtime-initialization certificate.
+-- startup-TLS, resolver, and runtime-initialization certificate.
 runtimeFinalizationRequiresInitialization :
   RuntimeFinalizationCertificate -> RuntimeInitializationCertificate
 runtimeFinalizationRequiresInitialization certificate =

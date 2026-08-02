@@ -27,6 +27,7 @@ common_flags=(
     -mno-mmx
     -mno-sse
     -mno-sse2
+    -mtls-dialect=gnu
 )
 
 "$cc_bin" "${common_flags[@]}" -std=c11 -O2 -Wall -Wextra -Wconversion \
@@ -104,9 +105,11 @@ test "$(readelf -hW "$provider_output" | awk '/Type:/{print $2}')" = DYN
 test -z "$(readelf -lW "$provider_output" | awk '$1 == "INTERP" {print}')"
 test "$(readelf -dW "$provider_output" | awk '$2 == "(SONAME)" {print $5}')" = '[libarach-provider.so]'
 test "$(readelf -dW "$provider_output" | awk '$2 == "(NEEDED)" {print $5}')" = '[libarach-core.so]'
-test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 2
+test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 3
 test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 2
-test -z "$(readelf -rW "$provider_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" {print}')"
+test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_DTPMOD64" && $5 ~ /^arach_core_tls@ARACH_CORE_1[.]0$/ {count++} END {print count + 0}')" -eq 1
+test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_DTPOFF64" && $5 ~ /^arach_core_tls@ARACH_CORE_1[.]0$/ {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -rW "$provider_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_RELATIVE" && $3 != "R_X86_64_DTPMOD64" && $3 != "R_X86_64_DTPOFF64" {print}')"
 test "$(readelf -dW "$provider_output" | awk '$2 == "(INIT_ARRAYSZ)" {print $3}')" -eq 8
 test "$(readelf -dW "$provider_output" | awk '$2 == "(FINI_ARRAYSZ)" {print $3}')" -eq 8
 test "$(readelf -dW "$provider_output" | awk '$2 == "(FINI)" {count++} END {print count + 0}')" -eq 1
@@ -114,8 +117,12 @@ test "$(readelf -dW "$provider_output" | awk '$2 == "(VERDEFNUM)" {print $3}')" 
 test "$(readelf -dW "$provider_output" | awk '$2 == "(VERNEEDNUM)" {print $3}')" -eq 1
 test "$(readelf -dW "$provider_output" | awk '$2 == "(VERSYM)" {count++} END {print count + 0}')" -eq 1
 test -z "$(readelf -lW "$provider_output" | awk '$1 == "TLS" {print}')"
+test -z "$(readelf -dW "$provider_output" | awk '$2 == "(FLAGS)" && /STATIC_TLS/ {print}')"
 test "$(readelf --dyn-syms -W "$provider_output" | awk '$8 ~ /^arach_provider_value@@ARACH_PROVIDER_1[.]0$/ && $7 != "UND" {count++} END {print count + 0}')" -eq 1
+test "$(readelf --dyn-syms -W "$provider_output" | awk '$4 == "TLS" && $5 == "GLOBAL" && $7 == "UND" && $8 ~ /^arach_core_tls@ARACH_CORE_1[.]0$/ {count++} END {print count + 0}')" -eq 1
+test "$(readelf --dyn-syms -W "$provider_output" | awk '$4 == "NOTYPE" && $5 == "GLOBAL" && $7 == "UND" && $8 == "__tls_get_addr" {count++} END {print count + 0}')" -eq 1
 test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_JUMP_SLOT" && $5 ~ /@ARACH_CORE_1[.]0/ {count++} END {print count + 0}')" -eq 2
+test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_JUMP_SLOT" && $5 == "__tls_get_addr" {count++} END {print count + 0}')" -eq 1
 
 test "$(readelf -hW "$observer_output" | awk '/Type:/{print $2}')" = DYN
 test -z "$(readelf -lW "$observer_output" | awk '$1 == "INTERP" {print}')"

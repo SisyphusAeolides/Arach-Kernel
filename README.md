@@ -88,11 +88,15 @@ The Linux personality currently covers:
   cycles, computes provider-first relocation order, and resolves eager
   `R_X86_64_JUMP_SLOT` bindings through deterministic SysV symbol scope. The
   measured four-object diamond applies nine real `R_X86_64_RELATIVE` writes,
-  installs one real `R_X86_64_TPOFF64` into a bounded Variant-II static TLS
-  arena, binds seven exact-version PLT edges, seals every object R/RW/RX,
-  executes four dependency-first initializers, calls through both branches and
-  their shared provider, and executes eight finalizers in reverse dependency
-  and array order through the x86-64 process-entry callback in QEMU.
+  installs one `R_X86_64_TPOFF64` and one
+  `R_X86_64_DTPMOD64`/`R_X86_64_DTPOFF64` pair into a bounded Variant-II
+  startup TLS arena, publishes a finite dynamic-thread vector at `FS:8`, and
+  admits only the exact compiler-generated `__tls_get_addr` resolver edge.
+  It binds seven exact-version object PLT edges plus that resolver, seals every
+  object R/RW/RX, executes four dependency-first initializers, calls through
+  both branches and their shared provider, and executes eight finalizers in
+  reverse dependency and array order through the x86-64 process-entry callback
+  in QEMU.
 
 The file bridge is intentionally bounded and ephemeral. It is not a persistent
 block-backed filesystem. Anonymous pipes use a 4 KiB allocation-free ring,
@@ -115,7 +119,7 @@ restart remain future compatibility slices.
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
-| Linux userspace compatibility | Identity, anonymous and eager private file mappings, bounded memfd-backed shared mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll and Unix stream sockets with `SCM_RIGHTS`, bounded VFS file calls, transactional static and measured `PT_INTERP` execution, an eight-object dependency engine measured with a deduplicated four-object diamond, provider-first relative/TLS relocation, exact GNU symbol versions, deterministic eager external PLT binding, dependency-first initialization, and reverse finalization, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed descriptor waits and filesystem socket nodes; add general dynamic TLS, search paths, and weak binding; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
+| Linux userspace compatibility | Identity, anonymous and eager private file mappings, bounded memfd-backed shared mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll and Unix stream sockets with `SCM_RIGHTS`, bounded VFS file calls, transactional static and measured `PT_INTERP` execution, an eight-object dependency engine measured with a deduplicated four-object diamond, provider-first relative/static/general-dynamic startup-TLS relocation, exact GNU symbol versions, deterministic eager external PLT binding, dependency-first initialization, and reverse finalization, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed descriptor waits and filesystem socket nodes; add late-loaded TLS and TLSDESC, search paths, and weak binding; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
 | System bootstrap | The pinned Granite/Arach/Push C0 bundle executes under QEMU/OVMF and emits measured ring-3 syscall evidence | Promote the measured bootstrap into a native Push service graph and qualified COSMIC login/session path |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -125,8 +129,8 @@ restart remain future compatibility slices.
 The current critical path is:
 
 1. Keep the measured C0 QEMU/OVMF path green.
-2. Extend the measured bounded graph linker with general dynamic TLS, search
-   paths, weak binding, and broader relocation profiles.
+2. Extend the measured bounded graph linker with late-loaded TLS and TLSDESC,
+   search paths, weak binding, and broader relocation profiles.
 3. Add scheduler-backed descriptor waits, filesystem socket nodes, and
    persistent block-backed storage on the unified open-object boundary.
 4. Connect qualified modules and the native Push service graph to a complete

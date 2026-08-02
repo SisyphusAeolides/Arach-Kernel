@@ -47,6 +47,13 @@ typedef struct {
     VersionRequirementFixture requirements[1];
 } VersionConsumerFixture;
 
+typedef struct {
+    uint32_t hash[5];
+    Elf64Symbol symbols[2];
+    char strings[32];
+    uint16_t versions[2];
+} TlsResolverVersionFixture;
+
 static size_t initializer_sequence[4];
 static size_t initializer_count;
 static size_t finalizer_sequence[8];
@@ -62,7 +69,9 @@ static int test_graph_order(void);
 static int test_cycle_rejection(void);
 static int test_symbol_scope(void);
 static int test_symbol_versions(void);
+static int test_tls_resolver_reference(void);
 static int test_static_tls_layout(void);
+static int test_dynamic_tls_index(void);
 static int test_tls_relocation(void);
 static int test_initializer_order(void);
 static int test_finalizer_order(void);
@@ -432,6 +441,63 @@ static int test_symbol_versions(void) {
     return !validate_symbol_versions(&graph.objects[0], 2);
 }
 
+static int test_tls_resolver_reference(void) {
+    LoadedObject object;
+    TlsResolverVersionFixture fixture;
+    const char symbol_name[] = "__tls_get_addr";
+    zero_bytes((uint8_t *)&object, sizeof(object));
+    zero_bytes((uint8_t *)&fixture, sizeof(fixture));
+    if (!copy_fixture_string(fixture.strings, sizeof(fixture.strings), 1,
+                             symbol_name, sizeof(symbol_name))) {
+        return 0;
+    }
+    fixture.hash[0] = 1;
+    fixture.hash[1] = 2;
+    fixture.symbols[1].name = 1;
+    fixture.symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_NO_TYPE);
+    fixture.symbols[1].other = SYMBOL_VISIBILITY_DEFAULT;
+    fixture.symbols[1].section_index = SYMBOL_UNDEFINED;
+    fixture.versions[1] = VERSION_INDEX_LOCAL;
+    object.dynamic.hash = (uintptr_t)&fixture.hash[0];
+    object.dynamic.symbol_table = (uintptr_t)&fixture.symbols[0];
+    object.dynamic.string_table = (uintptr_t)&fixture.strings[0];
+    object.dynamic.string_size = sizeof(symbol_name) + 1;
+    object.dynamic.version_symbols = (uintptr_t)&fixture.versions[0];
+    object.dynamic.has_version_symbols = 1;
+    object.loads[0].address = (uintptr_t)&fixture;
+    object.loads[0].memory_size = sizeof(fixture);
+    object.loads[0].mapping_size = sizeof(fixture);
+    object.loads[0].flags = PROGRAM_READABLE;
+    object.load_count = 1;
+    SymbolVersionRequirement requirement;
+    if (!validate_dynamic_symbols(&object) ||
+        !symbol_version_requirement(&object, 1, &requirement) ||
+        requirement.explicit_version || requirement.has_provider) {
+        return 0;
+    }
+    fixture.versions[1] = VERSION_INDEX_HIDDEN | VERSION_INDEX_LOCAL;
+    if (validate_symbol_versions(&object, 2) ||
+        symbol_version_requirement(&object, 1, &requirement)) {
+        return 0;
+    }
+    fixture.versions[1] = VERSION_INDEX_LOCAL;
+    fixture.symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_FUNCTION);
+    if (validate_symbol_versions(&object, 2)) {
+        return 0;
+    }
+    fixture.versions[1] = VERSION_INDEX_GLOBAL;
+    if (validate_dynamic_symbols(&object)) {
+        return 0;
+    }
+    fixture.versions[1] = VERSION_INDEX_LOCAL;
+    fixture.symbols[1].information =
+        (uint8_t)((SYMBOL_BIND_GLOBAL << 4) | SYMBOL_NO_TYPE);
+    fixture.strings[1] = 'x';
+    return !validate_symbol_versions(&object, 2);
+}
+
 static int test_static_tls_layout(void) {
     ObjectGraph graph;
     StaticTlsLayout layout;
@@ -453,6 +519,7 @@ static int test_static_tls_layout(void) {
     graph.objects[3].tls_program = &second;
     if (!plan_static_tls(&graph, &layout) || layout.object_count != 2 ||
         layout.payload_size != 48 || layout.mapping_size != PAGE_SIZE ||
+        layout.dtv_offset != 64 || layout.dtv_count != 5 ||
         graph.objects[1].tls_offset != 0 ||
         graph.objects[1].tls_module_id != 2 ||
         graph.objects[3].tls_offset != 16 ||
@@ -461,6 +528,43 @@ static int test_static_tls_layout(void) {
     }
     second.alignment = 3;
     return !plan_static_tls(&graph, &layout);
+}
+
+static int test_dynamic_tls_index(void) {
+    DynamicTlsEntry dtv[5];
+    DynamicTlsIndex index;
+    uint64_t storage[2] = {UINT64_C(0x1111111111111111),
+                           UINT64_C(0x2222222222222222)};
+    uintptr_t address = 0;
+    zero_bytes((uint8_t *)&dtv, sizeof(dtv));
+    zero_bytes((uint8_t *)&index, sizeof(index));
+    dtv[0].address = 4;
+    dtv[0].size = 1;
+    dtv[4].address = (uintptr_t)&storage[0];
+    dtv[4].size = sizeof(storage);
+    index.module = 4;
+    index.offset = sizeof(storage[0]);
+    if (!resolve_dynamic_tls_index(dtv, 5, &index, &address) ||
+        address != (uintptr_t)&storage[1] ||
+        *(const uint64_t *)address != storage[1]) {
+        return 0;
+    }
+    index.offset = sizeof(storage);
+    if (resolve_dynamic_tls_index(dtv, 5, &index, &address)) {
+        return 0;
+    }
+    index.offset = 0;
+    index.module = 3;
+    if (resolve_dynamic_tls_index(dtv, 5, &index, &address)) {
+        return 0;
+    }
+    index.module = 5;
+    if (resolve_dynamic_tls_index(dtv, 5, &index, &address)) {
+        return 0;
+    }
+    index.module = 4;
+    dtv[0].address = 3;
+    return !resolve_dynamic_tls_index(dtv, 5, &index, &address);
 }
 
 static void prepare_tls_hash(uint32_t *hash, Elf64Symbol *symbols,
@@ -692,7 +796,9 @@ static int test_finalizer_order(void) {
 int main(void) {
     return test_names() && test_graph_order() && test_cycle_rejection() &&
                    test_symbol_scope() && test_symbol_versions() &&
-                   test_static_tls_layout() && test_tls_relocation() &&
+                   test_tls_resolver_reference() &&
+                   test_static_tls_layout() && test_dynamic_tls_index() &&
+                   test_tls_relocation() &&
                    test_initializer_order() && test_finalizer_order()
                ? 0
                : 1;

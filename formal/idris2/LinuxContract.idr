@@ -96,6 +96,9 @@ data Gate
   | GlobalSymbolScope
   | StaticTlsLayout
   | TlsRelocation
+  | DynamicTlsVector
+  | TlsResolver
+  | GeneralDynamicTlsAccess
   | InitializerOrder
   | BoundedSymbolVersionTables
   | ExactSymbolVersionResolution
@@ -325,14 +328,18 @@ record MultiObjectGraphCertificate where
   globalSymbolScope : Measurement GlobalSymbolScope
 
 ||| The first runtime-initialization certificate retains the complete bounded
-||| object graph and adds one finite Variant-II TLS arena, checked TLS
-||| relocation, and dependency-first initializer execution.
+||| object graph and adds one finite Variant-II TLS arena, checked static and
+||| general-dynamic relocations, a bounded dynamic-thread vector, one exact
+||| resolver boundary, and dependency-first initializer execution.
 public export
 record RuntimeInitializationCertificate where
   constructor MkRuntimeInitializationCertificate
   multiObjectGraph : MultiObjectGraphCertificate
   staticTlsLayout : Measurement StaticTlsLayout
   tlsRelocation : Measurement TlsRelocation
+  dynamicTlsVector : Measurement DynamicTlsVector
+  tlsResolver : Measurement TlsResolver
+  generalDynamicTlsAccess : Measurement GeneralDynamicTlsAccess
   initializerOrder : Measurement InitializerOrder
 
 ||| Versioned binding and process finalization remain downstream of the
@@ -460,7 +467,7 @@ runtimeInitializationRequiresMultiObjectGraph certificate =
   certificate.multiObjectGraph
 
 ||| Finalization and exact version binding cannot be projected without the
-||| complete static-TLS, relocation, and initializer certificate.
+||| complete startup-TLS, relocation, resolver, and initializer certificate.
 public export
 runtimeFinalizationRequiresInitialization :
   RuntimeFinalizationCertificate -> RuntimeInitializationCertificate
