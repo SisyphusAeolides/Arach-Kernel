@@ -107,7 +107,7 @@ Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.
 
 The C0 probe now writes a PIE main executable, a separately built C runtime
-linker, and one ET_DYN shared object into Akashic VFS before replacing its own
+linker, and two ET_DYN shared objects into Akashic VFS before replacing its own
 image through `execve`. The syscall copies bounded argv and environment vectors
 from the old hierarchy,
 validates `PT_INTERP`, atomically snapshots both files, measures them
@@ -117,16 +117,18 @@ linker, whose measured marker precedes its `AT_ENTRY` transfer to the Rust main
 image. Registry and lifecycle ownership exchange retains the PID generation;
 caught signal handlers and close-on-exec objects reset only after publication,
 and the former hierarchy is reclaimed only after CR3 points at the replacement.
-The interpreter now derives the main load bias from `AT_PHDR`, discovers one
-allowlisted `DT_NEEDED` entry, opens that generation-owned Akashic object,
-privately maps its page-aligned segments RW, applies and verifies its real
-`R_X86_64_RELATIVE` relocation, seals final R/RW/RX permissions, resolves an
-exported symbol through the SysV hash table, and calls code that dereferences
+The interpreter now derives the main load bias from `AT_PHDR`, discovers the
+main consumer and its sole provider through allowlisted `DT_NEEDED` entries,
+and closes that exact acyclic graph. It privately maps both generation-owned
+Akashic objects, applies and verifies the provider's real
+`R_X86_64_RELATIVE`, eagerly resolves the consumer's real
+`R_X86_64_JUMP_SLOT` through bounded SysV symbol tables, seals final R/RW/RX
+permissions, and calls across the object boundary into code that dereferences
 the relocated pointer. The admitted slice remains single-threaded at exec and
-each Akashic file is bounded to 64 KiB. This is one bounded shared-object
-profile, not completion of C2: recursive dependencies, external symbol/PLT/TLS
-relocations, constructors, symbol versions, general file mapping semantics,
-ASLR, and production entropy remain fail-closed.
+each Akashic file is bounded to 64 KiB. This is one bounded two-object profile,
+not completion of C2: larger graphs, general symbol scopes, TLS relocations,
+constructors, symbol versions, general file mapping semantics, ASLR, and
+production entropy remain fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,
 filesystem context, descriptor ownership, signal-handler identity, and SysV

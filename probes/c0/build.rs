@@ -22,6 +22,11 @@ fn main() {
     emit_path("ARACH_RUNTIME_LINKER_IMAGE_PATH", &runtime_linker);
     let shared_object = required_probe("ARACH_SHARED_OBJECT_IMAGE", "shared object probe");
     emit_path("ARACH_SHARED_OBJECT_IMAGE_PATH", &shared_object);
+    let shared_provider = required_probe(
+        "ARACH_SHARED_PROVIDER_IMAGE",
+        "shared object provider probe",
+    );
+    emit_path("ARACH_SHARED_PROVIDER_IMAGE_PATH", &shared_provider);
 }
 
 fn required_probe(variable: &str, label: &str) -> PathBuf {

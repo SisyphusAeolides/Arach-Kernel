@@ -8,9 +8,9 @@ produce four boot artifacts and then execute them under UEFI/QEMU:
 3. Push PID 1;
 4. the bounded ring-3 syscall probe in `probes/c0`.
 
-The syscall probe embeds three additional independently hashed execution
-inputs: the PIE exec target, the freestanding C runtime-linker probe, and a
-freestanding ET_DYN shared object. They are materialized as separate Akashic
+The syscall probe embeds four additional independently hashed execution
+inputs: the PIE exec target, the freestanding C runtime-linker probe, an ET_DYN
+consumer, and its ET_DYN provider. They are materialized as separate Akashic
 files at runtime and are never treated as one prelinked blob.
 
 `scripts/build-c0-bundle.sh` builds those artifacts from separate immutable
@@ -61,10 +61,16 @@ containing all of the following evidence from the same bundle:
   `AT_RANDOM`, and `AT_EXECFN`;
 - `ARACH_C2_DT_NEEDED_PASS` was emitted only after the interpreter derived the
   PIE load bias, bounded its dynamic table, and discovered the exact shared
-  object name; and
-- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after private segment
-  snapshots, one real relative relocation, final W^X sealing, SysV symbol
-  lookup, and execution through the relocated shared-object state succeeded;
+  object name;
+- `ARACH_C2_DEPENDENCY_GRAPH_PASS` was emitted only after the consumer's nested
+  dependency produced the exact acyclic two-node closure and both immutable
+  objects passed bounded ELF and dynamic-table validation;
+- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after the provider's real
+  relative relocation was applied to a final-writable target and read back;
+- `ARACH_C2_EXTERNAL_SYMBOL_PASS` was emitted only after the consumer's sole
+  eager `R_X86_64_JUMP_SLOT` was resolved through the provider's bounded SysV
+  symbol table, both objects were sealed R/RW/RX, and the cross-object call
+  consumed the provider's relocated state;
 - `ARACH_C2_RUNTIME_LINKER_PASS` was emitted after that complete transaction,
   and the later `ARACH_C1_EXECVE_PASS` proves control transferred to the Rust
   main image.

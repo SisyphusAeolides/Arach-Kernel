@@ -9,11 +9,7 @@ PHDRS
 SECTIONS
 {
     . = SIZEOF_HEADERS;
-    .text :
-    {
-        *(.text .text.*)
-        *(.plt .plt.*)
-    } :text
+    .text : { *(.text .text.*) } :text
 
     . = ALIGN(4K);
     .rodata : { *(.rodata .rodata.*) } :rodata
@@ -21,7 +17,6 @@ SECTIONS
     .dynsym : { *(.dynsym) } :rodata
     .dynstr : { *(.dynstr) } :rodata
     .rela.dyn : { *(.rela.dyn) } :rodata
-    .rela.plt : { *(.rela.plt) } :rodata
     .dynamic : { *(.dynamic) } :rodata :dynamic
 
     . = ALIGN(4K);
@@ -39,5 +34,7 @@ SECTIONS
         *(.eh_frame*)
         *(.note*)
         *(.gnu.hash*)
+        *(.rela.plt*)
+        *(.plt*)
     }
 }

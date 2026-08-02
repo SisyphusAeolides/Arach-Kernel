@@ -25,7 +25,9 @@ build_none() {
 
 build_none "$push_root/Cargo.toml" "$build_root/push" --features "$push_features"
 shared_object_image="$build_root/shared-object/libarach-probe.so"
-"$root/scripts/build-shared-object-probe.sh" "$shared_object_image"
+shared_provider_image="$build_root/shared-object/libarach-provider.so"
+"$root/scripts/build-shared-object-probe.sh" \
+    "$shared_object_image" "$shared_provider_image"
 runtime_linker_image="$build_root/runtime-linker/arach-ld.so"
 "$root/scripts/build-runtime-linker-probe.sh" "$runtime_linker_image"
 build_none "$root/probes/exec-target/Cargo.toml" "$build_root/exec-target"
@@ -36,6 +38,7 @@ test "$(readelf -dW "$exec_target_image" | awk '$2 == "(NEEDED)" {print $5}')" =
 ARACH_EXEC_TARGET_IMAGE="$exec_target_image" \
 ARACH_RUNTIME_LINKER_IMAGE="$runtime_linker_image" \
 ARACH_SHARED_OBJECT_IMAGE="$shared_object_image" \
+ARACH_SHARED_PROVIDER_IMAGE="$shared_provider_image" \
     build_none "$root/probes/c0/Cargo.toml" "$build_root/probe"
 
 push_image="$build_root/push/x86_64-arach/release/push"
@@ -67,4 +70,5 @@ CARGO_TARGET_DIR="$build_root/granite" \
 granite_image="$build_root/granite/x86_64-unknown-uefi/release/granite.efi"
 test -s "$granite_image"
 sha256sum "$kernel_image" "$push_image" "$probe_image" "$exec_target_image" \
-    "$runtime_linker_image" "$shared_object_image" "$granite_image"
+    "$runtime_linker_image" "$shared_object_image" "$shared_provider_image" \
+    "$granite_image"

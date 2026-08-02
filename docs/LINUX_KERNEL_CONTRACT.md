@@ -109,7 +109,8 @@ before it reclaims the deferred old hierarchy.
 
 The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C1_LINUX_SYSCALL_PASS`, `ARACH_C2_RUNTIME_LINKER_ENTER`,
-`ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_SHARED_RELOCATION_PASS`,
+`ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
+`ARACH_C2_SHARED_RELOCATION_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,
 `ARACH_C2_RUNTIME_LINKER_PASS`, and then `ARACH_C1_EXECVE_PASS`. The
 freestanding C runtime-linker probe validates the kernel-generated auxiliary
 vector, completes the bounded shared-object transaction below, and jumps to
@@ -123,40 +124,50 @@ certificate.
 
 ### Bounded dependency and shared-object relocation
 
-The first dependency profile admits exactly one `DT_NEEDED` entry in the main
-PIE. Its dynamic table may contain only `DT_NEEDED`, `DT_STRTAB`, `DT_STRSZ`,
-and `DT_NULL`. The runtime linker derives the main load bias from `AT_PHDR`,
+The first dependency-graph profile admits exactly one `DT_NEEDED` entry in the
+main PIE and exactly one nested `DT_NEEDED` entry in its consumer. The main
+dynamic table may contain only `DT_NEEDED`, `DT_STRTAB`, `DT_STRSZ`, and
+`DT_NULL`. The runtime linker derives the main load bias from `AT_PHDR`,
 validates every dynamic pointer against a mapped main-image `PT_LOAD`, obtains
-the dependency name from the bounded string table, and constructs the path from
-that discovered name. The measured target names `libarach-probe.so`.
+each dependency name from its bounded string table, and constructs both paths
+from discovered names. The exact acyclic closure is `libarach-probe.so` then
+`libarach-provider.so`; the provider must have no dependency.
 
-The dependency must be a regular generation-owned Akashic file no larger than
+Each dependency must be a regular generation-owned Akashic file no larger than
 64 KiB. The linker opens it read-only, derives its exact size with `lseek`, and
 uses a temporary private file mapping to validate one x86-64 ET_DYN image with
-at most 16 program headers and eight page-aligned load segments. It then maps
-each segment at the isolated `0x30000000` bias as an eager private RW snapshot,
-zeros bytes beyond `p_filesz`, and keeps every page non-executable while
-relocation is possible.
+at most 16 program headers and eight page-aligned load segments. It maps the
+consumer at `0x30000000` and the provider at `0x31000000` as disjoint eager
+private RW snapshots, zeros bytes beyond `p_filesz`, and keeps every page
+non-executable while relocation is possible.
 
-The admitted shared object has one exact SONAME, a SysV hash table, bounded
-dynamic symbol and string tables, and a bounded `DT_RELA` table containing only
-symbol-zero `R_X86_64_RELATIVE` entries whose targets lie in final-writable
-segments. The measured artifact contains one such relocation. Nested
-dependencies, constructors and destructors, PLT/GOT relocation, `DT_REL`,
-`DT_RELR`, text relocations, runpaths, and unknown dynamic tags are rejected.
-After relocation and readback, the linker changes each complete VMA to its
-declared R, RW, or RX permission, closes the descriptor, removes the temporary
-mapping, resolves `arach_shared_probe` through the validated SysV symbol table,
-and calls it. The function dereferences the relocated pointer, so the measured
-success marker cannot be emitted by merely parsing relocation metadata.
+Both objects require exact SONAMEs, SysV hash tables, and bounded dynamic symbol
+and string tables. The provider admits exactly one symbol-zero
+`R_X86_64_RELATIVE` relocation whose target lies in a final-writable segment.
+The consumer admits exactly one eager `R_X86_64_JUMP_SLOT` for the undefined
+global function `arach_provider_value`; the linker resolves it only to the
+provider's validated global function and reads the written GOT slot back.
+Provider relocation precedes consumer binding. Constructors and destructors,
+lazy binding, additional graph nodes, cycles, `DT_REL`, `DT_RELR`, text
+relocations, runpaths, symbol versions, TLS, and unknown dynamic tags are
+rejected.
 
-Idris 2 and Agda place dependency discovery, bounded snapshot ownership,
-relative relocation, final W^X sealing, and observed symbol execution in a
-`SharedObjectCertificate` downstream of the prior file-mapping and dynamic-exec
-certificates. This is not a general system linker: recursive dependency graphs,
-external symbol and PLT relocation, TLS, constructors, symbol versions, search
-paths, lazy binding, ASLR, general VMA splitting, demand paging, and
-cryptographically qualified process entropy remain separate acceptance gates.
+After relocation, the linker changes every complete VMA in both objects to its
+declared R, RW, or RX permission, closes both descriptors, removes both
+temporary mappings, resolves `arach_shared_probe` through the consumer's SysV
+symbol table, and calls it. The consumer crosses the relocated PLT/GOT edge;
+the provider then dereferences its relative-relocated pointer. The measured
+success marker therefore cannot be emitted by merely parsing either relocation
+table.
+
+Idris 2 and Agda retain dependency discovery, bounded snapshot ownership,
+relative relocation, final W^X sealing, and observed symbol execution in the
+existing `SharedObjectCertificate`. A downstream `DependencyGraphCertificate`
+adds exact graph closure, external-symbol relocation, eager PLT binding, and an
+observed cross-object call. This is not a general system linker: larger graphs,
+general symbol scopes, TLS, constructors, symbol versions, search paths, lazy
+binding, ASLR, general VMA splitting, demand paging, and cryptographically
+qualified process entropy remain separate acceptance gates.
 
 The current tree passes external-Kbuild and static load-admission gates against
 real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux

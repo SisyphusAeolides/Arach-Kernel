@@ -73,10 +73,12 @@ The Linux personality currently covers:
   auxiliary vector, runtime-linker entry and main-entry transfer, atomic
   lifecycle/image exchange, rollback before publication, and old-root
   reclamation only after CR3 changes; and
-- one fail-closed `DT_NEEDED` profile whose freestanding C linker discovers a
-  bounded ET_DYN object, snapshots each load segment privately, applies an
-  `R_X86_64_RELATIVE` relocation, seals final R/RW/RX permissions, resolves an
-  exported symbol through the SysV hash table, and executes it in QEMU.
+- one fail-closed two-node `DT_NEEDED` profile whose freestanding C linker
+  closes a main-to-consumer-to-provider graph, snapshots every ET_DYN load
+  segment privately, applies the provider's `R_X86_64_RELATIVE` relocation,
+  eagerly binds the consumer's `R_X86_64_JUMP_SLOT` through bounded SysV
+  symbol tables, seals final R/RW/RX permissions, and executes the
+  cross-object call in QEMU.
 
 The file bridge is intentionally bounded and ephemeral. It is not a persistent
 block-backed filesystem, and the current Linux descriptor families are not yet
@@ -91,7 +93,7 @@ restart remain future compatibility slices.
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
-| Linux userspace compatibility | Identity, anonymous and eager private file mappings, whole-range W^X protection transitions, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, transactional static and measured `PT_INTERP` execution, one measured `DT_NEEDED`/relative-relocation shared-object profile, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Expand to dependency graphs, symbol/PLT/TLS relocations and constructors; add general VMA split/merge and demand paging, broader signals, complete leader-exit semantics, unified descriptors, and persistent storage |
+| Linux userspace compatibility | Identity, anonymous and eager private file mappings, whole-range W^X protection transitions, lifecycle, bounded event/timer/poll/epoll, bounded VFS file calls, transactional static and measured `PT_INTERP` execution, one measured two-object dependency graph with relative and eager external PLT relocation, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Generalize dependency closure and symbol lookup, then add TLS relocations and constructors; add general VMA split/merge and demand paging, broader signals, complete leader-exit semantics, unified descriptors, and persistent storage |
 | System bootstrap | The pinned Granite/Arach/Push C0 bundle executes under QEMU/OVMF and emits measured ring-3 syscall evidence | Promote the measured bootstrap into a native Push service graph and qualified COSMIC login/session path |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -101,8 +103,8 @@ restart remain future compatibility slices.
 The current critical path is:
 
 1. Keep the measured C0 QEMU/OVMF path green.
-2. Expand the measured one-object linker profile to bounded dependency graphs,
-   symbol/PLT/TLS relocations, constructors, and versioned symbol lookup.
+2. Generalize the measured two-object linker profile to larger bounded graphs,
+   broader symbol lookup, TLS relocations, constructors, and symbol versions.
 3. Unify Linux descriptor ownership and add persistent block-backed storage.
 4. Connect qualified modules and the native Push service graph to a complete
    COSMIC session.

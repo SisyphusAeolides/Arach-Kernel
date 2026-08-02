@@ -62,6 +62,10 @@ data Gate
   | RelativeRelocation
   | SharedObjectWxSeal
   | SharedSymbolCall
+  | DependencyGraphClosure
+  | ExternalSymbolRelocation
+  | EagerPltBinding
+  | CrossObjectCall
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -206,6 +210,18 @@ record SharedObjectCertificate where
   sharedObjectWxSeal : Measurement SharedObjectWxSeal
   sharedSymbolCall : Measurement SharedSymbolCall
 
+||| A dependency-graph certificate extends the qualified single-object
+||| boundary with exact graph closure, provider-first relocation, eager
+||| external binding, and an observed call across the object boundary.
+public export
+record DependencyGraphCertificate where
+  constructor MkDependencyGraphCertificate
+  sharedObject : SharedObjectCertificate
+  dependencyGraphClosure : Measurement DependencyGraphClosure
+  externalSymbolRelocation : Measurement ExternalSymbolRelocation
+  eagerPltBinding : Measurement EagerPltBinding
+  crossObjectCall : Measurement CrossObjectCall
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -260,3 +276,10 @@ public export
 sharedObjectRequiresFileMapping :
   SharedObjectCertificate -> FileMappingCertificate
 sharedObjectRequiresFileMapping certificate = certificate.fileMapping
+
+||| Cross-object binding cannot be projected without the complete prior
+||| shared-object snapshot, relocation, sealing, and execution contract.
+public export
+dependencyGraphRequiresSharedObject :
+  DependencyGraphCertificate -> SharedObjectCertificate
+dependencyGraphRequiresSharedObject certificate = certificate.sharedObject

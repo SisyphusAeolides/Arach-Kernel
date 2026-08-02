@@ -23,6 +23,8 @@ data Gate : Set where
   writeXorExecuteTransition mappedCodeEntry : Gate
   neededEntryDiscovery boundedSharedObjectSnapshot relativeRelocation : Gate
   sharedObjectWxSeal sharedSymbolCall : Gate
+  dependencyGraphClosure externalSymbolRelocation eagerPltBinding : Gate
+  crossObjectCall : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -136,6 +138,15 @@ record SharedObjectCertificate : Set where
     sharedObjectWxSealEvidence : Measurement sharedObjectWxSeal
     sharedSymbolCallEvidence : Measurement sharedSymbolCall
 
+record DependencyGraphCertificate : Set where
+  constructor dependencyGraphCertificate
+  field
+    sharedObject : SharedObjectCertificate
+    dependencyGraphClosureEvidence : Measurement dependencyGraphClosure
+    externalSymbolRelocationEvidence : Measurement externalSymbolRelocation
+    eagerPltBindingEvidence : Measurement eagerPltBinding
+    crossObjectCallEvidence : Measurement crossObjectCall
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -187,3 +198,10 @@ sharedObjectRequiresFileMapping :
   SharedObjectCertificate -> FileMappingCertificate
 sharedObjectRequiresFileMapping certificate =
   SharedObjectCertificate.fileMapping certificate
+
+-- Cross-object binding structurally retains the qualified shared-object
+-- snapshot, relocation, sealing, and execution boundary.
+dependencyGraphRequiresSharedObject :
+  DependencyGraphCertificate -> SharedObjectCertificate
+dependencyGraphRequiresSharedObject certificate =
+  DependencyGraphCertificate.sharedObject certificate
