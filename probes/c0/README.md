@@ -68,7 +68,11 @@ undefined, global `STT_NOTYPE` symbol `__tls_get_addr`; the interpreter then
 checks every module and offset before returning an address. Two further root
 PLT edges are weak: deterministic first-definition scope selects the
 provider's weak function ahead of the observer's later strong definition, and
-the unversioned optional hook has no provider and is written as zero. Exact
+the unversioned optional hook has no provider and is written as zero. The eager
+data-binding proof adds three root `R_X86_64_GLOB_DAT` entries: one
+exact-version provider object, one weak object that selects the provider's
+earlier weak definition ahead of the observer's later strong definition, and
+one unversioned optional data reference written as zero. The exact
 singleton `DT_RUNPATH=/runpath` entries on the root and both middle objects
 drive each direct dependency lookup; the core intentionally carries no
 runpath. The
@@ -79,6 +83,7 @@ emits `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_RUNPATH_PASS`,
 `ARACH_C2_SHARED_RELOCATION_PASS`,
 `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_WEAK_BINDING_PASS`,
+`ARACH_C2_GLOBAL_DATA_PASS`,
 `ARACH_C2_SYMBOL_VERSION_PASS`,
 `ARACH_C2_STATIC_TLS_PASS`, `ARACH_C2_DYNAMIC_TLS_PASS`,
 `ARACH_C2_INITIALIZER_ORDER_PASS`, and `ARACH_C2_EXTERNAL_SYMBOL_PASS`, then
@@ -91,8 +96,8 @@ same-PID ownership
 reaches the two-image replacement, and deferred reclamation does not destroy
 the new hierarchy. The admitted graph remains bounded to eight startup objects
 and does not claim late `dlopen` TLS allocation, TLSDESC, `DT_RPATH`,
-`$ORIGIN`, environment/cache/hwcaps search, weak data/TLS binding, or lazy
-binding.
+`$ORIGIN`, environment/cache/hwcaps search, weak TLS binding, broader data
+relocation forms, or lazy binding.
 Directory admission is limited to the ephemeral Akashic namespace and an exact
 0755 request; general Unix mode persistence, ownership, ACLs, and umask
 semantics remain outside this gate.

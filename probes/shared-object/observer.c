@@ -7,6 +7,9 @@ uint64_t arach_scope_choice(uint64_t input);
 void arach_observer_finish(void);
 static uint64_t observer_stage;
 
+__attribute__((visibility("default"))) const uint64_t arach_data_choice =
+    UINT64_C(0xdeadbeefcafef00d);
+
 static void __attribute__((constructor)) arach_observer_initialize(void) {
     const uint64_t expected_core =
         UINT64_C(0x1020304050607080) + UINT64_C(0x1111111111111111) +

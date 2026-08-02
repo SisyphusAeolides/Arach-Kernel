@@ -86,15 +86,19 @@ containing all of the following evidence from the same bundle:
   three dependencies were opened from their exact nested paths through
   canonical direct-object `DT_RUNPATH` entries, and the root remained at `/`;
 - `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after nine real relative
-  relocations, three real TLS relocations, and all ten eager external
+  relocations, three real TLS relocations, and all thirteen eager external
   relocations were written to final-writable targets and read back;
 - `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS` was emitted only after each undefined
   function was resolved through deterministic breadth-first SysV symbol scope;
 - `ARACH_C2_WEAK_BINDING_PASS` was emitted only after the first in-scope weak
   function definition won over a later strong definition and a second,
   unversioned unresolved weak function slot was written and read back as zero;
+- `ARACH_C2_GLOBAL_DATA_PASS` was emitted only after three eager `GLOB_DAT`
+  slots bound one exact-version global object, selected an earlier weak data
+  definition over a later strong definition, and wrote one unresolved
+  unversioned weak data reference as zero;
 - `ARACH_C2_SYMBOL_VERSION_PASS` was emitted only after every GNU version
-  table passed its finite structural bounds and all ten versioned
+  table passed its finite structural bounds and all eleven versioned
   relocations matched an exact version, including the importing dependency's
   SONAME;
 - `ARACH_C2_STATIC_TLS_PASS` was emitted only after the bounded initial TLS

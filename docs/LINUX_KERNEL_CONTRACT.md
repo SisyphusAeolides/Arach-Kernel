@@ -212,6 +212,7 @@ The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_RUNPATH_PASS`,
 `ARACH_C2_SHARED_RELOCATION_PASS`,
 `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_WEAK_BINDING_PASS`,
+`ARACH_C2_GLOBAL_DATA_PASS`,
 `ARACH_C2_SYMBOL_VERSION_PASS`,
 `ARACH_C2_STATIC_TLS_PASS`, `ARACH_C2_DYNAMIC_TLS_PASS`,
 `ARACH_C2_INITIALIZER_ORDER_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,
@@ -279,6 +280,17 @@ function with no definition is written as zero; an unresolved global or
 explicitly versioned weak reference fails the transaction. Every written slot
 is read back.
 
+Eager `R_X86_64_GLOB_DAT` entries in `.rela.dyn` admit undefined
+default-visible global `STT_OBJECT` references and weak `STT_OBJECT` or GNU
+`STT_NOTYPE` references with zero addends. Definitions must be bounded,
+nonempty, readable `STT_OBJECT` ranges. Data lookup uses the same exact
+version/provider constraints, `DT_SYMBOLIC` requester preference, and
+deterministic first-definition object order as function lookup. An import's
+nonzero declared size may not exceed its selected definition. An unversioned
+weak data reference with no definition is written as zero; unresolved globals
+and explicitly versioned weak data references fail closed. Slots are aligned,
+final-writable, and read back after every write.
+
 Versioned objects may provide one `DT_VERSYM` table, at most 16 linked
 `DT_VERDEF` records, at most 16 linked `DT_VERNEED` records, and at most 32
 requirement auxiliaries. The version-symbol table has exactly one entry per
@@ -317,9 +329,10 @@ plan's callback in x86-64 process-entry register `RDX`. The main image invokes
 that callback once; objects run in reverse dependency order, each finalization
 array runs in reverse index order, and `DT_FINI` follows its array.
 Preinitializers, lazy binding, `DT_REL`, `DT_RELR`, text relocations,
-`DT_RPATH`, `$ORIGIN`, environment/cache/hwcaps search, weak object/TLS
-symbols, unresolved versioned weak functions, version inheritance, and unknown
-dynamic tags remain rejected.
+`DT_RPATH`, `$ORIGIN`, environment/cache/hwcaps search, weak TLS symbols,
+unresolved versioned weak functions or data, `R_X86_64_COPY`, general absolute
+data relocations, version inheritance, and unknown dynamic tags remain
+rejected.
 
 The measured fixture is the four-object diamond `libarach-probe.so` to
 `libarach-provider.so` and `libarach-observer.so`, with both middle objects
@@ -332,17 +345,22 @@ PLT edges each and the root contributes three versioned plus two unversioned
 weak edges; the provider adds the one unversioned resolver edge. The first weak
 edge selects the provider's earlier weak definition even though the observer
 exports a later strong definition. The second has no definition and is written
-as zero without being called. Exact evidence therefore requires nine relative,
-three TLS, ten external, one resolved weak definition, one unresolved weak
-zero, and ten versioned writes.
+as zero without being called. The root also contributes three `GLOB_DAT`
+edges: one exact-version provider object, one unversioned weak object that
+selects the provider's earlier weak definition over the observer's later
+strong definition, and one unresolved unversioned weak data slot written as
+zero. Exact evidence therefore requires nine relative, three TLS, thirteen
+external, three global-data, one resolved and one unresolved weak function,
+one resolved and one unresolved weak data edge, and eleven versioned writes.
 
 After relocation, the linker changes every complete VMA to its declared R,
 RW, or RX permission and executes core, provider, observer, and root
 initializers in that order. It then closes all four descriptors, removes all
 four temporary mappings, resolves `arach_shared_probe` through the root's SysV
 table, and calls it. Execution measures the provider's first-scope weak result,
-crosses the callable root and middle-object PLT edges, and leaves the optional
-weak slot at zero before the core dereferences its relative-relocated pointer
+crosses the callable root and middle-object PLT edges, consumes the provider's
+first-scope weak data and exact-version global data, and observes both optional
+weak slots at zero before the core dereferences its relative-relocated pointer
 and FS-relative TLS word. Each dependent initializer
 records success only after observing its providers' state. After transfer to
 the main image, the callback executes root, observer, provider, and core
@@ -359,15 +377,17 @@ closure, breadth-first discovery, duplicate-dependency coalescing, acyclic
 provider-first order, and deterministic global symbol scope.
 `RuntimeInitializationCertificate` adds measured directory creation,
 canonical bounded runpaths, direct-dependency search, first-definition weak
-binding, unresolved weak-to-zero behavior, the finite startup TLS layout and
-DTV, checked TLS relocation/resolution, and initializer order while retaining
-the complete graph certificate. `RuntimeFinalizationCertificate`
-then requires bounded GNU
+function binding, unresolved weak-function-to-zero behavior, bounded global
+data relocation, first-definition weak-data binding, unresolved weak-data-zero
+behavior, the finite startup TLS layout and DTV, checked TLS
+relocation/resolution, and initializer order while retaining the complete graph
+certificate. `RuntimeFinalizationCertificate` then requires bounded GNU
 version tables, exact version-and-provider resolution, the process-entry
 finalizer handoff, and reverse finalizer execution. This is not yet a general
-system linker: late dynamic TLS allocation, general search policy, weak
-data/TLS binding, lazy binding, ASLR, general VMA splitting, demand paging, and
-cryptographically qualified process entropy remain separate acceptance gates.
+system linker: late dynamic TLS allocation, general search policy, weak TLS
+binding, broader data relocation forms, lazy binding, ASLR, general VMA
+splitting, demand paging, and cryptographically qualified process entropy
+remain separate acceptance gates.
 
 The current tree passes external-Kbuild and static load-admission gates against
 real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux

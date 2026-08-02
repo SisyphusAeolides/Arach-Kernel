@@ -11,6 +11,12 @@ uint64_t arach_scope_choice(uint64_t input);
 void arach_provider_finish(void);
 static uint64_t provider_stage;
 
+__attribute__((weak, visibility("default"))) const uint64_t
+    arach_data_choice = UINT64_C(0x0c0ffee0ddf00d42);
+
+__attribute__((visibility("default"))) const uint64_t arach_provider_data =
+    UINT64_C(0x5a5aa5a596966969);
+
 static void __attribute__((constructor)) arach_provider_initialize(void) {
     const uint64_t expected_core =
         UINT64_C(0x1020304050607080) + UINT64_C(0x1111111111111111) +

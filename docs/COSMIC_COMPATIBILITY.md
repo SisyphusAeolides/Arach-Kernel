@@ -142,16 +142,19 @@ middle providers, and one coalesced core; it applies the core's real
 `R_X86_64_DTPMOD64`/`R_X86_64_DTPOFF64` pair, and nine real
 `R_X86_64_RELATIVE` writes. It resolves seven real exact-version object
 `R_X86_64_JUMP_SLOT` entries, the bounded `__tls_get_addr` edge, one
-first-definition weak edge, and one unresolved weak-to-zero edge, then seals
-all four objects
+first-definition weak-function edge, and one unresolved weak-function-to-zero
+edge. Three eager `R_X86_64_GLOB_DAT` writes bind one exact-version data
+object, select an earlier weak data definition over a later strong definition,
+and write one unresolved unversioned weak data slot as zero, then seal all four
+objects
 R/RW/RX, executes four provider-first initializers, and calls through both
 branches into code that consumes relocated pointer and TLS state. The main
 image later invokes the one-shot x86-64 finalizer callback, which executes four
 `DT_FINI_ARRAY` and four `DT_FINI` functions in reverse dependency order. The
 admitted slice remains single-threaded at exec and each Akashic file is bounded
 to 64 KiB. Late dynamic TLS allocation, `DT_RPATH`, `$ORIGIN`, environment or
-cache search, weak data/TLS or lazy binding, general file mapping semantics,
-ASLR, and
+cache search, weak TLS, broader data relocations, or lazy binding, general file
+mapping semantics, ASLR, and
 production entropy remain fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,

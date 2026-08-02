@@ -96,6 +96,9 @@ data Gate
   | GlobalSymbolScope
   | FirstDefinitionWeakBinding
   | UnresolvedWeakZero
+  | GlobalDataRelocation
+  | FirstDefinitionWeakDataBinding
+  | UnresolvedWeakDataZero
   | DirectoryCreation
   | CanonicalRunpath
   | RunpathDependencySearch
@@ -336,8 +339,9 @@ record MultiObjectGraphCertificate where
 ||| object graph and adds measured directory creation, canonical bounded
 ||| runpaths, direct-dependency search, one finite Variant-II TLS arena,
 ||| checked static and general-dynamic relocations, Linux-compatible weak
-||| function binding, a bounded dynamic-thread vector, one exact resolver
-||| boundary, and dependency-first initialization.
+||| function and data binding, bounded eager global-data relocation, a bounded
+||| dynamic-thread vector, one exact resolver boundary, and dependency-first
+||| initialization.
 public export
 record RuntimeInitializationCertificate where
   constructor MkRuntimeInitializationCertificate
@@ -347,6 +351,9 @@ record RuntimeInitializationCertificate where
   runpathDependencySearch : Measurement RunpathDependencySearch
   firstDefinitionWeakBinding : Measurement FirstDefinitionWeakBinding
   unresolvedWeakZero : Measurement UnresolvedWeakZero
+  globalDataRelocation : Measurement GlobalDataRelocation
+  firstDefinitionWeakDataBinding : Measurement FirstDefinitionWeakDataBinding
+  unresolvedWeakDataZero : Measurement UnresolvedWeakDataZero
   staticTlsLayout : Measurement StaticTlsLayout
   tlsRelocation : Measurement TlsRelocation
   dynamicTlsVector : Measurement DynamicTlsVector
