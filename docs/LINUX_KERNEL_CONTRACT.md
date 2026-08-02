@@ -51,12 +51,13 @@ derives the required KPI from that source's conftests and behavioral tests.
 
 ## Current state
 
-### Unified descriptors and anonymous pipes
+### Unified descriptors, anonymous pipes, and Unix stream sockets
 
 Each exact thread-group leader generation owns one dense table of 128 public
 Linux descriptors. Descriptors reference separately generation-tagged open
-objects, so regular files, eventfds, timerfds, epoll instances, pipes, and the
-three standard streams cannot collide. `dup`, `dup2`, `dup3`, `F_DUPFD`, and
+objects, so regular files, eventfds, timerfds, epoll instances, pipes, Unix
+sockets, and the three standard streams cannot collide. `dup`, `dup2`, `dup3`,
+`F_DUPFD`, and
 `F_DUPFD_CLOEXEC` add references to the same open object; descriptor flags
 remain local while status flags, file position, and inode identity remain
 shared. A close racing an active operation marks the object closing and defers
@@ -80,13 +81,34 @@ close-on-exec. `ARACH_C1_PIPE_DESCRIPTOR_PASS` records this complete live
 path. Host tests additionally prove duplicate-aware watch lifetime, automatic
 last-close removal, and non-retargeting after descriptor reuse.
 
+The bounded `AF_UNIX` profile adds `SOCK_STREAM` and `socketpair` endpoints to
+that same open-object table. A fixed registry holds 64 generation-encoded
+endpoints, 32 full-duplex connections, eight pending accepts per listener, and
+two 4 KiB byte queues per connection. Pathname and length-preserving abstract
+addresses support bind, listen, connect, plain accept, and `accept4`.
+`getsockname`, `getpeername`, `SO_TYPE`, `SO_DOMAIN`, `SO_ACCEPTCONN`, fixed
+send/receive buffer options, and root-profile `SO_PEERCRED` expose the admitted
+identity surface. Ordinary reads/writes, `sendto`/`recvfrom`, and data-only
+`sendmsg`/`recvmsg` with at most 16 vectors share one transfer path. `MSG_PEEK`,
+half-close, EOF, HUP/error readiness, duplicate lifetime, final-close epoll
+detachment, and listener namespace reuse are measured. Host tests additionally
+connect distinct exact process generations and reject stale endpoint handles,
+namespace collisions, backlog overflow, unsupported flags, and writes beyond
+the fixed queue.
+
+`ARACH_C1_UNIX_SOCKET_PASS` records socketpair and named-listener execution in
+the measured QEMU image. Idris 2 and Agda place the socket certificate
+structurally after the descriptor/pipe certificate, so every downstream group
+exit, image replacement, dynamic-linker, and shared-object certificate retains
+the local IPC evidence.
+
 This is not yet the complete blocking contract. A pipe operation that would
 sleep returns `EAGAIN` even when `O_NONBLOCK` is clear, and `EPIPE` does not yet
-queue `SIGPIPE`. Scheduler-backed waits, asynchronous interruption, `splice`,
-named FIFOs, Unix sockets, SCM rights, and process-shared descriptor tables
-across fork remain later gates. Idris 2 and Agda require unified namespace,
-generation, alias, close-on-exec, pipe lifetime/readiness, epoll retention, and
-exec inheritance measurements before downstream lifecycle qualification.
+queue `SIGPIPE`. Socket operations that would sleep also return `EAGAIN`.
+Scheduler-backed waits, asynchronous interruption, `splice`, named FIFOs,
+filesystem-backed socket inodes and unlink lifetime, datagram and sequenced-
+packet sockets, ancillary rights/credentials, and process-shared descriptor
+tables across fork remain later gates.
 
 ### Generation-bound private file mappings
 
@@ -145,7 +167,8 @@ base, and close-on-exec descriptors. The architecture return gate changes CR3
 before it reclaims the deferred old hierarchy.
 
 The measured QEMU chain requires the file-mapping markers above, followed by
-`ARACH_C1_PIPE_DESCRIPTOR_PASS`, `ARACH_C1_LINUX_SYSCALL_PASS`,
+`ARACH_C1_PIPE_DESCRIPTOR_PASS`, `ARACH_C1_UNIX_SOCKET_PASS`,
+`ARACH_C1_LINUX_SYSCALL_PASS`,
 `ARACH_C2_RUNTIME_LINKER_ENTER`,
 `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_SHARED_RELOCATION_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,

@@ -31,6 +31,13 @@ pub enum DescriptorError {
     IllegalSeek,
     AlreadyExists,
     NotFound,
+    AddressFamilyNotSupported,
+    AddressInUse,
+    ConnectionRefused,
+    AlreadyConnected,
+    NotConnected,
+    NotSocket,
+    OperationNotSupported,
     OperationNotPermitted,
     PermissionDenied,
     Io,
@@ -98,6 +105,7 @@ enum OpenObjectKind {
     Epoll(u32),
     PipeRead(u32),
     PipeWrite(u32),
+    UnixSocket(u32),
 }
 
 impl OpenObjectKind {
@@ -323,11 +331,12 @@ fn install_object(
     Ok(fd as u32)
 }
 
-fn install_pipe_pair(
+fn install_object_pair(
     owner: ProcessHandle,
-    reader: u32,
-    writer: u32,
-    status_flags: u32,
+    first_kind: OpenObjectKind,
+    first_status_flags: u32,
+    second_kind: OpenObjectKind,
+    second_status_flags: u32,
     close_on_exec: bool,
 ) -> Result<(u32, u32), DescriptorError> {
     let mut spaces = SPACES.lock();
@@ -339,55 +348,55 @@ fn install_pipe_pair(
         .enumerate()
         .filter(|(_, descriptor)| !descriptor.occupied())
         .map(|(index, _)| index);
-    let read_fd = free_descriptors.next().ok_or(DescriptorError::Capacity)?;
-    let write_fd = free_descriptors.next().ok_or(DescriptorError::Capacity)?;
+    let first_fd = free_descriptors.next().ok_or(DescriptorError::Capacity)?;
+    let second_fd = free_descriptors.next().ok_or(DescriptorError::Capacity)?;
     let mut free_objects = space
         .objects
         .iter()
         .enumerate()
         .filter(|(_, object)| !object.kind.occupied())
         .map(|(index, _)| index);
-    let read_object = free_objects.next().ok_or(DescriptorError::Capacity)?;
-    let write_object = free_objects.next().ok_or(DescriptorError::Capacity)?;
-    let read_generation = space.objects[read_object]
+    let first_object = free_objects.next().ok_or(DescriptorError::Capacity)?;
+    let second_object = free_objects.next().ok_or(DescriptorError::Capacity)?;
+    let first_generation = space.objects[first_object]
         .generation
         .checked_add(1)
         .filter(|generation| *generation != 0)
         .ok_or(DescriptorError::Capacity)?;
-    let write_generation = space.objects[write_object]
+    let second_generation = space.objects[second_object]
         .generation
         .checked_add(1)
         .filter(|generation| *generation != 0)
         .ok_or(DescriptorError::Capacity)?;
 
-    space.objects[read_object] = OpenObject {
-        generation: read_generation,
+    space.objects[first_object] = OpenObject {
+        generation: first_generation,
         references: 1,
         descriptor_references: 1,
         active_operations: 0,
         closing: false,
-        status_flags: crate::linux_file::O_RDONLY | status_flags,
-        kind: OpenObjectKind::PipeRead(reader),
+        status_flags: first_status_flags,
+        kind: first_kind,
     };
-    space.objects[write_object] = OpenObject {
-        generation: write_generation,
+    space.objects[second_object] = OpenObject {
+        generation: second_generation,
         references: 1,
         descriptor_references: 1,
         active_operations: 0,
         closing: false,
-        status_flags: crate::linux_file::O_WRONLY | status_flags,
-        kind: OpenObjectKind::PipeWrite(writer),
+        status_flags: second_status_flags,
+        kind: second_kind,
     };
     let descriptor_flags = u8::from(close_on_exec);
-    space.descriptors[read_fd] = DescriptorSlot {
-        object: read_object as u16,
+    space.descriptors[first_fd] = DescriptorSlot {
+        object: first_object as u16,
         flags: descriptor_flags,
     };
-    space.descriptors[write_fd] = DescriptorSlot {
-        object: write_object as u16,
+    space.descriptors[second_fd] = DescriptorSlot {
+        object: second_object as u16,
         flags: descriptor_flags,
     };
-    Ok((read_fd as u32, write_fd as u32))
+    Ok((first_fd as u32, second_fd as u32))
 }
 
 fn acquire_descriptor(owner: ProcessHandle, fd: u32) -> Result<ObjectLease, DescriptorError> {
@@ -547,6 +556,9 @@ fn finalize_object(owner: ProcessHandle, kind: OpenObjectKind) {
         OpenObjectKind::PipeRead(handle) | OpenObjectKind::PipeWrite(handle) => {
             let _ = crate::linux_pipe::close(owner, handle);
         }
+        OpenObjectKind::UnixSocket(handle) => {
+            let _ = crate::linux_socket::close(owner, handle);
+        }
         OpenObjectKind::Epoll(fd) => {
             let mut watched = [ObjectKey::EMPTY; crate::linux_epoll::MAXIMUM_EPOLL_WATCHES];
             if let Ok(count) = crate::linux_epoll::close(owner, fd, &mut watched) {
@@ -656,11 +668,12 @@ pub fn pipe(owner: ProcessHandle, flags: u32) -> Result<(u32, u32), DescriptorEr
         return Err(DescriptorError::InvalidArgument);
     }
     let (reader, writer) = crate::linux_pipe::create(owner).map_err(map_pipe_error)?;
-    match install_pipe_pair(
+    match install_object_pair(
         owner,
-        reader,
-        writer,
-        flags & crate::linux_file::O_NONBLOCK,
+        OpenObjectKind::PipeRead(reader),
+        crate::linux_file::O_RDONLY | flags & crate::linux_file::O_NONBLOCK,
+        OpenObjectKind::PipeWrite(writer),
+        crate::linux_file::O_WRONLY | flags & crate::linux_file::O_NONBLOCK,
         flags & crate::linux_file::O_CLOEXEC != 0,
     ) {
         Ok(pair) => Ok(pair),
@@ -670,6 +683,249 @@ pub fn pipe(owner: ProcessHandle, flags: u32) -> Result<(u32, u32), DescriptorEr
             Err(error)
         }
     }
+}
+
+pub fn socket(
+    owner: ProcessHandle,
+    domain: u32,
+    socket_type: u32,
+    protocol: u32,
+) -> Result<u32, DescriptorError> {
+    let backend = crate::linux_socket::create(owner, domain, socket_type, protocol)
+        .map_err(map_socket_error)?;
+    let status_flags = crate::linux_file::O_RDWR
+        | if socket_type & crate::linux_socket::SOCK_NONBLOCK != 0 {
+            crate::linux_file::O_NONBLOCK
+        } else {
+            0
+        };
+    match install_object(
+        owner,
+        OpenObjectKind::UnixSocket(backend),
+        status_flags,
+        socket_type & crate::linux_socket::SOCK_CLOEXEC != 0,
+    ) {
+        Ok(fd) => Ok(fd),
+        Err(error) => {
+            let _ = crate::linux_socket::close(owner, backend);
+            Err(error)
+        }
+    }
+}
+
+pub fn socket_pair(
+    owner: ProcessHandle,
+    domain: u32,
+    socket_type: u32,
+    protocol: u32,
+) -> Result<(u32, u32), DescriptorError> {
+    let (first, second) = crate::linux_socket::create_pair(owner, domain, socket_type, protocol)
+        .map_err(map_socket_error)?;
+    let status_flags = crate::linux_file::O_RDWR
+        | if socket_type & crate::linux_socket::SOCK_NONBLOCK != 0 {
+            crate::linux_file::O_NONBLOCK
+        } else {
+            0
+        };
+    match install_object_pair(
+        owner,
+        OpenObjectKind::UnixSocket(first),
+        status_flags,
+        OpenObjectKind::UnixSocket(second),
+        status_flags,
+        socket_type & crate::linux_socket::SOCK_CLOEXEC != 0,
+    ) {
+        Ok(pair) => Ok(pair),
+        Err(error) => {
+            let _ = crate::linux_socket::close(owner, first);
+            let _ = crate::linux_socket::close(owner, second);
+            Err(error)
+        }
+    }
+}
+
+pub fn bind_socket(
+    owner: ProcessHandle,
+    fd: u32,
+    address: crate::linux_socket::UnixAddress,
+) -> Result<(), DescriptorError> {
+    with_socket(owner, fd, |backend| {
+        crate::linux_socket::bind(owner, backend, address)
+    })
+}
+
+pub fn listen_socket(owner: ProcessHandle, fd: u32, backlog: usize) -> Result<(), DescriptorError> {
+    with_socket(owner, fd, |backend| {
+        crate::linux_socket::listen(owner, backend, backlog)
+    })
+}
+
+pub fn connect_socket(
+    owner: ProcessHandle,
+    fd: u32,
+    address: crate::linux_socket::UnixAddress,
+) -> Result<(), DescriptorError> {
+    with_socket(owner, fd, |backend| {
+        crate::linux_socket::connect(owner, backend, address)
+    })
+}
+
+pub fn accept_socket(
+    owner: ProcessHandle,
+    fd: u32,
+    flags: u32,
+) -> Result<(u32, crate::linux_socket::UnixAddress), DescriptorError> {
+    if flags & !(crate::linux_socket::SOCK_NONBLOCK | crate::linux_socket::SOCK_CLOEXEC) != 0 {
+        return Err(DescriptorError::InvalidArgument);
+    }
+    let lease = acquire_descriptor(owner, fd)?;
+    let accepted = match lease.kind {
+        OpenObjectKind::UnixSocket(backend) => {
+            crate::linux_socket::accept(owner, backend).map_err(map_socket_error)
+        }
+        _ => Err(DescriptorError::NotSocket),
+    };
+    release_lease(owner, lease);
+    let (backend, peer) = accepted?;
+    let status_flags = crate::linux_file::O_RDWR
+        | if flags & crate::linux_socket::SOCK_NONBLOCK != 0 {
+            crate::linux_file::O_NONBLOCK
+        } else {
+            0
+        };
+    match install_object(
+        owner,
+        OpenObjectKind::UnixSocket(backend),
+        status_flags,
+        flags & crate::linux_socket::SOCK_CLOEXEC != 0,
+    ) {
+        Ok(accepted_fd) => Ok((accepted_fd, peer)),
+        Err(error) => {
+            let _ = crate::linux_socket::close(owner, backend);
+            Err(error)
+        }
+    }
+}
+
+fn with_socket(
+    owner: ProcessHandle,
+    fd: u32,
+    operation: impl FnOnce(u32) -> Result<(), crate::linux_socket::SocketError>,
+) -> Result<(), DescriptorError> {
+    let lease = acquire_descriptor(owner, fd)?;
+    let result = match lease.kind {
+        OpenObjectKind::UnixSocket(backend) => operation(backend).map_err(map_socket_error),
+        _ => Err(DescriptorError::NotSocket),
+    };
+    release_lease(owner, lease);
+    result
+}
+
+pub fn validate_socket(owner: ProcessHandle, fd: u32) -> Result<(), DescriptorError> {
+    let lease = acquire_descriptor(owner, fd)?;
+    let result = match lease.kind {
+        OpenObjectKind::UnixSocket(_) => Ok(()),
+        _ => Err(DescriptorError::NotSocket),
+    };
+    release_lease(owner, lease);
+    result
+}
+
+pub fn shutdown_socket(owner: ProcessHandle, fd: u32, how: u32) -> Result<(), DescriptorError> {
+    with_socket(owner, fd, |backend| {
+        crate::linux_socket::shutdown(owner, backend, how)
+    })
+}
+
+pub fn socket_local_address(
+    owner: ProcessHandle,
+    fd: u32,
+) -> Result<crate::linux_socket::UnixAddress, DescriptorError> {
+    let lease = acquire_descriptor(owner, fd)?;
+    let result = match lease.kind {
+        OpenObjectKind::UnixSocket(backend) => {
+            crate::linux_socket::local_address(owner, backend).map_err(map_socket_error)
+        }
+        _ => Err(DescriptorError::NotSocket),
+    };
+    release_lease(owner, lease);
+    result
+}
+
+pub fn socket_peer_address(
+    owner: ProcessHandle,
+    fd: u32,
+) -> Result<crate::linux_socket::UnixAddress, DescriptorError> {
+    let lease = acquire_descriptor(owner, fd)?;
+    let result = match lease.kind {
+        OpenObjectKind::UnixSocket(backend) => {
+            crate::linux_socket::peer_address(owner, backend).map_err(map_socket_error)
+        }
+        _ => Err(DescriptorError::NotSocket),
+    };
+    release_lease(owner, lease);
+    result
+}
+
+pub fn socket_peer_credentials(
+    owner: ProcessHandle,
+    fd: u32,
+) -> Result<crate::linux_socket::PeerCredentials, DescriptorError> {
+    let lease = acquire_descriptor(owner, fd)?;
+    let result = match lease.kind {
+        OpenObjectKind::UnixSocket(backend) => {
+            crate::linux_socket::peer_credentials(owner, backend).map_err(map_socket_error)
+        }
+        _ => Err(DescriptorError::NotSocket),
+    };
+    release_lease(owner, lease);
+    result
+}
+
+pub fn socket_is_listener(owner: ProcessHandle, fd: u32) -> Result<bool, DescriptorError> {
+    let lease = acquire_descriptor(owner, fd)?;
+    let result = match lease.kind {
+        OpenObjectKind::UnixSocket(backend) => {
+            crate::linux_socket::is_listener(owner, backend).map_err(map_socket_error)
+        }
+        _ => Err(DescriptorError::NotSocket),
+    };
+    release_lease(owner, lease);
+    result
+}
+
+pub fn send_socket(
+    owner: ProcessHandle,
+    fd: u32,
+    input: &[u8],
+    flags: u32,
+) -> Result<usize, DescriptorError> {
+    let lease = acquire_descriptor(owner, fd)?;
+    let result = match lease.kind {
+        OpenObjectKind::UnixSocket(backend) => {
+            crate::linux_socket::send(owner, backend, input, flags).map_err(map_socket_error)
+        }
+        _ => Err(DescriptorError::NotSocket),
+    };
+    release_lease(owner, lease);
+    result
+}
+
+pub fn receive_socket(
+    owner: ProcessHandle,
+    fd: u32,
+    output: &mut [u8],
+    flags: u32,
+) -> Result<usize, DescriptorError> {
+    let lease = acquire_descriptor(owner, fd)?;
+    let result = match lease.kind {
+        OpenObjectKind::UnixSocket(backend) => {
+            crate::linux_socket::receive(owner, backend, output, flags).map_err(map_socket_error)
+        }
+        _ => Err(DescriptorError::NotSocket),
+    };
+    release_lease(owner, lease);
+    result
 }
 
 pub fn read(
@@ -711,6 +967,9 @@ pub fn read(
         OpenObjectKind::PipeRead(handle) => {
             crate::linux_pipe::read(owner, handle, output).map_err(map_pipe_error)
         }
+        OpenObjectKind::UnixSocket(handle) => {
+            crate::linux_socket::read(owner, handle, output).map_err(map_socket_error)
+        }
         _ => Err(DescriptorError::BadFileDescriptor),
     };
     release_lease(owner, lease);
@@ -742,6 +1001,9 @@ pub fn write(
         OpenObjectKind::PipeWrite(handle) => crate::linux_pipe::write(owner, handle, input)
             .map(WriteResult::Bytes)
             .map_err(map_pipe_error),
+        OpenObjectKind::UnixSocket(handle) => crate::linux_socket::write(owner, handle, input)
+            .map(WriteResult::Bytes)
+            .map_err(map_socket_error),
         _ => Err(DescriptorError::BadFileDescriptor),
     };
     release_lease(owner, lease);
@@ -1019,6 +1281,13 @@ pub fn metadata(owner: ProcessHandle, fd: u32) -> Result<DescriptorMetadata, Des
             modified_ticks: 0,
             inode,
         }),
+        OpenObjectKind::UnixSocket(_) => Ok(DescriptorMetadata {
+            mode: 0o140_600,
+            size_bytes: 0,
+            created_ticks: 0,
+            modified_ticks: 0,
+            inode,
+        }),
         OpenObjectKind::ConsoleInput
         | OpenObjectKind::ConsoleOutput
         | OpenObjectKind::ConsoleError => Ok(DescriptorMetadata {
@@ -1098,6 +1367,12 @@ fn readiness_for_lease(
             let ready = crate::linux_pipe::readiness(owner, handle).map_err(map_pipe_error)?;
             let generation =
                 crate::linux_pipe::readiness_generation(owner, handle).map_err(map_pipe_error)?;
+            Ok((ready, generation))
+        }
+        OpenObjectKind::UnixSocket(handle) => {
+            let ready = crate::linux_socket::readiness(owner, handle).map_err(map_socket_error)?;
+            let generation = crate::linux_socket::readiness_generation(owner, handle)
+                .map_err(map_socket_error)?;
             Ok((ready, generation))
         }
         OpenObjectKind::Epoll(backend) if allow_epoll => {
@@ -1347,6 +1622,26 @@ fn map_pipe_error(error: crate::linux_pipe::PipeError) -> DescriptorError {
     }
 }
 
+fn map_socket_error(error: crate::linux_socket::SocketError) -> DescriptorError {
+    match error {
+        crate::linux_socket::SocketError::InvalidArgument => DescriptorError::InvalidArgument,
+        crate::linux_socket::SocketError::BadFileDescriptor => DescriptorError::BadFileDescriptor,
+        crate::linux_socket::SocketError::AddressFamilyNotSupported => {
+            DescriptorError::AddressFamilyNotSupported
+        }
+        crate::linux_socket::SocketError::AddressInUse => DescriptorError::AddressInUse,
+        crate::linux_socket::SocketError::ConnectionRefused => DescriptorError::ConnectionRefused,
+        crate::linux_socket::SocketError::AlreadyConnected => DescriptorError::AlreadyConnected,
+        crate::linux_socket::SocketError::NotConnected => DescriptorError::NotConnected,
+        crate::linux_socket::SocketError::WouldBlock => DescriptorError::WouldBlock,
+        crate::linux_socket::SocketError::BrokenPipe => DescriptorError::BrokenPipe,
+        crate::linux_socket::SocketError::Capacity => DescriptorError::Capacity,
+        crate::linux_socket::SocketError::OperationNotSupported => {
+            DescriptorError::OperationNotSupported
+        }
+    }
+}
+
 fn map_epoll_error(error: crate::linux_epoll::EpollError) -> DescriptorError {
     match error {
         crate::linux_epoll::EpollError::InvalidArgument => DescriptorError::InvalidArgument,
@@ -1384,9 +1679,25 @@ mod tests {
         let timer = timerfd_create(owner, crate::linux_timerfd::CLOCK_MONOTONIC, 0).unwrap();
         let epoll = epoll_create(owner, 0).unwrap();
         let (reader, writer) = pipe(owner, crate::linux_file::O_NONBLOCK).unwrap();
+        let (first_socket, second_socket) = socket_pair(
+            owner,
+            crate::linux_socket::AF_UNIX,
+            crate::linux_socket::SOCK_STREAM,
+            0,
+        )
+        .unwrap();
         assert_eq!(
-            [file, event, timer, epoll, reader, writer],
-            [3, 4, 5, 6, 7, 8]
+            [
+                file,
+                event,
+                timer,
+                epoll,
+                reader,
+                writer,
+                first_socket,
+                second_socket,
+            ],
+            [3, 4, 5, 6, 7, 8, 9, 10]
         );
         cleanup(owner);
         let _ = crate::linux_file::unlink(b"/unified-fd");
@@ -1502,6 +1813,104 @@ mod tests {
         );
         assert_eq!(read(owner, reader, &mut [0_u8; 1], 0), Ok(0));
         cleanup(owner);
+    }
+
+    #[test]
+    fn unix_socket_epoll_watch_and_peer_lifetime_track_last_duplicate() {
+        let owner = owner(0x520c);
+        let (first, second) = socket_pair(
+            owner,
+            crate::linux_socket::AF_UNIX,
+            crate::linux_socket::SOCK_STREAM | crate::linux_socket::SOCK_NONBLOCK,
+            0,
+        )
+        .unwrap();
+        let alias = duplicate(owner, first, 0, false).unwrap();
+        let epoll = epoll_create(owner, 0).unwrap();
+        epoll_ctl(
+            owner,
+            epoll,
+            crate::linux_epoll::EPOLL_CTL_ADD,
+            first,
+            crate::linux_epoll::EPOLLIN | crate::linux_epoll::EPOLLHUP,
+            0x77,
+        )
+        .unwrap();
+        close(owner, first).unwrap();
+        assert_eq!(
+            write(owner, second, b"socket", 0),
+            Ok(WriteResult::Bytes(6))
+        );
+        let mut ready = [crate::linux_epoll::ReadyEvent { events: 0, data: 0 }; 1];
+        assert_eq!(epoll_wait(owner, epoll, &mut ready), Ok(1));
+        assert_eq!(ready[0].data, 0x77);
+        let mut output = [0_u8; 6];
+        assert_eq!(read(owner, alias, &mut output, 0), Ok(6));
+        assert_eq!(&output, b"socket");
+        close(owner, alias).unwrap();
+        assert_eq!(epoll_wait(owner, epoll, &mut ready), Ok(0));
+        assert_eq!(
+            readiness(owner, second, 0),
+            Ok(crate::linux_eventfd::READY_IN
+                | crate::linux_eventfd::READY_ERR
+                | crate::linux_eventfd::READY_HUP)
+        );
+        cleanup(owner);
+    }
+
+    #[test]
+    fn named_unix_socket_crosses_descriptor_spaces_with_linux_metadata() {
+        let server = owner(0x520d);
+        let client = owner(0x520e);
+        let address = crate::linux_socket::UnixAddress::new(b"\0arach-fd-cross-process").unwrap();
+        let listener = socket(
+            server,
+            crate::linux_socket::AF_UNIX,
+            crate::linux_socket::SOCK_STREAM,
+            0,
+        )
+        .unwrap();
+        bind_socket(server, listener, address).unwrap();
+        listen_socket(server, listener, 4).unwrap();
+        let client_socket = socket(
+            client,
+            crate::linux_socket::AF_UNIX,
+            crate::linux_socket::SOCK_STREAM,
+            0,
+        )
+        .unwrap();
+        connect_socket(client, client_socket, address).unwrap();
+        let (accepted, peer) = accept_socket(
+            server,
+            listener,
+            crate::linux_socket::SOCK_NONBLOCK | crate::linux_socket::SOCK_CLOEXEC,
+        )
+        .unwrap();
+        assert!(peer.is_unnamed());
+        assert_eq!(socket_peer_address(client, client_socket), Ok(address));
+        assert_eq!(
+            socket_peer_credentials(server, accepted).unwrap().pid,
+            client.pid
+        );
+        assert_eq!(
+            socket_peer_credentials(client, client_socket).unwrap().pid,
+            server.pid
+        );
+        assert_eq!(descriptor_flags(server, accepted), Ok(FD_CLOEXEC));
+        assert_eq!(
+            status_flags(server, accepted),
+            Ok(crate::linux_file::O_RDWR | crate::linux_file::O_NONBLOCK)
+        );
+        assert_eq!(
+            metadata(server, accepted).unwrap().mode & 0o170_000,
+            0o140_000
+        );
+        assert_eq!(send_socket(client, client_socket, b"request", 0), Ok(7));
+        let mut request = [0_u8; 7];
+        assert_eq!(receive_socket(server, accepted, &mut request, 0), Ok(7));
+        assert_eq!(&request, b"request");
+        cleanup(client);
+        cleanup(server);
     }
 
     #[test]

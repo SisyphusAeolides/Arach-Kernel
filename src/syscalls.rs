@@ -46,6 +46,20 @@ const ERROR_FILE_TOO_LARGE: isize = -27;
 const ERROR_ILLEGAL_SEEK: isize = -29;
 #[cfg(target_os = "none")]
 const ERROR_BROKEN_PIPE: isize = -32;
+#[cfg(target_os = "none")]
+const ERROR_NOT_SOCKET: isize = -88;
+#[cfg(target_os = "none")]
+const ERROR_PROTOCOL_OPTION: isize = -92;
+#[cfg(target_os = "none")]
+const ERROR_ADDRESS_FAMILY_NOT_SUPPORTED: isize = -97;
+#[cfg(target_os = "none")]
+const ERROR_ADDRESS_IN_USE: isize = -98;
+#[cfg(target_os = "none")]
+const ERROR_ALREADY_CONNECTED: isize = -106;
+#[cfg(target_os = "none")]
+const ERROR_NOT_CONNECTED: isize = -107;
+#[cfg(target_os = "none")]
+const ERROR_CONNECTION_REFUSED: isize = -111;
 #[cfg(any(target_os = "none", test))]
 const ERROR_NO_SPACE: isize = -28;
 #[cfg(any(target_os = "none", test))]
@@ -90,6 +104,8 @@ const MAXIMUM_EXEC_VECTOR_ENTRIES: usize = 128;
 const MAXIMUM_EXEC_STRING_BYTES: usize = 32 * 1024;
 #[cfg(target_os = "none")]
 const MAXIMUM_LINUX_POLL_FDS: usize = 64;
+#[cfg(target_os = "none")]
+const MAXIMUM_LINUX_IOVECTORS: usize = 16;
 #[cfg(target_os = "none")]
 const LINUX_POLLERR: u16 = 0x008;
 #[cfg(target_os = "none")]
@@ -1365,6 +1381,26 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Dup3) => linux_dup3(arguments),
         Some(crate::process::abi::LinuxSyscall::Pipe2) => linux_pipe(arguments, arguments[1]),
         Some(crate::process::abi::LinuxSyscall::Fcntl) => linux_fcntl(arguments),
+        Some(crate::process::abi::LinuxSyscall::Socket) => linux_socket(arguments),
+        Some(crate::process::abi::LinuxSyscall::Connect) => linux_connect(arguments),
+        Some(crate::process::abi::LinuxSyscall::Accept) => linux_accept(arguments, 0),
+        Some(crate::process::abi::LinuxSyscall::Accept4) => linux_accept(arguments, arguments[3]),
+        Some(crate::process::abi::LinuxSyscall::Sendto) => linux_sendto(arguments),
+        Some(crate::process::abi::LinuxSyscall::Recvfrom) => linux_recvfrom(arguments),
+        Some(crate::process::abi::LinuxSyscall::Sendmsg) => linux_sendmsg(arguments),
+        Some(crate::process::abi::LinuxSyscall::Recvmsg) => linux_recvmsg(arguments),
+        Some(crate::process::abi::LinuxSyscall::Shutdown) => linux_shutdown(arguments),
+        Some(crate::process::abi::LinuxSyscall::Bind) => linux_bind(arguments),
+        Some(crate::process::abi::LinuxSyscall::Listen) => linux_listen(arguments),
+        Some(crate::process::abi::LinuxSyscall::Getsockname) => {
+            linux_get_socket_name(arguments, false)
+        }
+        Some(crate::process::abi::LinuxSyscall::Getpeername) => {
+            linux_get_socket_name(arguments, true)
+        }
+        Some(crate::process::abi::LinuxSyscall::Socketpair) => linux_socket_pair(arguments),
+        Some(crate::process::abi::LinuxSyscall::Setsockopt) => linux_set_socket_option(arguments),
+        Some(crate::process::abi::LinuxSyscall::Getsockopt) => linux_get_socket_option(arguments),
         Some(crate::process::abi::LinuxSyscall::Getpid) => {
             crate::process::lifecycle::current_thread_group() as isize
         }
@@ -2046,6 +2082,622 @@ fn linux_fcntl(arguments: [u64; 6]) -> isize {
 }
 
 #[cfg(target_os = "none")]
+fn read_user_u32(address: u64) -> Result<u32, UserCopyError> {
+    let mut encoded = [0_u8; core::mem::size_of::<u32>()];
+    copy_from_user(address, &mut encoded)?;
+    Ok(u32::from_ne_bytes(encoded))
+}
+
+#[cfg(target_os = "none")]
+fn read_unix_socket_address(
+    source: u64,
+    raw_length: u64,
+) -> Result<crate::linux_socket::UnixAddress, isize> {
+    const FAMILY_BYTES: usize = core::mem::size_of::<u16>();
+    const MAXIMUM_BYTES: usize = FAMILY_BYTES + crate::linux_socket::UNIX_PATH_BYTES;
+
+    let length = usize::try_from(raw_length).map_err(|_| ERROR_INVALID_ARGUMENT)?;
+    if !(FAMILY_BYTES + 1..=MAXIMUM_BYTES).contains(&length) {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    let mut encoded = [0_u8; MAXIMUM_BYTES];
+    copy_from_user(source, &mut encoded[..length]).map_err(|_| ERROR_BAD_ADDRESS)?;
+    let family = u16::from_ne_bytes(encoded[..FAMILY_BYTES].try_into().unwrap());
+    if u32::from(family) != crate::linux_socket::AF_UNIX {
+        return Err(ERROR_ADDRESS_FAMILY_NOT_SUPPORTED);
+    }
+    let raw_path = &encoded[FAMILY_BYTES..length];
+    let path = if raw_path[0] == 0 {
+        raw_path
+    } else {
+        &raw_path[..raw_path
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(raw_path.len())]
+    };
+    crate::linux_socket::UnixAddress::new(path).map_err(|_| ERROR_INVALID_ARGUMENT)
+}
+
+#[cfg(target_os = "none")]
+fn encode_unix_socket_address(
+    address: crate::linux_socket::UnixAddress,
+) -> ([u8; 2 + crate::linux_socket::UNIX_PATH_BYTES], usize) {
+    let mut encoded = [0_u8; 2 + crate::linux_socket::UNIX_PATH_BYTES];
+    encoded[..2].copy_from_slice(&(crate::linux_socket::AF_UNIX as u16).to_ne_bytes());
+    if address.is_unnamed() {
+        return (encoded, 2);
+    }
+    let path = address.as_bytes();
+    encoded[2..2 + path.len()].copy_from_slice(path);
+    let terminator =
+        usize::from(!address.is_abstract() && path.len() < crate::linux_socket::UNIX_PATH_BYTES);
+    (encoded, 2 + path.len() + terminator)
+}
+
+#[cfg(target_os = "none")]
+fn write_unix_socket_address(
+    destination: u64,
+    length_pointer: u64,
+    address: crate::linux_socket::UnixAddress,
+    allow_null: bool,
+) -> Result<(), isize> {
+    if destination == 0 {
+        return if allow_null {
+            Ok(())
+        } else {
+            Err(ERROR_BAD_ADDRESS)
+        };
+    }
+    if length_pointer == 0 {
+        return Err(ERROR_BAD_ADDRESS);
+    }
+    let available = read_user_u32(length_pointer).map_err(|_| ERROR_BAD_ADDRESS)? as usize;
+    let (encoded, actual) = encode_unix_socket_address(address);
+    let copied = available.min(actual);
+    if copied != 0 {
+        copy_to_user(destination, &encoded[..copied]).map_err(|_| ERROR_BAD_ADDRESS)?;
+    }
+    copy_value_to_user(length_pointer, &(actual as u32)).map_err(|_| ERROR_BAD_ADDRESS)
+}
+
+#[cfg(target_os = "none")]
+fn linux_socket(arguments: [u64; 6]) -> isize {
+    let (Ok(domain), Ok(socket_type), Ok(protocol)) = (
+        u32::try_from(arguments[0]),
+        u32::try_from(arguments[1]),
+        u32::try_from(arguments[2]),
+    ) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::socket(owner, domain, socket_type, protocol) {
+        Ok(fd) => fd as isize,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_socket_pair(arguments: [u64; 6]) -> isize {
+    let (Ok(domain), Ok(socket_type), Ok(protocol)) = (
+        u32::try_from(arguments[0]),
+        u32::try_from(arguments[1]),
+        u32::try_from(arguments[2]),
+    ) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let (first, second) = match crate::linux_fd::socket_pair(owner, domain, socket_type, protocol) {
+        Ok(pair) => pair,
+        Err(error) => return map_linux_descriptor_error(error),
+    };
+    let mut encoded = [0_u8; 8];
+    encoded[..4].copy_from_slice(&(first as i32).to_ne_bytes());
+    encoded[4..].copy_from_slice(&(second as i32).to_ne_bytes());
+    if copy_to_user(arguments[3], &encoded).is_err() {
+        let _ = crate::linux_fd::close(owner, first);
+        let _ = crate::linux_fd::close(owner, second);
+        ERROR_BAD_ADDRESS
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_bind(arguments: [u64; 6]) -> isize {
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let address = match read_unix_socket_address(arguments[1], arguments[2]) {
+        Ok(address) => address,
+        Err(error) => return error,
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::bind_socket(owner, fd, address) {
+        Ok(()) => 0,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_listen(arguments: [u64; 6]) -> isize {
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let backlog = (arguments[1] as u32 as i32).max(0) as usize;
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::listen_socket(owner, fd, backlog) {
+        Ok(()) => 0,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_connect(arguments: [u64; 6]) -> isize {
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let address = match read_unix_socket_address(arguments[1], arguments[2]) {
+        Ok(address) => address,
+        Err(error) => return error,
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::connect_socket(owner, fd, address) {
+        Ok(()) => 0,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_accept(arguments: [u64; 6], raw_flags: u64) -> isize {
+    let (Ok(fd), Ok(flags)) = (u32::try_from(arguments[0]), u32::try_from(raw_flags)) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let (accepted, peer) = match crate::linux_fd::accept_socket(owner, fd, flags) {
+        Ok(value) => value,
+        Err(error) => return map_linux_descriptor_error(error),
+    };
+    if let Err(error) = write_unix_socket_address(arguments[1], arguments[2], peer, true) {
+        let _ = crate::linux_fd::close(owner, accepted);
+        return error;
+    }
+    accepted as isize
+}
+
+#[cfg(target_os = "none")]
+fn linux_shutdown(arguments: [u64; 6]) -> isize {
+    let (Ok(fd), Ok(how)) = (u32::try_from(arguments[0]), u32::try_from(arguments[1])) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::shutdown_socket(owner, fd, how) {
+        Ok(()) => 0,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_get_socket_name(arguments: [u64; 6], peer: bool) -> isize {
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let address = if peer {
+        crate::linux_fd::socket_peer_address(owner, fd)
+    } else {
+        crate::linux_fd::socket_local_address(owner, fd)
+    };
+    let address = match address {
+        Ok(address) => address,
+        Err(error) => return map_linux_descriptor_error(error),
+    };
+    match write_unix_socket_address(arguments[1], arguments[2], address, false) {
+        Ok(()) => 0,
+        Err(error) => error,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_sendto(arguments: [u64; 6]) -> isize {
+    if arguments[5] != 0 {
+        return ERROR_NOT_SUPPORTED;
+    }
+    let (Ok(fd), Ok(flags)) = (u32::try_from(arguments[0]), u32::try_from(arguments[3])) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let length = core::cmp::min(arguments[2], MAXIMUM_AKASHIC_IO_BYTES as u64) as usize;
+    let mut staging = AKASHIC_IO_STAGING.lock();
+    if length != 0 && copy_from_user(arguments[1], &mut staging[..length]).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    match crate::linux_fd::send_socket(owner, fd, &staging[..length], flags) {
+        Ok(written) => written as isize,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_recvfrom(arguments: [u64; 6]) -> isize {
+    let (Ok(fd), Ok(flags)) = (u32::try_from(arguments[0]), u32::try_from(arguments[3])) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let length = core::cmp::min(arguments[2], MAXIMUM_AKASHIC_IO_BYTES as u64) as usize;
+    let mut staging = AKASHIC_IO_STAGING.lock();
+    let copied = match crate::linux_fd::receive_socket(owner, fd, &mut staging[..length], flags) {
+        Ok(copied) => copied,
+        Err(error) => return map_linux_descriptor_error(error),
+    };
+    if copied != 0 && copy_to_user(arguments[1], &staging[..copied]).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    if arguments[4] != 0 {
+        let peer = match crate::linux_fd::socket_peer_address(owner, fd) {
+            Ok(address) => address,
+            Err(error) => return map_linux_descriptor_error(error),
+        };
+        if let Err(error) = write_unix_socket_address(arguments[4], arguments[5], peer, false) {
+            return error;
+        }
+    }
+    copied as isize
+}
+
+#[cfg(target_os = "none")]
+#[derive(Clone, Copy)]
+struct LinuxMessageHeader {
+    name: u64,
+    name_length: u32,
+    iovectors: u64,
+    iovector_count: usize,
+    _control: u64,
+    control_length: usize,
+}
+
+#[cfg(target_os = "none")]
+fn read_linux_message_header(source: u64) -> Result<LinuxMessageHeader, isize> {
+    let mut encoded = [0_u8; 56];
+    copy_from_user(source, &mut encoded).map_err(|_| ERROR_BAD_ADDRESS)?;
+    let iovector_count = usize::try_from(u64::from_ne_bytes(encoded[24..32].try_into().unwrap()))
+        .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+    let control_length = usize::try_from(u64::from_ne_bytes(encoded[40..48].try_into().unwrap()))
+        .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+    if iovector_count > MAXIMUM_LINUX_IOVECTORS {
+        return Err(ERROR_INVALID_ARGUMENT);
+    }
+    Ok(LinuxMessageHeader {
+        name: u64::from_ne_bytes(encoded[0..8].try_into().unwrap()),
+        name_length: u32::from_ne_bytes(encoded[8..12].try_into().unwrap()),
+        iovectors: u64::from_ne_bytes(encoded[16..24].try_into().unwrap()),
+        iovector_count,
+        _control: u64::from_ne_bytes(encoded[32..40].try_into().unwrap()),
+        control_length,
+    })
+}
+
+#[cfg(target_os = "none")]
+fn read_linux_iovec(source: u64, index: usize) -> Result<(u64, usize), isize> {
+    let offset = index
+        .checked_mul(16)
+        .and_then(|offset| u64::try_from(offset).ok())
+        .ok_or(ERROR_INVALID_ARGUMENT)?;
+    let address = source.checked_add(offset).ok_or(ERROR_BAD_ADDRESS)?;
+    let mut encoded = [0_u8; 16];
+    copy_from_user(address, &mut encoded).map_err(|_| ERROR_BAD_ADDRESS)?;
+    let length = usize::try_from(u64::from_ne_bytes(encoded[8..16].try_into().unwrap()))
+        .map_err(|_| ERROR_INVALID_ARGUMENT)?;
+    Ok((
+        u64::from_ne_bytes(encoded[0..8].try_into().unwrap()),
+        length,
+    ))
+}
+
+#[cfg(target_os = "none")]
+fn linux_sendmsg(arguments: [u64; 6]) -> isize {
+    let (Ok(fd), Ok(flags)) = (u32::try_from(arguments[0]), u32::try_from(arguments[2])) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let header = match read_linux_message_header(arguments[1]) {
+        Ok(header) => header,
+        Err(error) => return error,
+    };
+    if header.name_length != 0 || header.control_length != 0 {
+        return ERROR_NOT_SUPPORTED;
+    }
+    let mut staging = AKASHIC_IO_STAGING.lock();
+    let mut total = 0;
+    for index in 0..header.iovector_count {
+        let (source, length) = match read_linux_iovec(header.iovectors, index) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let copied = length.min(MAXIMUM_AKASHIC_IO_BYTES - total);
+        if copied != 0 && copy_from_user(source, &mut staging[total..total + copied]).is_err() {
+            return ERROR_BAD_ADDRESS;
+        }
+        total += copied;
+        if total == MAXIMUM_AKASHIC_IO_BYTES {
+            break;
+        }
+    }
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    match crate::linux_fd::send_socket(owner, fd, &staging[..total], flags) {
+        Ok(written) => written as isize,
+        Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_recvmsg(arguments: [u64; 6]) -> isize {
+    const MSG_CMSG_CLOEXEC: u32 = 0x4000_0000;
+
+    let (Ok(fd), Ok(flags)) = (u32::try_from(arguments[0]), u32::try_from(arguments[2])) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if flags & !(crate::linux_socket::RECEIVE_FLAGS | MSG_CMSG_CLOEXEC) != 0 {
+        return ERROR_NOT_SUPPORTED;
+    }
+    let header = match read_linux_message_header(arguments[1]) {
+        Ok(header) => header,
+        Err(error) => return error,
+    };
+    let name_length_pointer = match arguments[1].checked_add(8) {
+        Some(pointer) => pointer,
+        None => return ERROR_BAD_ADDRESS,
+    };
+    let control_length_pointer = match arguments[1].checked_add(40) {
+        Some(pointer) => pointer,
+        None => return ERROR_BAD_ADDRESS,
+    };
+    let message_flags_pointer = match arguments[1].checked_add(48) {
+        Some(pointer) => pointer,
+        None => return ERROR_BAD_ADDRESS,
+    };
+    if validate_user_write_range(control_length_pointer, core::mem::size_of::<u64>()).is_err()
+        || validate_user_write_range(message_flags_pointer, core::mem::size_of::<u32>()).is_err()
+        || (header.name != 0
+            && header.name_length != 0
+            && validate_user_write_range(
+                header.name,
+                (header.name_length as usize).min(2 + crate::linux_socket::UNIX_PATH_BYTES),
+            )
+            .is_err())
+        || (header.name != 0
+            && validate_user_write_range(name_length_pointer, core::mem::size_of::<u32>()).is_err())
+    {
+        return ERROR_BAD_ADDRESS;
+    }
+    let mut bases = [0_u64; MAXIMUM_LINUX_IOVECTORS];
+    let mut lengths = [0_usize; MAXIMUM_LINUX_IOVECTORS];
+    let mut capacity = 0;
+    for index in 0..header.iovector_count {
+        let (base, requested) = match read_linux_iovec(header.iovectors, index) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let length = requested.min(MAXIMUM_AKASHIC_IO_BYTES - capacity);
+        if length != 0 && validate_user_write_range(base, length).is_err() {
+            return ERROR_BAD_ADDRESS;
+        }
+        bases[index] = base;
+        lengths[index] = length;
+        capacity += length;
+        if capacity == MAXIMUM_AKASHIC_IO_BYTES {
+            break;
+        }
+    }
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let mut staging = AKASHIC_IO_STAGING.lock();
+    let copied = match crate::linux_fd::receive_socket(
+        owner,
+        fd,
+        &mut staging[..capacity],
+        flags & crate::linux_socket::RECEIVE_FLAGS,
+    ) {
+        Ok(copied) => copied,
+        Err(error) => return map_linux_descriptor_error(error),
+    };
+    let mut consumed = 0;
+    for index in 0..header.iovector_count {
+        let length = lengths[index].min(copied.saturating_sub(consumed));
+        if length != 0 && copy_to_user(bases[index], &staging[consumed..consumed + length]).is_err()
+        {
+            return ERROR_BAD_ADDRESS;
+        }
+        consumed += length;
+        if consumed == copied {
+            break;
+        }
+    }
+    if header.name != 0 {
+        let peer = match crate::linux_fd::socket_peer_address(owner, fd) {
+            Ok(address) => address,
+            Err(error) => return map_linux_descriptor_error(error),
+        };
+        let (encoded, actual) = encode_unix_socket_address(peer);
+        let name_bytes = (header.name_length as usize).min(actual);
+        if name_bytes != 0 && copy_to_user(header.name, &encoded[..name_bytes]).is_err() {
+            return ERROR_BAD_ADDRESS;
+        }
+        if copy_to_user(name_length_pointer, &(actual as u32).to_ne_bytes()).is_err() {
+            return ERROR_BAD_ADDRESS;
+        }
+    }
+    if copy_to_user(control_length_pointer, &0_u64.to_ne_bytes()).is_err()
+        || copy_to_user(message_flags_pointer, &0_u32.to_ne_bytes()).is_err()
+    {
+        return ERROR_BAD_ADDRESS;
+    }
+    copied as isize
+}
+
+#[cfg(target_os = "none")]
+fn write_socket_option(destination: u64, length_pointer: u64, value: &[u8]) -> isize {
+    if destination == 0 || length_pointer == 0 {
+        return ERROR_BAD_ADDRESS;
+    }
+    let available = match read_user_u32(length_pointer) {
+        Ok(length) => length as usize,
+        Err(_) => return ERROR_BAD_ADDRESS,
+    };
+    let copied = available.min(value.len());
+    if copied != 0 && copy_to_user(destination, &value[..copied]).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    if copy_value_to_user(length_pointer, &(copied as u32)).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_set_socket_option(arguments: [u64; 6]) -> isize {
+    const SOL_SOCKET: u32 = 1;
+    const SO_SNDBUF: u32 = 7;
+    const SO_RCVBUF: u32 = 8;
+
+    let (Ok(fd), Ok(level), Ok(option), Ok(length)) = (
+        u32::try_from(arguments[0]),
+        u32::try_from(arguments[1]),
+        u32::try_from(arguments[2]),
+        usize::try_from(arguments[4]),
+    ) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    if let Err(error) = crate::linux_fd::validate_socket(owner, fd) {
+        return map_linux_descriptor_error(error);
+    }
+    if level != SOL_SOCKET || !matches!(option, SO_SNDBUF | SO_RCVBUF) {
+        return ERROR_PROTOCOL_OPTION;
+    }
+    if length < core::mem::size_of::<i32>() {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let mut encoded = [0_u8; core::mem::size_of::<i32>()];
+    if copy_from_user(arguments[3], &mut encoded).is_err() {
+        return ERROR_BAD_ADDRESS;
+    }
+    let requested = i32::from_ne_bytes(encoded);
+    if requested <= 0 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    0
+}
+
+#[cfg(target_os = "none")]
+fn linux_get_socket_option(arguments: [u64; 6]) -> isize {
+    const SOL_SOCKET: u32 = 1;
+    const SO_TYPE: u32 = 3;
+    const SO_ERROR: u32 = 4;
+    const SO_SNDBUF: u32 = 7;
+    const SO_RCVBUF: u32 = 8;
+    const SO_PEERCRED: u32 = 17;
+    const SO_ACCEPTCONN: u32 = 30;
+    const SO_DOMAIN: u32 = 39;
+
+    let (Ok(fd), Ok(level), Ok(option)) = (
+        u32::try_from(arguments[0]),
+        u32::try_from(arguments[1]),
+        u32::try_from(arguments[2]),
+    ) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if level != SOL_SOCKET {
+        return ERROR_PROTOCOL_OPTION;
+    }
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    if let Err(error) = crate::linux_fd::validate_socket(owner, fd) {
+        return map_linux_descriptor_error(error);
+    }
+    match option {
+        SO_TYPE => write_socket_option(
+            arguments[3],
+            arguments[4],
+            &(crate::linux_socket::SOCK_STREAM as i32).to_ne_bytes(),
+        ),
+        SO_ERROR => write_socket_option(arguments[3], arguments[4], &0_i32.to_ne_bytes()),
+        SO_SNDBUF | SO_RCVBUF => write_socket_option(
+            arguments[3],
+            arguments[4],
+            &(crate::linux_socket::SOCKET_BUFFER_BYTES as i32).to_ne_bytes(),
+        ),
+        SO_ACCEPTCONN => {
+            let listening = match crate::linux_fd::socket_is_listener(owner, fd) {
+                Ok(value) => value,
+                Err(error) => return map_linux_descriptor_error(error),
+            };
+            write_socket_option(
+                arguments[3],
+                arguments[4],
+                &i32::from(listening).to_ne_bytes(),
+            )
+        }
+        SO_DOMAIN => write_socket_option(
+            arguments[3],
+            arguments[4],
+            &(crate::linux_socket::AF_UNIX as i32).to_ne_bytes(),
+        ),
+        SO_PEERCRED => {
+            let credentials = match crate::linux_fd::socket_peer_credentials(owner, fd) {
+                Ok(value) => value,
+                Err(error) => return map_linux_descriptor_error(error),
+            };
+            let mut encoded = [0_u8; 12];
+            encoded[..4].copy_from_slice(&(credentials.pid as i32).to_ne_bytes());
+            encoded[4..8].copy_from_slice(&credentials.uid.to_ne_bytes());
+            encoded[8..12].copy_from_slice(&credentials.gid.to_ne_bytes());
+            write_socket_option(arguments[3], arguments[4], &encoded)
+        }
+        _ => ERROR_PROTOCOL_OPTION,
+    }
+}
+
+#[cfg(target_os = "none")]
 fn linux_open(arguments: [u64; 6]) -> isize {
     let Ok(flags) = u32::try_from(arguments[1]) else {
         return ERROR_INVALID_ARGUMENT;
@@ -2281,6 +2933,15 @@ fn map_linux_descriptor_error(error: crate::linux_fd::DescriptorError) -> isize 
         crate::linux_fd::DescriptorError::IllegalSeek => ERROR_ILLEGAL_SEEK,
         crate::linux_fd::DescriptorError::AlreadyExists => ERROR_ALREADY_EXISTS,
         crate::linux_fd::DescriptorError::NotFound => ERROR_NO_ENTRY,
+        crate::linux_fd::DescriptorError::AddressFamilyNotSupported => {
+            ERROR_ADDRESS_FAMILY_NOT_SUPPORTED
+        }
+        crate::linux_fd::DescriptorError::AddressInUse => ERROR_ADDRESS_IN_USE,
+        crate::linux_fd::DescriptorError::ConnectionRefused => ERROR_CONNECTION_REFUSED,
+        crate::linux_fd::DescriptorError::AlreadyConnected => ERROR_ALREADY_CONNECTED,
+        crate::linux_fd::DescriptorError::NotConnected => ERROR_NOT_CONNECTED,
+        crate::linux_fd::DescriptorError::NotSocket => ERROR_NOT_SOCKET,
+        crate::linux_fd::DescriptorError::OperationNotSupported => ERROR_NOT_SUPPORTED,
         crate::linux_fd::DescriptorError::OperationNotPermitted => ERROR_OPERATION_NOT_PERMITTED,
         crate::linux_fd::DescriptorError::PermissionDenied => ERROR_PERMISSION_DENIED,
         crate::linux_fd::DescriptorError::Io => ERROR_IO,

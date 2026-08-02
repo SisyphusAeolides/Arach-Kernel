@@ -73,6 +73,11 @@ pub enum LinuxSyscall {
     Shutdown,
     Bind,
     Listen,
+    Getsockname,
+    Getpeername,
+    Socketpair,
+    Setsockopt,
+    Getsockopt,
     EpollWait,
     EpollCreate1,
     EpollCtl,
@@ -145,6 +150,11 @@ impl LinuxSyscall {
             48 => Some(Self::Shutdown),
             49 => Some(Self::Bind),
             50 => Some(Self::Listen),
+            51 => Some(Self::Getsockname),
+            52 => Some(Self::Getpeername),
+            53 => Some(Self::Socketpair),
+            54 => Some(Self::Setsockopt),
+            55 => Some(Self::Getsockopt),
             56 => Some(Self::Clone),
             57 => Some(Self::Fork),
             58 => Some(Self::Vfork),
@@ -242,8 +252,39 @@ mod tests {
         );
         assert_eq!(LinuxSyscall::from_number(7), Some(LinuxSyscall::Poll));
         assert_eq!(LinuxSyscall::from_number(22), Some(LinuxSyscall::Pipe));
+        assert_eq!(LinuxSyscall::from_number(41), Some(LinuxSyscall::Socket));
+        assert_eq!(LinuxSyscall::from_number(42), Some(LinuxSyscall::Connect));
+        assert_eq!(LinuxSyscall::from_number(43), Some(LinuxSyscall::Accept));
+        assert_eq!(LinuxSyscall::from_number(44), Some(LinuxSyscall::Sendto));
+        assert_eq!(LinuxSyscall::from_number(45), Some(LinuxSyscall::Recvfrom));
+        assert_eq!(LinuxSyscall::from_number(46), Some(LinuxSyscall::Sendmsg));
+        assert_eq!(LinuxSyscall::from_number(47), Some(LinuxSyscall::Recvmsg));
+        assert_eq!(LinuxSyscall::from_number(48), Some(LinuxSyscall::Shutdown));
+        assert_eq!(LinuxSyscall::from_number(49), Some(LinuxSyscall::Bind));
+        assert_eq!(LinuxSyscall::from_number(50), Some(LinuxSyscall::Listen));
+        assert_eq!(
+            LinuxSyscall::from_number(51),
+            Some(LinuxSyscall::Getsockname)
+        );
+        assert_eq!(
+            LinuxSyscall::from_number(52),
+            Some(LinuxSyscall::Getpeername)
+        );
+        assert_eq!(
+            LinuxSyscall::from_number(53),
+            Some(LinuxSyscall::Socketpair)
+        );
+        assert_eq!(
+            LinuxSyscall::from_number(54),
+            Some(LinuxSyscall::Setsockopt)
+        );
+        assert_eq!(
+            LinuxSyscall::from_number(55),
+            Some(LinuxSyscall::Getsockopt)
+        );
         assert_eq!(LinuxSyscall::from_number(292), Some(LinuxSyscall::Dup3));
         assert_eq!(LinuxSyscall::from_number(293), Some(LinuxSyscall::Pipe2));
+        assert_eq!(LinuxSyscall::from_number(288), Some(LinuxSyscall::Accept4));
         assert_eq!(
             LinuxSyscall::from_number(232),
             Some(LinuxSyscall::EpollWait)

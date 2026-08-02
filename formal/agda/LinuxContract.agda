@@ -18,6 +18,9 @@ data Gate : Set where
   descriptorAliasLifetime descriptorLocalCloseOnExec : Gate
   pipeAtomicTransfer pipeEndpointLifetime pollEpollPipeReadiness : Gate
   epollWatchLifetime execDescriptorInheritance : Gate
+  unixSocketPair generationBoundSocketEndpoint unixSocketNamespace : Gate
+  unixSocketConnectAccept unixSocketFullDuplex unixSocketMessageVectors : Gate
+  pollEpollSocketReadiness unixSocketHalfClose unixSocketPeerIdentity : Gate
   threadGroupSnapshot peerGenerationRetirement leaderZombiePublication supervisorReap : Gate
   immutableFileSnapshot boundedExecVectors measuredStaticImage inactiveActivation : Gate
   atomicImageExchange execStateReset deferredImageReap rollbackPreservesImage : Gate
@@ -104,10 +107,24 @@ record DescriptorPipeCertificate : Set where
     epollWatchLifetimeEvidence : Measurement epollWatchLifetime
     execDescriptorInheritanceEvidence : Measurement execDescriptorInheritance
 
+record UnixSocketCertificate : Set where
+  constructor unixSocketCertificate
+  field
+    descriptorPipe : DescriptorPipeCertificate
+    unixSocketPairEvidence : Measurement unixSocketPair
+    generationBoundSocketEndpointEvidence : Measurement generationBoundSocketEndpoint
+    unixSocketNamespaceEvidence : Measurement unixSocketNamespace
+    unixSocketConnectAcceptEvidence : Measurement unixSocketConnectAccept
+    unixSocketFullDuplexEvidence : Measurement unixSocketFullDuplex
+    unixSocketMessageVectorsEvidence : Measurement unixSocketMessageVectors
+    pollEpollSocketReadinessEvidence : Measurement pollEpollSocketReadiness
+    unixSocketHalfCloseEvidence : Measurement unixSocketHalfClose
+    unixSocketPeerIdentityEvidence : Measurement unixSocketPeerIdentity
+
 record GroupExitCertificate : Set where
   constructor groupExitCertificate
   field
-    descriptorPipe : DescriptorPipeCertificate
+    unixSocket : UnixSocketCertificate
     threadGroupSnapshotEvidence : Measurement threadGroupSnapshot
     peerGenerationRetirementEvidence : Measurement peerGenerationRetirement
     leaderZombiePublicationEvidence : Measurement leaderZombiePublication
@@ -192,18 +209,34 @@ descriptorPipeRequiresSignalReturn :
 descriptorPipeRequiresSignalReturn certificate =
   DescriptorPipeCertificate.signalReturn certificate
 
--- Whole-group termination structurally retains the descriptor and pipe
--- boundary used by the replacement image.
+-- Unix stream sockets structurally retain the unified descriptor and pipe
+-- boundary that owns their public descriptor lifetime.
+unixSocketRequiresDescriptorPipe :
+  UnixSocketCertificate -> DescriptorPipeCertificate
+unixSocketRequiresDescriptorPipe certificate =
+  UnixSocketCertificate.descriptorPipe certificate
+
+-- Whole-group termination structurally retains the local-socket boundary used
+-- by service and replacement-image IPC.
+groupExitRequiresUnixSocket :
+  GroupExitCertificate -> UnixSocketCertificate
+groupExitRequiresUnixSocket certificate =
+  GroupExitCertificate.unixSocket certificate
+
+-- The descriptor and pipe boundary remains projectable through the required
+-- Unix-socket certificate.
 groupExitRequiresDescriptorPipe :
   GroupExitCertificate -> DescriptorPipeCertificate
 groupExitRequiresDescriptorPipe certificate =
-  GroupExitCertificate.descriptorPipe certificate
+  UnixSocketCertificate.descriptorPipe
+    (GroupExitCertificate.unixSocket certificate)
 
 -- The prior signal qualification remains projectable through that boundary.
 groupExitRequiresSignalReturn : GroupExitCertificate -> SignalReturnCertificate
 groupExitRequiresSignalReturn certificate =
   DescriptorPipeCertificate.signalReturn
-    (GroupExitCertificate.descriptorPipe certificate)
+    (UnixSocketCertificate.descriptorPipe
+      (GroupExitCertificate.unixSocket certificate))
 
 -- Image replacement cannot be projected without the prior group-lifecycle
 -- qualification on which its single-threaded admission rule depends.

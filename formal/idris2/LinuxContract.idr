@@ -44,6 +44,15 @@ data Gate
   | PollEpollPipeReadiness
   | EpollWatchLifetime
   | ExecDescriptorInheritance
+  | UnixSocketPair
+  | GenerationBoundSocketEndpoint
+  | UnixSocketNamespace
+  | UnixSocketConnectAccept
+  | UnixSocketFullDuplex
+  | UnixSocketMessageVectors
+  | PollEpollSocketReadiness
+  | UnixSocketHalfClose
+  | UnixSocketPeerIdentity
   | ThreadGroupSnapshot
   | PeerGenerationRetirement
   | LeaderZombiePublication
@@ -168,13 +177,33 @@ record DescriptorPipeCertificate where
   epollWatchLifetime : Measurement EpollWatchLifetime
   execDescriptorInheritance : Measurement ExecDescriptorInheritance
 
+||| Runtime evidence for the bounded Unix-domain stream-socket boundary.
+||| Socket qualification retains the complete descriptor and pipe contract,
+||| then requires generation-bound endpoints, namespace and connection
+||| lifecycle, data and vector transfer, readiness, half-close, and peer
+||| identity observations. Blocking waits and ancillary rights are deliberately
+||| outside this certificate.
+public export
+record UnixSocketCertificate where
+  constructor MkUnixSocketCertificate
+  descriptorPipe : DescriptorPipeCertificate
+  unixSocketPair : Measurement UnixSocketPair
+  generationBoundSocketEndpoint : Measurement GenerationBoundSocketEndpoint
+  unixSocketNamespace : Measurement UnixSocketNamespace
+  unixSocketConnectAccept : Measurement UnixSocketConnectAccept
+  unixSocketFullDuplex : Measurement UnixSocketFullDuplex
+  unixSocketMessageVectors : Measurement UnixSocketMessageVectors
+  pollEpollSocketReadiness : Measurement PollEpollSocketReadiness
+  unixSocketHalfClose : Measurement UnixSocketHalfClose
+  unixSocketPeerIdentity : Measurement UnixSocketPeerIdentity
+
 ||| Runtime evidence that exit_group consumes one bounded exact-generation
 ||| snapshot, retires every non-leader TID, publishes one waitable leader
 ||| zombie, and is observed by the external supervisor.
 public export
 record GroupExitCertificate where
   constructor MkGroupExitCertificate
-  descriptorPipe : DescriptorPipeCertificate
+  unixSocket : UnixSocketCertificate
   threadGroupSnapshot : Measurement ThreadGroupSnapshot
   peerGenerationRetirement : Measurement PeerGenerationRetirement
   leaderZombiePublication : Measurement LeaderZombiePublication
@@ -278,15 +307,28 @@ public export
 descriptorPipeRequiresSignalReturn : DescriptorPipeCertificate -> SignalReturnCertificate
 descriptorPipeRequiresSignalReturn certificate = certificate.signalReturn
 
-||| Whole-group termination remains downstream of the descriptor and pipe
-||| boundary used by the replacement image.
+||| Unix stream sockets remain structurally downstream of the unified
+||| descriptor and pipe boundary that owns their public descriptor lifetime.
+public export
+unixSocketRequiresDescriptorPipe : UnixSocketCertificate -> DescriptorPipeCertificate
+unixSocketRequiresDescriptorPipe certificate = certificate.descriptorPipe
+
+||| Whole-group termination remains downstream of the local-socket boundary
+||| used by service and replacement-image IPC.
+public export
+groupExitRequiresUnixSocket : GroupExitCertificate -> UnixSocketCertificate
+groupExitRequiresUnixSocket certificate = certificate.unixSocket
+
+||| The complete descriptor and pipe boundary remains projectable through the
+||| required Unix-socket certificate.
 public export
 groupExitRequiresDescriptorPipe : GroupExitCertificate -> DescriptorPipeCertificate
-groupExitRequiresDescriptorPipe certificate = certificate.descriptorPipe
+groupExitRequiresDescriptorPipe certificate = certificate.unixSocket.descriptorPipe
 
 public export
 groupExitRequiresSignalReturn : GroupExitCertificate -> SignalReturnCertificate
-groupExitRequiresSignalReturn certificate = certificate.descriptorPipe.signalReturn
+groupExitRequiresSignalReturn certificate =
+  certificate.unixSocket.descriptorPipe.signalReturn
 
 ||| Image replacement remains downstream of qualified whole-group lifecycle
 ||| behavior, even though the admitted first slice requires one group member.

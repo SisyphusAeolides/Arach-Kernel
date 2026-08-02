@@ -47,9 +47,14 @@ The Linux personality currently covers:
 - `write`, anonymous and eager Akashic-file-backed private `mmap`, whole-range
   W^X `mprotect`/`munmap`, and `brk`;
 - one dense, generation-bound descriptor namespace for standard streams,
-  regular files, eventfds, timerfds, epoll objects, and anonymous pipes, with
+  regular files, eventfds, timerfds, epoll objects, anonymous pipes, and Unix
+  stream sockets, with
   open-object `dup`/`dup2`/`dup3`, bounded `fcntl`, descriptor-local
   close-on-exec, and poll/epoll readiness;
+- bounded `AF_UNIX` `SOCK_STREAM` and `socketpair` endpoints with pathname and
+  abstract namespaces, connect/accept queues, full-duplex transfer,
+  `sendmsg`/`recvmsg` vectors, peer identity, half-close, and generation-safe
+  descriptor lifetime;
 - bounded Akashic VFS-backed `open`, `openat`, `read`, `write`, `close`,
   `stat`, `fstat`, `lseek`, and `unlinkat` paths;
 - generation-bound `set_tid_address`, with best-effort zeroing of the exact
@@ -86,9 +91,12 @@ The Linux personality currently covers:
 The file bridge is intentionally bounded and ephemeral. It is not a persistent
 block-backed filesystem. Anonymous pipes use a 4 KiB allocation-free ring,
 provide atomic bounded writes, EOF/HUP/EPIPE endpoint lifetime, and
-generation-stable epoll watch lifetime and last-close removal. Operations that
-would block still return `EAGAIN`; scheduler-backed pipe waits, `SIGPIPE`
-delivery, Unix sockets, and persistent storage remain open gates. The bounded clone admission
+generation-stable epoll watch lifetime and last-close removal. Unix stream
+sockets use fixed 4 KiB queues and bounded endpoint, connection, and listen
+tables. Operations that would block still return `EAGAIN`; scheduler-backed
+descriptor waits, `SIGPIPE`, ancillary rights/credentials, filesystem socket
+inodes, datagram/seqpacket sockets, and persistent storage remain open gates.
+The bounded clone admission
 accepts the shared VM/FS/files/sighand/thread/sysvsem profile plus TLS and TID
 publication flags; fork-like clone modes and individual leader `exit` with
 live peers fail closed. PI and process-shared robust futexes, cross-process and
@@ -99,7 +107,7 @@ restart remain future compatibility slices.
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
-| Linux userspace compatibility | Identity, anonymous and eager private file mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll, bounded VFS file calls, transactional static and measured `PT_INTERP` execution, one measured two-object dependency graph with relative and eager external PLT relocation, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed pipe waits and Unix sockets; generalize dependency closure and symbol lookup, then add TLS relocations and constructors; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
+| Linux userspace compatibility | Identity, anonymous and eager private file mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll and Unix stream sockets, bounded VFS file calls, transactional static and measured `PT_INTERP` execution, one measured two-object dependency graph with relative and eager external PLT relocation, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed descriptor waits, Unix ancillary rights and filesystem nodes; generalize dependency closure and symbol lookup, then add TLS relocations and constructors; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
 | System bootstrap | The pinned Granite/Arach/Push C0 bundle executes under QEMU/OVMF and emits measured ring-3 syscall evidence | Promote the measured bootstrap into a native Push service graph and qualified COSMIC login/session path |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -111,8 +119,9 @@ The current critical path is:
 1. Keep the measured C0 QEMU/OVMF path green.
 2. Generalize the measured two-object linker profile to larger bounded graphs,
    broader symbol lookup, TLS relocations, constructors, and symbol versions.
-3. Add scheduler-backed pipe waits, Unix sockets, and persistent block-backed
-   storage on the unified descriptor/open-object boundary.
+3. Add scheduler-backed descriptor waits, Unix ancillary rights and filesystem
+   nodes, and persistent block-backed storage on the unified open-object
+   boundary.
 4. Connect qualified modules and the native Push service graph to a complete
    COSMIC session.
 
@@ -143,6 +152,7 @@ src/akashic_vfs.rs      bounded in-memory VFS authority
 src/linux_fd.rs         unified Linux descriptor and open-object table
 src/linux_file.rs       regular-file backend for unified descriptors
 src/linux_pipe.rs       bounded anonymous-pipe backend
+src/linux_socket.rs     bounded Unix-domain stream-socket backend
 src/linux_thread.rs     generation-bound thread-exit identity
 core/                   bounded kernel primitives
 libraries/driver-abi/   stable foreign-driver boundary

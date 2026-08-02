@@ -95,8 +95,9 @@ position-independent; the probe closes the source descriptor before executing a
 mapped RX instruction sequence. A bounded, process-owned
 `eventfd2` table now implements the eight-byte counter ABI, semaphore mode,
 ownership checks, close, and non-sleeping `EAGAIN` behavior. Regular files,
-eventfds, timerfds, epoll objects, anonymous pipes, and standard streams now
-share one dense, generation-bound descriptor/open-object table. `dup`,
+eventfds, timerfds, epoll objects, anonymous pipes, Unix stream sockets, and
+standard streams now share one dense, generation-bound descriptor/open-object
+table. `dup`,
 `dup2`, `dup3`, bounded `fcntl`, per-descriptor close-on-exec, pipe
 EOF/HUP/EPIPE, duplicate-aware epoll lifetime, last-close watch removal, and
 non-retargeting descriptor reuse are measured. The Linux
@@ -105,9 +106,14 @@ control and wait over those supported wake objects. A bounded, process-owned
 monotonic timerfd implementation now covers create, settime, gettime,
 expiration reads, ownership, close, periodic expiry accounting, and readiness
 generation for edge-triggered epoll. These are real wake primitives for early
-COSMIC services. Scheduler-backed blocking pipe operations, `SIGPIPE`, Unix
-sockets, general VMA split/merge, shared mappings, demand paging, and general
-multi-library linking remain gated. Every other decoded
+COSMIC services. The bounded `AF_UNIX` profile now implements stream
+`socket`/`socketpair`, pathname and abstract bind/listen/connect/accept,
+full-duplex reads and writes, data-only vector messages, peer names and root
+credentials, socket options, half-close, and poll/epoll readiness. The measured
+probe exercises both unnamed and named paths. Scheduler-backed blocking
+descriptor operations, `SIGPIPE`, filesystem socket nodes, ancillary rights,
+datagram/seqpacket sockets, general VMA split/merge, shared mappings, demand
+paging, and general multi-library linking remain gated. Every other decoded
 Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.
 

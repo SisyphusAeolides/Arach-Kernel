@@ -23,17 +23,14 @@ Arach must provide the Linux interfaces libinput-rs and COSMIC observe:
 - permissions, restricted-open behavior and stable object lifetime;
 - touchpad, mouse, TrackPoint, keyboard, switch, tablet and tablet-pad devices.
 
-The current kernel bring-up provides the first bounded Linux wake object:
-thread-group-owned `eventfd2` descriptors support counter and semaphore reads,
-eight-byte writes, close, ownership validation, and non-sleeping `EAGAIN` on
-an empty read. `poll(2)` and level/edge `epoll(7)` are implemented over those
-eventfds. It also provides thread-group-owned monotonic `timerfd_create`,
-`timerfd_settime`, `timerfd_gettime`, eight-byte expiration reads, close,
-ownership validation, and lazy periodic expiry; poll and level/edge epoll
-observe timer readiness through the same bounded descriptor tables. Ordinary
-files and ordinary device descriptors remain separate qualification work; a
-working timerfd must not be treated as proof that those broader surfaces are
-available.
+The current kernel bring-up provides one generation-bound descriptor and
+open-object table for regular Akashic files, pipes, eventfds, timerfds, epoll,
+and bounded Unix stream sockets. Eventfds cover counter and semaphore reads;
+monotonic timerfds cover one-shot and periodic expiration; pipes and sockets
+publish endpoint lifetime through the same poll/epoll readiness bridge. These
+are real early-service wake and IPC primitives, but scheduler-backed blocking,
+device descriptors, ancillary descriptor passing, and the evdev ioctl surface
+remain separate qualification work.
 
 The gate runs upstream libinput behavioral tests plus COSMIC compositor tests.
 No companion process may grab a physical device in the parity path.

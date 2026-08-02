@@ -9,6 +9,7 @@ const THREAD_PASS: &[u8] = b"ARACH_C1_THREAD_FUTEX_PASS\n";
 const ROBUST_PASS: &[u8] = b"ARACH_C1_ROBUST_FUTEX_PASS\n";
 const SIGNAL_PASS: &[u8] = b"ARACH_C1_SIGNAL_RETURN_PASS\n";
 const PIPE_PASS: &[u8] = b"ARACH_C1_PIPE_DESCRIPTOR_PASS\n";
+const UNIX_SOCKET_PASS: &[u8] = b"ARACH_C1_UNIX_SOCKET_PASS\n";
 const FILE_MMAP_PASS: &[u8] = b"ARACH_C2_FILE_MMAP_PASS\n";
 const MPROTECT_PASS: &[u8] = b"ARACH_C2_MPROTECT_PASS\n";
 const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
@@ -62,6 +63,22 @@ const SYS_EPOLL_WAIT: usize = 232;
 const SYS_EPOLL_CTL: usize = 233;
 const SYS_EPOLL_CREATE1: usize = 291;
 const SYS_OPEN: usize = 2;
+const SYS_SOCKET: usize = 41;
+const SYS_CONNECT: usize = 42;
+const SYS_ACCEPT: usize = 43;
+const SYS_SENDTO: usize = 44;
+const SYS_RECVFROM: usize = 45;
+const SYS_SENDMSG: usize = 46;
+const SYS_RECVMSG: usize = 47;
+const SYS_SHUTDOWN: usize = 48;
+const SYS_BIND: usize = 49;
+const SYS_LISTEN: usize = 50;
+const SYS_GETSOCKNAME: usize = 51;
+const SYS_GETPEERNAME: usize = 52;
+const SYS_SOCKETPAIR: usize = 53;
+const SYS_SETSOCKOPT: usize = 54;
+const SYS_GETSOCKOPT: usize = 55;
+const SYS_ACCEPT4: usize = 288;
 
 const O_RDWR: usize = 0x2;
 const O_CREAT: usize = 0x40;
@@ -78,6 +95,19 @@ const EPOLL_CTL_ADD: usize = 1;
 const F_GETFD: usize = 1;
 const F_SETFD: usize = 2;
 const FD_CLOEXEC: usize = 1;
+const F_GETFL: usize = 3;
+const AF_UNIX: usize = 1;
+const SOCK_STREAM: usize = 1;
+const SOCK_NONBLOCK: usize = 0x800;
+const SOCK_CLOEXEC: usize = 0x8_0000;
+const SOL_SOCKET: usize = 1;
+const SO_TYPE: usize = 3;
+const SO_SNDBUF: usize = 7;
+const SO_PEERCRED: usize = 17;
+const SO_ACCEPTCONN: usize = 30;
+const SO_DOMAIN: usize = 39;
+const MSG_PEEK: usize = 0x2;
+const SHUT_WR: usize = 1;
 const FUTEX_WAIT_PRIVATE: usize = 128;
 const FUTEX_WAKE_PRIVATE: usize = 129;
 const FUTEX_WAITERS: u32 = 0x8000_0000;
@@ -349,6 +379,47 @@ struct LinuxPollFd {
     revents: i16,
 }
 
+#[repr(C)]
+struct LinuxUnixAddress {
+    family: u16,
+    path: [u8; 108],
+}
+
+impl LinuxUnixAddress {
+    const fn empty() -> Self {
+        Self {
+            family: 0,
+            path: [0; 108],
+        }
+    }
+}
+
+#[repr(C)]
+struct LinuxIoVector {
+    base: usize,
+    length: usize,
+}
+
+#[repr(C)]
+struct LinuxMessageHeader {
+    name: usize,
+    name_length: u32,
+    name_padding: u32,
+    vectors: usize,
+    vector_count: usize,
+    control: usize,
+    control_length: usize,
+    flags: i32,
+    flags_padding: u32,
+}
+
+#[repr(C)]
+struct LinuxPeerCredentials {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+}
+
 #[inline(always)]
 unsafe fn linux_syscall1(number: usize, arg0: usize) -> isize {
     let result: isize;
@@ -466,6 +537,584 @@ fn write_all(fd: usize, bytes: &[u8]) -> bool {
         written += result as usize;
     }
     true
+}
+
+fn exercise_unix_socket_pair() -> bool {
+    let mut pair = [-1_i32; 2];
+    if unsafe {
+        linux_syscall4(
+            SYS_SOCKETPAIR,
+            AF_UNIX,
+            SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+            0,
+            pair.as_mut_ptr() as usize,
+        )
+    } != 0
+        || pair[0] < 3
+        || pair[1] < 3
+        || pair[0] == pair[1]
+    {
+        return false;
+    }
+    let first = pair[0] as usize;
+    let second = pair[1] as usize;
+    if unsafe { linux_syscall3(SYS_FCNTL, first, F_GETFD, 0) } != FD_CLOEXEC as isize
+        || unsafe { linux_syscall3(SYS_FCNTL, second, F_GETFD, 0) } != FD_CLOEXEC as isize
+        || unsafe { linux_syscall3(SYS_FCNTL, first, F_GETFL, 0) } & O_NONBLOCK as isize == 0
+    {
+        return false;
+    }
+
+    let mut option = -1_i32;
+    let mut option_length = core::mem::size_of::<i32>() as u32;
+    if unsafe {
+        linux_syscall6(
+            SYS_GETSOCKOPT,
+            first,
+            SOL_SOCKET,
+            SO_TYPE,
+            &mut option as *mut _ as usize,
+            &mut option_length as *mut _ as usize,
+            0,
+        )
+    } != 0
+        || option != SOCK_STREAM as i32
+        || option_length != core::mem::size_of::<i32>() as u32
+    {
+        return false;
+    }
+    option = -1;
+    option_length = core::mem::size_of::<i32>() as u32;
+    if unsafe {
+        linux_syscall6(
+            SYS_GETSOCKOPT,
+            first,
+            SOL_SOCKET,
+            SO_DOMAIN,
+            &mut option as *mut _ as usize,
+            &mut option_length as *mut _ as usize,
+            0,
+        )
+    } != 0
+        || option != AF_UNIX as i32
+    {
+        return false;
+    }
+    let mut credentials = LinuxPeerCredentials {
+        pid: -1,
+        uid: u32::MAX,
+        gid: u32::MAX,
+    };
+    option_length = core::mem::size_of::<LinuxPeerCredentials>() as u32;
+    let process = unsafe { linux_syscall1(SYS_GETPID, 0) };
+    if process <= 0
+        || unsafe {
+            linux_syscall6(
+                SYS_GETSOCKOPT,
+                first,
+                SOL_SOCKET,
+                SO_PEERCRED,
+                &mut credentials as *mut _ as usize,
+                &mut option_length as *mut _ as usize,
+                0,
+            )
+        } != 0
+        || credentials.pid != process as i32
+        || credentials.uid != 0
+        || credentials.gid != 0
+    {
+        return false;
+    }
+
+    let mut local = LinuxUnixAddress::empty();
+    let mut local_length = core::mem::size_of::<LinuxUnixAddress>() as u32;
+    let mut peer = LinuxUnixAddress::empty();
+    let mut peer_length = core::mem::size_of::<LinuxUnixAddress>() as u32;
+    if unsafe {
+        linux_syscall3(
+            SYS_GETSOCKNAME,
+            first,
+            &mut local as *mut _ as usize,
+            &mut local_length as *mut _ as usize,
+        )
+    } != 0
+        || unsafe {
+            linux_syscall3(
+                SYS_GETPEERNAME,
+                first,
+                &mut peer as *mut _ as usize,
+                &mut peer_length as *mut _ as usize,
+            )
+        } != 0
+        || local.family as usize != AF_UNIX
+        || peer.family as usize != AF_UNIX
+        || local_length != 2
+        || peer_length != 2
+    {
+        return false;
+    }
+
+    let alias = unsafe { linux_syscall1(SYS_DUP, first) };
+    if alias < 3 || unsafe { linux_syscall1(SYS_CLOSE, first) } != 0 {
+        return false;
+    }
+    let alias = alias as usize;
+    let epoll = unsafe { linux_syscall3(SYS_EPOLL_CREATE1, 0, 0, 0) };
+    if epoll < 3 {
+        return false;
+    }
+    let epoll = epoll as usize;
+    let mut epoll_spec = [0_u8; 12];
+    epoll_spec[0..4].copy_from_slice(&(EPOLLIN | EPOLLHUP).to_ne_bytes());
+    epoll_spec[4..12].copy_from_slice(&0x736f_636b_u64.to_ne_bytes());
+    if unsafe {
+        linux_syscall4(
+            SYS_EPOLL_CTL,
+            epoll,
+            EPOLL_CTL_ADD,
+            second,
+            epoll_spec.as_ptr() as usize,
+        )
+    } != 0
+    {
+        return false;
+    }
+    let mut epoll_out = [0_u8; 12];
+    if unsafe { linux_syscall4(SYS_EPOLL_WAIT, epoll, epoll_out.as_mut_ptr() as usize, 1, 0) } != 0
+    {
+        return false;
+    }
+
+    const PAIR_PAYLOAD: &[u8] = b"socket-pair";
+    if unsafe {
+        linux_syscall6(
+            SYS_SENDTO,
+            alias,
+            PAIR_PAYLOAD.as_ptr() as usize,
+            PAIR_PAYLOAD.len(),
+            0,
+            0,
+            0,
+        )
+    } != PAIR_PAYLOAD.len() as isize
+    {
+        return false;
+    }
+    let mut poll = LinuxPollFd {
+        fd: second as i32,
+        events: (POLLIN | POLLHUP) as i16,
+        revents: 0,
+    };
+    epoll_out.fill(0);
+    if unsafe { linux_syscall3(SYS_POLL, &mut poll as *mut _ as usize, 1, 0) } != 1
+        || poll.revents & POLLIN as i16 == 0
+        || unsafe { linux_syscall4(SYS_EPOLL_WAIT, epoll, epoll_out.as_mut_ptr() as usize, 1, 0) }
+            != 1
+        || u32::from_ne_bytes(epoll_out[0..4].try_into().unwrap()) & EPOLLIN == 0
+        || u64::from_ne_bytes(epoll_out[4..12].try_into().unwrap()) != 0x736f_636b
+    {
+        return false;
+    }
+
+    let mut peeked = [0_u8; PAIR_PAYLOAD.len()];
+    peer = LinuxUnixAddress::empty();
+    peer_length = core::mem::size_of::<LinuxUnixAddress>() as u32;
+    if unsafe {
+        linux_syscall6(
+            SYS_RECVFROM,
+            second,
+            peeked.as_mut_ptr() as usize,
+            peeked.len(),
+            MSG_PEEK,
+            &mut peer as *mut _ as usize,
+            &mut peer_length as *mut _ as usize,
+        )
+    } != PAIR_PAYLOAD.len() as isize
+        || peeked != PAIR_PAYLOAD
+        || peer.family as usize != AF_UNIX
+        || peer_length != 2
+    {
+        return false;
+    }
+    let mut consumed = [0_u8; PAIR_PAYLOAD.len()];
+    if unsafe {
+        linux_syscall3(
+            SYS_READ,
+            second,
+            consumed.as_mut_ptr() as usize,
+            consumed.len(),
+        )
+    } != PAIR_PAYLOAD.len() as isize
+        || consumed != PAIR_PAYLOAD
+    {
+        return false;
+    }
+
+    const FIRST_MESSAGE: &[u8] = b"msg-";
+    const SECOND_MESSAGE: &[u8] = b"vector";
+    let send_vectors = [
+        LinuxIoVector {
+            base: FIRST_MESSAGE.as_ptr() as usize,
+            length: FIRST_MESSAGE.len(),
+        },
+        LinuxIoVector {
+            base: SECOND_MESSAGE.as_ptr() as usize,
+            length: SECOND_MESSAGE.len(),
+        },
+    ];
+    let send_header = LinuxMessageHeader {
+        name: 0,
+        name_length: 0,
+        name_padding: 0,
+        vectors: send_vectors.as_ptr() as usize,
+        vector_count: send_vectors.len(),
+        control: 0,
+        control_length: 0,
+        flags: 0,
+        flags_padding: 0,
+    };
+    if unsafe { linux_syscall3(SYS_SENDMSG, second, &send_header as *const _ as usize, 0) }
+        != (FIRST_MESSAGE.len() + SECOND_MESSAGE.len()) as isize
+    {
+        return false;
+    }
+    let mut first_output = [0_u8; 3];
+    let mut second_output = [0_u8; 7];
+    let receive_vectors = [
+        LinuxIoVector {
+            base: first_output.as_mut_ptr() as usize,
+            length: first_output.len(),
+        },
+        LinuxIoVector {
+            base: second_output.as_mut_ptr() as usize,
+            length: second_output.len(),
+        },
+    ];
+    peer = LinuxUnixAddress::empty();
+    let mut receive_header = LinuxMessageHeader {
+        name: &mut peer as *mut _ as usize,
+        name_length: core::mem::size_of::<LinuxUnixAddress>() as u32,
+        name_padding: 0,
+        vectors: receive_vectors.as_ptr() as usize,
+        vector_count: receive_vectors.len(),
+        control: 0,
+        control_length: 0,
+        flags: -1,
+        flags_padding: 0,
+    };
+    if unsafe {
+        linux_syscall3(
+            SYS_RECVMSG,
+            alias,
+            &mut receive_header as *mut _ as usize,
+            0,
+        )
+    } != 10
+        || first_output != *b"msg"
+        || second_output != *b"-vector"
+        || receive_header.name_length != 2
+        || receive_header.control_length != 0
+        || receive_header.flags != 0
+        || peer.family as usize != AF_UNIX
+    {
+        return false;
+    }
+
+    let requested_buffer = 8192_i32;
+    if unsafe {
+        linux_syscall6(
+            SYS_SETSOCKOPT,
+            alias,
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &requested_buffer as *const _ as usize,
+            core::mem::size_of::<i32>(),
+            0,
+        )
+    } != 0
+    {
+        return false;
+    }
+    option = -1;
+    option_length = core::mem::size_of::<i32>() as u32;
+    if unsafe {
+        linux_syscall6(
+            SYS_GETSOCKOPT,
+            alias,
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &mut option as *mut _ as usize,
+            &mut option_length as *mut _ as usize,
+            0,
+        )
+    } != 0
+        || option != 4096
+    {
+        return false;
+    }
+
+    if unsafe { linux_syscall3(SYS_SHUTDOWN, alias, SHUT_WR, 0) } != 0 {
+        return false;
+    }
+    let mut end = [0_u8; 1];
+    poll.revents = 0;
+    epoll_out.fill(0);
+    if unsafe { linux_syscall3(SYS_READ, second, end.as_mut_ptr() as usize, 1) } != 0
+        || unsafe { linux_syscall3(SYS_POLL, &mut poll as *mut _ as usize, 1, 0) } != 1
+        || poll.revents & POLLHUP as i16 == 0
+        || unsafe { linux_syscall4(SYS_EPOLL_WAIT, epoll, epoll_out.as_mut_ptr() as usize, 1, 0) }
+            != 1
+        || u32::from_ne_bytes(epoll_out[0..4].try_into().unwrap()) & EPOLLHUP == 0
+        || unsafe { linux_syscall1(SYS_CLOSE, alias) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, second) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, epoll) } != 0
+    {
+        return false;
+    }
+    true
+}
+
+fn exercise_named_unix_sockets() -> bool {
+    const ABSTRACT_NAME: &[u8] = b"arach-c0-unix";
+    let mut address = LinuxUnixAddress::empty();
+    address.family = AF_UNIX as u16;
+    address.path[1..1 + ABSTRACT_NAME.len()].copy_from_slice(ABSTRACT_NAME);
+    let address_length = 2 + 1 + ABSTRACT_NAME.len();
+
+    let listener = unsafe {
+        linux_syscall3(
+            SYS_SOCKET,
+            AF_UNIX,
+            SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if listener < 3 {
+        return false;
+    }
+    let listener = listener as usize;
+    if unsafe {
+        linux_syscall3(
+            SYS_BIND,
+            listener,
+            &address as *const _ as usize,
+            address_length,
+        )
+    } != 0
+        || unsafe { linux_syscall3(SYS_LISTEN, listener, 2, 0) } != 0
+    {
+        return false;
+    }
+    let mut accepting = -1_i32;
+    let mut option_length = core::mem::size_of::<i32>() as u32;
+    if unsafe {
+        linux_syscall6(
+            SYS_GETSOCKOPT,
+            listener,
+            SOL_SOCKET,
+            SO_ACCEPTCONN,
+            &mut accepting as *mut _ as usize,
+            &mut option_length as *mut _ as usize,
+            0,
+        )
+    } != 0
+        || accepting != 1
+        || unsafe { linux_syscall3(SYS_ACCEPT, listener, 0, 0) } != -11
+    {
+        return false;
+    }
+
+    let first_client = unsafe {
+        linux_syscall3(
+            SYS_SOCKET,
+            AF_UNIX,
+            SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+            0,
+        )
+    };
+    let second_client = unsafe {
+        linux_syscall3(
+            SYS_SOCKET,
+            AF_UNIX,
+            SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if first_client < 3
+        || second_client < 3
+        || unsafe {
+            linux_syscall3(
+                SYS_CONNECT,
+                first_client as usize,
+                &address as *const _ as usize,
+                address_length,
+            )
+        } != 0
+        || unsafe {
+            linux_syscall3(
+                SYS_CONNECT,
+                second_client as usize,
+                &address as *const _ as usize,
+                address_length,
+            )
+        } != 0
+    {
+        return false;
+    }
+    let first_client = first_client as usize;
+    let second_client = second_client as usize;
+
+    let mut accepted_peer = LinuxUnixAddress::empty();
+    let mut accepted_peer_length = core::mem::size_of::<LinuxUnixAddress>() as u32;
+    let first_server = unsafe {
+        linux_syscall3(
+            SYS_ACCEPT,
+            listener,
+            &mut accepted_peer as *mut _ as usize,
+            &mut accepted_peer_length as *mut _ as usize,
+        )
+    };
+    if first_server < 3 || accepted_peer.family as usize != AF_UNIX || accepted_peer_length != 2 {
+        return false;
+    }
+    let first_server = first_server as usize;
+    accepted_peer = LinuxUnixAddress::empty();
+    accepted_peer_length = core::mem::size_of::<LinuxUnixAddress>() as u32;
+    let second_server = unsafe {
+        linux_syscall4(
+            SYS_ACCEPT4,
+            listener,
+            &mut accepted_peer as *mut _ as usize,
+            &mut accepted_peer_length as *mut _ as usize,
+            SOCK_NONBLOCK | SOCK_CLOEXEC,
+        )
+    };
+    if second_server < 3 || accepted_peer.family as usize != AF_UNIX || accepted_peer_length != 2 {
+        return false;
+    }
+    let second_server = second_server as usize;
+    if unsafe { linux_syscall3(SYS_FCNTL, first_server, F_GETFD, 0) } != 0
+        || unsafe { linux_syscall3(SYS_FCNTL, first_server, F_GETFL, 0) } & O_NONBLOCK as isize != 0
+        || unsafe { linux_syscall3(SYS_FCNTL, second_server, F_GETFD, 0) } != FD_CLOEXEC as isize
+        || unsafe { linux_syscall3(SYS_FCNTL, second_server, F_GETFL, 0) } & O_NONBLOCK as isize
+            == 0
+    {
+        return false;
+    }
+
+    let mut local = LinuxUnixAddress::empty();
+    let mut local_length = core::mem::size_of::<LinuxUnixAddress>() as u32;
+    let mut peer = LinuxUnixAddress::empty();
+    let mut peer_length = core::mem::size_of::<LinuxUnixAddress>() as u32;
+    if unsafe {
+        linux_syscall3(
+            SYS_GETSOCKNAME,
+            listener,
+            &mut local as *mut _ as usize,
+            &mut local_length as *mut _ as usize,
+        )
+    } != 0
+        || unsafe {
+            linux_syscall3(
+                SYS_GETPEERNAME,
+                first_client,
+                &mut peer as *mut _ as usize,
+                &mut peer_length as *mut _ as usize,
+            )
+        } != 0
+        || local.family as usize != AF_UNIX
+        || peer.family as usize != AF_UNIX
+        || local_length as usize != address_length
+        || peer_length as usize != address_length
+        || local.path[..1 + ABSTRACT_NAME.len()] != address.path[..1 + ABSTRACT_NAME.len()]
+        || peer.path[..1 + ABSTRACT_NAME.len()] != address.path[..1 + ABSTRACT_NAME.len()]
+    {
+        return false;
+    }
+
+    const NAMED_PAYLOAD: &[u8] = b"named-socket";
+    if unsafe {
+        linux_syscall6(
+            SYS_SENDTO,
+            first_client,
+            NAMED_PAYLOAD.as_ptr() as usize,
+            NAMED_PAYLOAD.len(),
+            0,
+            0,
+            0,
+        )
+    } != NAMED_PAYLOAD.len() as isize
+    {
+        return false;
+    }
+    let mut output = [0_u8; NAMED_PAYLOAD.len()];
+    if unsafe {
+        linux_syscall6(
+            SYS_RECVFROM,
+            first_server,
+            output.as_mut_ptr() as usize,
+            output.len(),
+            0,
+            0,
+            0,
+        )
+    } != NAMED_PAYLOAD.len() as isize
+        || output != NAMED_PAYLOAD
+    {
+        return false;
+    }
+
+    let mut credentials = LinuxPeerCredentials {
+        pid: -1,
+        uid: u32::MAX,
+        gid: u32::MAX,
+    };
+    option_length = core::mem::size_of::<LinuxPeerCredentials>() as u32;
+    let process = unsafe { linux_syscall1(SYS_GETPID, 0) };
+    if unsafe {
+        linux_syscall6(
+            SYS_GETSOCKOPT,
+            first_server,
+            SOL_SOCKET,
+            SO_PEERCRED,
+            &mut credentials as *mut _ as usize,
+            &mut option_length as *mut _ as usize,
+            0,
+        )
+    } != 0
+        || credentials.pid != process as i32
+    {
+        return false;
+    }
+
+    if unsafe { linux_syscall1(SYS_CLOSE, first_client) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, second_client) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, first_server) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, second_server) } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, listener) } != 0
+    {
+        return false;
+    }
+    let replacement =
+        unsafe { linux_syscall3(SYS_SOCKET, AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0) };
+    if replacement < 3
+        || unsafe {
+            linux_syscall3(
+                SYS_BIND,
+                replacement as usize,
+                &address as *const _ as usize,
+                address_length,
+            )
+        } != 0
+        || unsafe { linux_syscall1(SYS_CLOSE, replacement as usize) } != 0
+    {
+        return false;
+    }
+    true
+}
+
+fn exercise_unix_sockets() -> bool {
+    exercise_unix_socket_pair() && exercise_named_unix_sockets()
 }
 
 fn fail() -> ! {
@@ -1255,6 +1904,21 @@ pub extern "C" fn _start() -> ! {
     let wrote =
         unsafe { linux_syscall3(SYS_WRITE, 1, PIPE_PASS.as_ptr() as usize, PIPE_PASS.len()) };
     if wrote != PIPE_PASS.len() as isize {
+        fail();
+    }
+
+    if !exercise_unix_sockets() {
+        fail();
+    }
+    let wrote = unsafe {
+        linux_syscall3(
+            SYS_WRITE,
+            1,
+            UNIX_SOCKET_PASS.as_ptr() as usize,
+            UNIX_SOCKET_PASS.len(),
+        )
+    };
+    if wrote != UNIX_SOCKET_PASS.len() as isize {
         fail();
     }
 

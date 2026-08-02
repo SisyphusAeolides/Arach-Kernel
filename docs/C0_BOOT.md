@@ -49,13 +49,18 @@ containing all of the following evidence from the same bundle:
   allocation, open-object duplication, descriptor-local close-on-exec,
   pipe poll/epoll readiness, EOF/HUP/EPIPE, and replacement-image inheritance
   all completed;
+- `ARACH_C1_UNIX_SOCKET_PASS` was emitted after generation-bound Unix stream
+  socketpair and abstract-namespace paths completed connect, plain and flagged
+  accept, full-duplex and vector transfer, peer identity, poll/epoll readiness,
+  duplicate lifetime, half-close HUP, and namespace reuse;
 - `ARACH_C1_EXIT_GROUP_ARMED` was emitted only after an independently
   scheduled cloned peer woke the leader and blocked; Push then emitted
   `[PID 1] child 2 exited with status 0` only after `exit_group` retired that
   peer and published the leader as the sole waitable process zombie;
 - `ARACH_C1_LINUX_SYSCALL_PASS` was emitted after the Linux personality
   exercised identity, anonymous and private file memory, `mprotect`, `brk`,
-  shared-address-space clone, unified descriptor/open-object and pipe access,
+  shared-address-space clone, unified descriptor/open-object, pipe, and bounded
+  Unix stream-socket access,
   independent private robust-futex and
   clear-child-tid block/wake paths, kernel owner-death publication, measured
   signal delivery/return, bounded whole-group exit, and clean supervisor reap;

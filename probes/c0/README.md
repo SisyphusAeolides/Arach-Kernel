@@ -4,7 +4,9 @@ This bounded `no_std` ELF is qualification input, not a desktop or production
 service. It is launched with Arach's Linux x86-64 execution personality and
 proves the first live userspace slice: `write`, `read`, `close`, `eventfd2`,
 `pipe2`, `dup`, `dup3`, `fcntl`, `poll`, `epoll_create1`, `epoll_ctl`,
-`epoll_wait`, `getpid`, `gettid`,
+`epoll_wait`, `socket`, `socketpair`, `bind`, `listen`, `connect`, `accept`,
+`accept4`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg`, `shutdown`,
+`getsockname`, `getpeername`, `setsockopt`, `getsockopt`, `getpid`, `gettid`,
 `getppid`, anonymous and eager private file `mmap`, exact-range `mprotect` and
 `munmap`, `brk`, private `futex`, transactional static/`PT_INTERP` `execve`, and
 `exit_group`.
@@ -24,6 +26,15 @@ epoll, automatic watch removal before descriptor reuse, bounded transfer,
 EOF/HUP, and EPIPE. It leaves aliases at fixed fds
 125 and 126 before `execve`; the replacement image proves that 125 retained
 the shared eventfd while close-on-exec independently removed 126.
+
+`ARACH_C1_UNIX_SOCKET_PASS` is emitted only after an `AF_UNIX` stream
+socketpair and an abstract named listener complete. The probe verifies socket
+creation flags, unnamed and named addresses, connect plus both accept forms,
+full-duplex byte and vector transfer, `MSG_PEEK`, fixed buffer options,
+`SO_PEERCRED`, poll/epoll readiness, duplicate lifetime, half-close HUP, and
+namespace reuse. The admitted gate is bounded: operations that would sleep
+return `EAGAIN`, and ancillary rights, filesystem socket inodes, datagram and
+sequenced-packet transports are not claimed.
 
 Before that aggregate marker, the probe writes a six-byte x86-64 function to an
 Akashic regular file, maps it read-only, verifies the snapshot and zero-filled
