@@ -68,9 +68,9 @@ test -s "$kernel_image"
 ARACH_KERNEL_IMAGE="$kernel_image" \
 ARACH_PUSH_IMAGE="$push_image" \
 ARACH_CREST_IMAGE="$probe_image" \
-CARGO_TARGET_DIR="$build_root/granite" \
-    "$cargo_bin" build --locked --release --manifest-path "$granite_root/Cargo.toml" \
-        --target x86_64-unknown-uefi --features uefi-bin,require-artifacts
+    "$root/scripts/build-reproducible-granite.sh" \
+        "$granite_root" "$build_root/granite" "$build_root/granite-repeat" \
+        uefi-bin,require-artifacts
 
 granite_image="$build_root/granite/x86_64-unknown-uefi/release/granite.efi"
 test -s "$granite_image"

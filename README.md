@@ -36,8 +36,8 @@ applications into ring 0.
 Arach Kernel is under active development. The pinned Granite/Arach/Push C0
 bundle now executes under QEMU/OVMF in CI, enters a measured ring-3 Linux
 personality, and emits serial evidence from the real syscall, lifecycle, and
-page-table paths. The currently packaged kernel source is
-`a1e893667c9a31d068490fe017ae8b8be38a3af3`.
+page-table paths. Arach OS and Arach-Packages retain the qualified source
+revisions in their integration and recipe locks.
 
 The Linux personality currently covers:
 
@@ -200,6 +200,10 @@ The custom target is `x86_64-arach.json`. The `cargo kernel` alias selects the
 `arach` package and binary, but a release kernel build also requires pinned
 formal attestation and measured external PID 1/session artifacts. Those inputs
 remain controlled by their own repositories and the Arach OS component lock.
+Both bundle builders load Granite's target configuration explicitly, compare
+two isolated production UEFI builds, and reject nondeterministic PE metadata.
+The C0 FAT constructor fixes its volume identity and timestamps; CI requires
+two independently assembled volumes to be byte-identical before QEMU boots one.
 
 ## COSMIC target
 

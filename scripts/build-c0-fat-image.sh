@@ -17,6 +17,14 @@ crest=$4
 output=$5
 [[ "$output" = /* ]] || { echo "output image must be absolute" >&2; exit 64; }
 [[ ! -e "$output" ]] || { echo "output image already exists" >&2; exit 1; }
+source_date_epoch=${SOURCE_DATE_EPOCH:-315532800}
+if [[ ! "$source_date_epoch" =~ ^[0-9]+$ ]] \
+    || ((${#source_date_epoch} > 10)) \
+    || ((source_date_epoch < 315532800 || source_date_epoch > 4354819199)); then
+    echo "SOURCE_DATE_EPOCH must fit the FAT timestamp range" >&2
+    exit 64
+fi
+export LC_ALL=C TZ=UTC
 
 max_bytes=$((32 * 1024 * 1024))
 check_file() {
@@ -46,25 +54,28 @@ done
 
 parent=$(dirname -- "$output")
 mkdir -p -- "$parent"
-stage=$(mktemp "$parent/.c0-image.XXXXXX")
+stage=$(mktemp -d "$parent/.c0-image.XXXXXXXX")
 cleanup() {
-    rm -f -- "$stage"
+    rm -rf -- "$stage"
 }
 trap cleanup EXIT
 
 # 64 MiB is large enough for the bounded Granite inputs and deterministic
 # across builders.  mtools operates on the regular file without root access.
-truncate -s $((64 * 1024 * 1024)) "$stage"
-mkfs.fat -F 32 -n ARACHC0 "$stage" >/dev/null
-mmd -i "$stage" ::/EFI
-mmd -i "$stage" ::/EFI/BOOT
-mmd -i "$stage" ::/BOOT
-mcopy -i "$stage" "$granite" ::/EFI/BOOT/BOOTX64.EFI
-mcopy -i "$stage" "$arach" ::/BOOT/ARACH
-mcopy -i "$stage" "$push" ::/BOOT/PUSH
-mcopy -i "$stage" "$crest" ::/BOOT/CREST
-sync -f "$stage"
-mv -- "$stage" "$output"
+image="$stage/arach-c0.img"
+tree="$stage/root"
+truncate -s $((64 * 1024 * 1024)) "$image"
+mkfs.fat --invariant -F 32 -i 00000000 -n ARACHC0 "$image" >/dev/null
+mkdir -p -- "$tree/EFI/BOOT" "$tree/BOOT"
+install -m 0644 -- "$granite" "$tree/EFI/BOOT/BOOTX64.EFI"
+install -m 0644 -- "$arach" "$tree/BOOT/ARACH"
+install -m 0644 -- "$push" "$tree/BOOT/PUSH"
+install -m 0644 -- "$crest" "$tree/BOOT/CREST"
+find "$tree" -xdev -exec touch -h -d "@$source_date_epoch" -- {} +
+mcopy -smp -i "$image" "$tree"/* ::/
+sync -f "$image"
+mv -- "$image" "$output"
+rm -rf -- "$stage"
 trap - EXIT
 sync -f "$parent"
 sha256sum "$output"
