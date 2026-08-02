@@ -63,6 +63,8 @@ pub enum LinuxSyscall {
     Wait4,
     Fcntl,
     Ftruncate,
+    Mkdir,
+    MkdirAt,
     Socket,
     Connect,
     Accept,
@@ -165,6 +167,7 @@ impl LinuxSyscall {
             61 => Some(Self::Wait4),
             72 => Some(Self::Fcntl),
             77 => Some(Self::Ftruncate),
+            83 => Some(Self::Mkdir),
             202 => Some(Self::Futex),
             218 => Some(Self::SetTidAddress),
             228 => Some(Self::ClockGettime),
@@ -174,6 +177,7 @@ impl LinuxSyscall {
             232 => Some(Self::EpollWait),
             233 => Some(Self::EpollCtl),
             257 => Some(Self::OpenAt),
+            258 => Some(Self::MkdirAt),
             263 => Some(Self::UnlinkAt),
             271 => Some(Self::Ppoll),
             272 => Some(Self::Unshare),
@@ -299,6 +303,8 @@ mod tests {
             Some(LinuxSyscall::EpollWait)
         );
         assert_eq!(LinuxSyscall::from_number(233), Some(LinuxSyscall::EpollCtl));
+        assert_eq!(LinuxSyscall::from_number(83), Some(LinuxSyscall::Mkdir));
+        assert_eq!(LinuxSyscall::from_number(258), Some(LinuxSyscall::MkdirAt));
         assert_eq!(
             LinuxSyscall::from_number(281),
             Some(LinuxSyscall::EpollPwait)

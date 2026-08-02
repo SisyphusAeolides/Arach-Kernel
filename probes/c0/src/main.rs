@@ -18,9 +18,10 @@ const PANIC: &[u8] = b"ARACH_C0_RING3_PANIC\n";
 const EXEC_PATH: &[u8] = b"/exec-target\0";
 const RUNTIME_LINKER_PATH: &[u8] = b"/arach-ld.so\0";
 const SHARED_OBJECT_PATH: &[u8] = b"/libarach-probe.so\0";
-const SHARED_PROVIDER_PATH: &[u8] = b"/libarach-provider.so\0";
-const SHARED_OBSERVER_PATH: &[u8] = b"/libarach-observer.so\0";
-const SHARED_CORE_PATH: &[u8] = b"/libarach-core.so\0";
+const SHARED_LIBRARY_DIRECTORY: &[u8] = b"/runpath\0";
+const SHARED_PROVIDER_PATH: &[u8] = b"/runpath/libarach-provider.so\0";
+const SHARED_OBSERVER_PATH: &[u8] = b"/runpath/libarach-observer.so\0";
+const SHARED_CORE_PATH: &[u8] = b"/runpath/libarach-core.so\0";
 const MMAP_PATH: &[u8] = b"/mmap-probe\0";
 const EXEC_ARG0: &[u8] = b"exec-target\0";
 const EXEC_ENV0: &[u8] = b"ARACH_EXEC_TRANSACTION=1\0";
@@ -36,6 +37,9 @@ const SYS_WRITE: usize = 1;
 const SYS_READ: usize = 0;
 const SYS_CLOSE: usize = 3;
 const SYS_FTRUNCATE: usize = 77;
+const SYS_MKDIR: usize = 83;
+const SYS_MKDIRAT: usize = 258;
+const AT_FDCWD: usize = (-100_i64) as usize;
 const SYS_FCNTL: usize = 72;
 const SYS_DUP: usize = 32;
 const SYS_DUP3: usize = 292;
@@ -2095,6 +2099,26 @@ pub extern "C" fn _start() -> ! {
 
     // Materialize an immutable VFS snapshot, then replace this same PID with
     // the measured target. Successful execve cannot return to this image.
+    if unsafe {
+        linux_syscall4(
+            SYS_MKDIRAT,
+            AT_FDCWD,
+            SHARED_LIBRARY_DIRECTORY.as_ptr() as usize,
+            0o755,
+            0,
+        )
+    } != 0
+        || unsafe {
+            linux_syscall3(
+                SYS_MKDIR,
+                SHARED_LIBRARY_DIRECTORY.as_ptr() as usize,
+                0o755,
+                0,
+            )
+        } != -17
+    {
+        fail();
+    }
     let shared_object = unsafe {
         linux_syscall3(
             SYS_OPEN,

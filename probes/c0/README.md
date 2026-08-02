@@ -9,7 +9,8 @@ proves the first live userspace slice: `write`, `read`, `close`, `eventfd2`,
 `getsockname`, `getpeername`, `setsockopt`, `getsockopt`, `getpid`, `gettid`,
 `getppid`, `memfd_create`, `ftruncate`, anonymous, eager private file, and
 memfd-backed shared `mmap`, exact-range `mprotect` and `munmap`, `brk`, private
-`futex`, transactional static/`PT_INTERP` `execve`, and `exit_group`.
+`futex`, bounded `mkdir`/`mkdirat`, transactional static/`PT_INTERP` `execve`,
+and `exit_group`.
 The probe checks both normal and semaphore eventfd semantics, including
 non-sleeping `EAGAIN` on an empty counter, and verifies that poll/epoll
 readiness clears after the eventfd is drained. Its single-process futex gate
@@ -50,22 +51,29 @@ tail, closes the descriptor, rejects W+X, changes the complete VMA to RX, and
 executes it. `ARACH_C2_FILE_MMAP_PASS` and `ARACH_C2_MPROTECT_PASS` distinguish
 those two live gates.
 
-The probe writes a PIE main ELF, a separately built freestanding C runtime
-linker, and a four-object ET_DYN diamond into Akashic VFS, then calls `execve`
+The probe creates `/runpath` through `mkdirat(AT_FDCWD, ..., 0755)`, verifies
+that a duplicate `mkdir` returns `EEXIST`, and writes three providers below
+that directory. It writes the root ET_DYN object, PIE main ELF, and separately
+built freestanding C runtime linker at the Akashic root, then calls `execve`
 with bounded argv and environment vectors. The interpreter emits
 `ARACH_C2_RUNTIME_LINKER_ENTER`, validates the Linux auxiliary vector,
 discovers the closure breadth-first, coalesces both middle dependencies onto
 one core snapshot, rejects cycles, applies provider-first relocation, and
 packs and installs one startup TLS template. It publishes a bounded
 dynamic-thread vector at `FS:8`, applies one real `R_X86_64_TPOFF64` plus one
-real `R_X86_64_DTPMOD64`/`R_X86_64_DTPOFF64` pair, and resolves seven external
-PLT symbols through exact SONAME-bound GNU versions and deterministic global
-scope. One additional PLT edge may resolve only the exact unversioned,
+real `R_X86_64_DTPMOD64`/`R_X86_64_DTPOFF64` pair, and resolves seven
+exact-version external PLT symbols through deterministic global scope. One
+additional PLT edge may resolve only the exact unversioned,
 undefined, global `STT_NOTYPE` symbol `__tls_get_addr`; the interpreter then
-checks every module and offset before returning an address. It seals all
-objects and executes four dependency-first initializers. It
+checks every module and offset before returning an address. Exact singleton
+`DT_RUNPATH=/runpath` entries on the root and both middle objects drive each
+direct dependency lookup; the core intentionally carries no runpath. The
+interpreter records each opened path and rejects relative, duplicate, empty,
+dot-segment, over-capacity, legacy `DT_RPATH`, and unknown dynamic-table input.
+It seals all objects and executes four dependency-first initializers. It
 emits `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
-`ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_SHARED_RELOCATION_PASS`,
+`ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_RUNPATH_PASS`,
+`ARACH_C2_SHARED_RELOCATION_PASS`,
 `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_SYMBOL_VERSION_PASS`,
 `ARACH_C2_STATIC_TLS_PASS`, `ARACH_C2_DYNAMIC_TLS_PASS`,
 `ARACH_C2_INITIALIZER_ORDER_PASS`, and `ARACH_C2_EXTERNAL_SYMBOL_PASS`, then
@@ -77,8 +85,11 @@ the existing exit-group marker. This proves that the old image cannot resume,
 same-PID ownership
 reaches the two-image replacement, and deferred reclamation does not destroy
 the new hierarchy. The admitted graph remains bounded to eight startup objects
-and does not claim late `dlopen` TLS allocation, TLSDESC, runpaths, weak
-binding, or lazy binding.
+and does not claim late `dlopen` TLS allocation, TLSDESC, `DT_RPATH`,
+`$ORIGIN`, environment/cache/hwcaps search, weak binding, or lazy binding.
+Directory admission is limited to the ephemeral Akashic namespace and an exact
+0755 request; general Unix mode persistence, ownership, ACLs, and umask
+semantics remain outside this gate.
 
 The kernel currently carries a legacy internal `crest` name for its second
 boot-process slot. `ARACH_BOOTSTRAP_IMAGE` deliberately replaces that artifact

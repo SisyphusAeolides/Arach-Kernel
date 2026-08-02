@@ -134,18 +134,23 @@ The interpreter now derives the main load bias from `AT_PHDR` and closes up to
 eight objects with eight dependencies each. It discovers objects breadth-first
 from canonical SONAMEs, snapshots each SONAME once, rejects cycles, derives a
 provider-first order, and uses deterministic load-order SysV symbol scope for
-eager PLT binding. The measured diamond loads one consumer, two independent
+eager PLT binding. The probe first creates an ephemeral `/runpath` directory;
+exact bounded `DT_RUNPATH` entries load three providers from it while the root
+object remains at `/`. The measured diamond loads one consumer, two independent
 middle providers, and one coalesced core; it applies the core's real
-`R_X86_64_TPOFF64` plus nine real `R_X86_64_RELATIVE` writes, resolves seven
-real exact-version `R_X86_64_JUMP_SLOT` entries, seals all four objects
+`R_X86_64_TPOFF64`, one real
+`R_X86_64_DTPMOD64`/`R_X86_64_DTPOFF64` pair, and nine real
+`R_X86_64_RELATIVE` writes. It resolves seven real exact-version object
+`R_X86_64_JUMP_SLOT` entries plus the bounded `__tls_get_addr` edge, seals all
+four objects
 R/RW/RX, executes four provider-first initializers, and calls through both
 branches into code that consumes relocated pointer and TLS state. The main
 image later invokes the one-shot x86-64 finalizer callback, which executes four
 `DT_FINI_ARRAY` and four `DT_FINI` functions in reverse dependency order. The
 admitted slice remains single-threaded at exec and each Akashic file is bounded
-to 64 KiB. Dynamic TLS allocation, general search paths, weak or lazy binding,
-general file mapping semantics, ASLR, and production entropy remain
-fail-closed.
+to 64 KiB. Late dynamic TLS allocation, `DT_RPATH`, `$ORIGIN`, environment or
+cache search, weak or lazy binding, general file mapping semantics, ASLR, and
+production entropy remain fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,
 filesystem context, descriptor ownership, signal-handler identity, and SysV

@@ -29,6 +29,11 @@ common_flags=(
     -mno-sse2
     -mtls-dialect=gnu
 )
+runpath_flags=(
+    --enable-new-dtags
+    -rpath
+    /runpath
+)
 
 "$cc_bin" "${common_flags[@]}" -std=c11 -O2 -Wall -Wextra -Wconversion \
     -Werror -Wmissing-prototypes -Wpointer-arith -Wshadow -Wsign-conversion \
@@ -57,7 +62,8 @@ common_flags=(
     -o "$core_output" \
     "$build_directory/core.o"
 "$ld_bin" -shared -nostdlib -Bsymbolic --hash-style=sysv -z noexecstack \
-    -z now -soname libarach-provider.so -fini arach_provider_finish \
+    -z now "${runpath_flags[@]}" -soname libarach-provider.so \
+    -fini arach_provider_finish \
     --version-script="$root/probes/shared-object/provider.map" \
     -T "$root/probes/shared-object/linker.ld" \
     -o "$provider_output" \
@@ -65,7 +71,8 @@ common_flags=(
     -L"$(dirname -- "$core_output")" --no-as-needed \
     -l:libarach-core.so
 "$ld_bin" -shared -nostdlib -Bsymbolic --hash-style=sysv -z noexecstack \
-    -z now -soname libarach-observer.so -fini arach_observer_finish \
+    -z now "${runpath_flags[@]}" -soname libarach-observer.so \
+    -fini arach_observer_finish \
     --version-script="$root/probes/shared-object/observer.map" \
     -T "$root/probes/shared-object/linker.ld" \
     -o "$observer_output" \
@@ -73,7 +80,8 @@ common_flags=(
     -L"$(dirname -- "$core_output")" --no-as-needed \
     -l:libarach-core.so
 "$ld_bin" -shared -nostdlib -Bsymbolic --hash-style=sysv -z noexecstack \
-    -z now -soname libarach-probe.so -fini arach_root_finish \
+    -z now "${runpath_flags[@]}" -soname libarach-probe.so \
+    -fini arach_root_finish \
     --version-script="$root/probes/shared-object/root.map" \
     -T "$root/probes/shared-object/linker.ld" \
     -o "$output" \
@@ -86,6 +94,9 @@ test -s "$output" && test -s "$provider_output" \
 test "$(readelf -hW "$output" | awk '/Type:/{print $2}')" = DYN
 test -z "$(readelf -lW "$output" | awk '$1 == "INTERP" {print}')"
 test "$(readelf -dW "$output" | awk '$2 == "(SONAME)" {print $5}')" = '[libarach-probe.so]'
+test "$(readelf -dW "$output" | awk '$2 == "(RUNPATH)" {print $5}')" = '[/runpath]'
+test "$(readelf -dW "$output" | awk '$2 == "(RUNPATH)" {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -dW "$output" | awk '$2 == "(RPATH)" {print}')"
 mapfile -t root_dependencies < <(readelf -dW "$output" | awk '$2 == "(NEEDED)" {print $5}')
 test "${root_dependencies[*]}" = '[libarach-provider.so] [libarach-observer.so]'
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 3
@@ -104,6 +115,9 @@ test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_JUMP_SLOT" && $5 ~ /@ARACH_
 test "$(readelf -hW "$provider_output" | awk '/Type:/{print $2}')" = DYN
 test -z "$(readelf -lW "$provider_output" | awk '$1 == "INTERP" {print}')"
 test "$(readelf -dW "$provider_output" | awk '$2 == "(SONAME)" {print $5}')" = '[libarach-provider.so]'
+test "$(readelf -dW "$provider_output" | awk '$2 == "(RUNPATH)" {print $5}')" = '[/runpath]'
+test "$(readelf -dW "$provider_output" | awk '$2 == "(RUNPATH)" {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -dW "$provider_output" | awk '$2 == "(RPATH)" {print}')"
 test "$(readelf -dW "$provider_output" | awk '$2 == "(NEEDED)" {print $5}')" = '[libarach-core.so]'
 test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 3
 test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 2
@@ -127,6 +141,9 @@ test "$(readelf -rW "$provider_output" | awk '$3 == "R_X86_64_JUMP_SLOT" && $5 =
 test "$(readelf -hW "$observer_output" | awk '/Type:/{print $2}')" = DYN
 test -z "$(readelf -lW "$observer_output" | awk '$1 == "INTERP" {print}')"
 test "$(readelf -dW "$observer_output" | awk '$2 == "(SONAME)" {print $5}')" = '[libarach-observer.so]'
+test "$(readelf -dW "$observer_output" | awk '$2 == "(RUNPATH)" {print $5}')" = '[/runpath]'
+test "$(readelf -dW "$observer_output" | awk '$2 == "(RUNPATH)" {count++} END {print count + 0}')" -eq 1
+test -z "$(readelf -dW "$observer_output" | awk '$2 == "(RPATH)" {print}')"
 test "$(readelf -dW "$observer_output" | awk '$2 == "(NEEDED)" {print $5}')" = '[libarach-core.so]'
 test "$(readelf -rW "$observer_output" | awk '$3 == "R_X86_64_JUMP_SLOT" {count++} END {print count + 0}')" -eq 2
 test "$(readelf -rW "$observer_output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 2
@@ -144,6 +161,7 @@ test "$(readelf -rW "$observer_output" | awk '$3 == "R_X86_64_JUMP_SLOT" && $5 ~
 test "$(readelf -hW "$core_output" | awk '/Type:/{print $2}')" = DYN
 test -z "$(readelf -lW "$core_output" | awk '$1 == "INTERP" {print}')"
 test "$(readelf -dW "$core_output" | awk '$2 == "(SONAME)" {print $5}')" = '[libarach-core.so]'
+test -z "$(readelf -dW "$core_output" | awk '$2 == "(RUNPATH)" || $2 == "(RPATH)" {print}')"
 test "$(readelf -rW "$core_output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {print count + 0}')" -eq 3
 test "$(readelf -rW "$core_output" | awk '$3 == "R_X86_64_TPOFF64" {count++} END {print count + 0}')" -eq 1
 test -z "$(readelf -rW "$core_output" | awk '/^[0-9a-f]+/ && $3 != "R_X86_64_RELATIVE" && $3 != "R_X86_64_TPOFF64" {print}')"

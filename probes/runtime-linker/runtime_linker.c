@@ -57,6 +57,7 @@ enum {
     DYNAMIC_INIT = 12,
     DYNAMIC_FINI = 13,
     DYNAMIC_SONAME = 14,
+    DYNAMIC_RPATH = 15,
     DYNAMIC_SYMBOLIC = 16,
     DYNAMIC_REL = 17,
     DYNAMIC_REL_SIZE = 18,
@@ -116,6 +117,10 @@ enum {
     MAXIMUM_LOADED_OBJECTS = 8,
     MAXIMUM_NEEDED_ENTRIES = 8,
     MAXIMUM_OBJECT_NAME_BYTES = 63,
+    MAXIMUM_OBJECT_PATH_BYTES = 255,
+    MAXIMUM_RUNPATH_DIRECTORIES = 4,
+    MAXIMUM_RUNPATH_DIRECTORY_BYTES = 63,
+    MAXIMUM_RUNPATH_STRING_BYTES = 255,
     MAXIMUM_SYMBOL_NAME_BYTES = 127,
     MAXIMUM_RELOCATIONS = 64,
     MAXIMUM_INITIALIZERS = 16,
@@ -124,6 +129,7 @@ enum {
     MAXIMUM_VERSION_AUXILIARIES = 32,
     MAXIMUM_TLS_ALIGNMENT = PAGE_SIZE,
     MAXIMUM_STATIC_TLS_BYTES = 16 * 1024,
+    ERROR_NO_ENTRY = -2,
 };
 
 static const uintptr_t first_object_base = UINT64_C(0x30000000);
@@ -133,6 +139,13 @@ static const char expected_needed[] = "libarach-probe.so";
 static const char expected_provider[] = "libarach-provider.so";
 static const char expected_observer[] = "libarach-observer.so";
 static const char expected_core[] = "libarach-core.so";
+static const char expected_runpath[] = "/runpath";
+static const char expected_root_object_path[] = "/libarach-probe.so";
+static const char expected_provider_path[] =
+    "/runpath/libarach-provider.so";
+static const char expected_observer_path[] =
+    "/runpath/libarach-observer.so";
+static const char expected_core_path[] = "/runpath/libarach-core.so";
 static const char expected_symbol[] = "arach_shared_probe";
 static const char tls_resolver_symbol[] = "__tls_get_addr";
 static const char enter_marker[] = "ARACH_C2_RUNTIME_LINKER_ENTER\n";
@@ -146,6 +159,7 @@ static const char symbol_scope_marker[] =
 static const char version_marker[] = "ARACH_C2_SYMBOL_VERSION_PASS\n";
 static const char static_tls_marker[] = "ARACH_C2_STATIC_TLS_PASS\n";
 static const char dynamic_tls_marker[] = "ARACH_C2_DYNAMIC_TLS_PASS\n";
+static const char runpath_marker[] = "ARACH_C2_RUNPATH_PASS\n";
 static const char initializer_marker[] =
     "ARACH_C2_INITIALIZER_ORDER_PASS\n";
 static const char finalization_marker[] = "ARACH_C2_FINALIZATION_PASS\n";
@@ -170,6 +184,8 @@ static const char shared_external_failure[] =
 static const char shared_tls_failure[] = "ARACH_C2_LINKER_STATIC_TLS_FAIL\n";
 static const char shared_dynamic_tls_failure[] =
     "ARACH_C2_LINKER_DYNAMIC_TLS_FAIL\n";
+static const char shared_runpath_failure[] =
+    "ARACH_C2_LINKER_RUNPATH_FAIL\n";
 static const char shared_version_failure[] =
     "ARACH_C2_LINKER_SYMBOL_VERSION_FAIL\n";
 static const char shared_initializer_failure[] =
@@ -271,6 +287,16 @@ typedef struct {
 } ObjectName;
 
 typedef struct {
+    char bytes[MAXIMUM_RUNPATH_DIRECTORY_BYTES + 1];
+    size_t length;
+} SearchDirectory;
+
+typedef struct {
+    SearchDirectory directories[MAXIMUM_RUNPATH_DIRECTORIES];
+    size_t count;
+} SearchPath;
+
+typedef struct {
     ObjectName names[MAXIMUM_NEEDED_ENTRIES];
     size_t count;
 } DependencyNames;
@@ -299,6 +325,7 @@ typedef struct {
     size_t version_definition_count;
     size_t version_requirement_count;
     size_t soname_offset;
+    size_t runpath_offset;
     size_t needed_offsets[MAXIMUM_NEEDED_ENTRIES];
     size_t needed_count;
     size_t relative_count;
@@ -306,6 +333,7 @@ typedef struct {
     uint64_t flags;
     uint64_t flags_1;
     int has_soname;
+    int has_runpath;
     int has_relative_count;
     int has_plt_relocation_type;
     int has_flags;
@@ -323,10 +351,14 @@ typedef struct {
     int has_version_definition_count;
     int has_version_requirements;
     int has_version_requirement_count;
+    SearchPath runpath;
 } SharedDynamic;
 
 typedef struct {
     ObjectName name;
+    char path[MAXIMUM_OBJECT_PATH_BYTES + 1];
+    size_t path_length;
+    int loaded_from_runpath;
     uintptr_t base;
     long descriptor;
     uintptr_t temporary;
@@ -544,16 +576,107 @@ static int object_name_equals_literal(const ObjectName *name,
            bytes_equal(name->bytes, literal, literal_length);
 }
 
-static int build_object_path(const ObjectName *name, char *path,
-                             size_t capacity) {
-    if (capacity < name->length + 2) {
+static int search_directories_equal(const SearchDirectory *left,
+                                    const SearchDirectory *right) {
+    return left->length == right->length &&
+           bytes_equal(left->bytes, right->bytes, left->length);
+}
+
+static int search_directory_equals_literal(const SearchDirectory *directory,
+                                           const char *literal,
+                                           size_t literal_length) {
+    return directory->length == literal_length &&
+           bytes_equal(directory->bytes, literal, literal_length);
+}
+
+static int copy_search_directory(const char *value, size_t length,
+                                 SearchDirectory *result) {
+    if (length < 2 || length > MAXIMUM_RUNPATH_DIRECTORY_BYTES ||
+        value[0] != '/' || value[length - 1] == '/') {
         return 0;
     }
-    path[0] = '/';
-    for (size_t index = 0; index < name->length; ++index) {
-        path[index + 1] = name->bytes[index];
+    size_t component_start = 1;
+    for (size_t index = 1; index <= length; ++index) {
+        if (index == length || value[index] == '/') {
+            size_t component_length = index - component_start;
+            if (component_length == 0 ||
+                (component_length == 1 && value[component_start] == '.') ||
+                (component_length == 2 && value[component_start] == '.' &&
+                 value[component_start + 1] == '.')) {
+                return 0;
+            }
+            component_start = index + 1;
+        } else if (!valid_object_name_byte(value[index])) {
+            return 0;
+        }
     }
-    path[name->length + 1] = '\0';
+    for (size_t index = 0; index < length; ++index) {
+        result->bytes[index] = value[index];
+    }
+    result->bytes[length] = '\0';
+    result->length = length;
+    return 1;
+}
+
+static int parse_search_path(const char *value, size_t capacity,
+                             SearchPath *result) {
+    result->count = 0;
+    size_t component_start = 0;
+    for (size_t cursor = 0;
+         cursor < capacity && cursor <= MAXIMUM_RUNPATH_STRING_BYTES;
+         ++cursor) {
+        char byte = value[cursor];
+        if (byte != ':' && byte != '\0') {
+            if (cursor == MAXIMUM_RUNPATH_STRING_BYTES) {
+                return 0;
+            }
+            continue;
+        }
+        size_t length = cursor - component_start;
+        if (length == 0 || result->count == MAXIMUM_RUNPATH_DIRECTORIES ||
+            !copy_search_directory(&value[component_start], length,
+                                   &result->directories[result->count])) {
+            return 0;
+        }
+        for (size_t prior = 0; prior < result->count; ++prior) {
+            if (search_directories_equal(
+                    &result->directories[prior],
+                    &result->directories[result->count])) {
+                return 0;
+            }
+        }
+        ++result->count;
+        if (byte == '\0') {
+            return 1;
+        }
+        component_start = cursor + 1;
+    }
+    return 0;
+}
+
+static int build_object_path_in_directory(
+    const SearchDirectory *directory, const ObjectName *name, char *path,
+    size_t capacity, size_t *path_length) {
+    size_t directory_length = directory == NULL ? 0 : directory->length;
+    size_t length = 0;
+    if (directory_length > MAXIMUM_OBJECT_PATH_BYTES ||
+        name->length > MAXIMUM_OBJECT_PATH_BYTES - directory_length ||
+        name->length + directory_length > MAXIMUM_OBJECT_PATH_BYTES - 1) {
+        return 0;
+    }
+    length = directory_length + 1 + name->length;
+    if (length >= capacity || length > MAXIMUM_OBJECT_PATH_BYTES) {
+        return 0;
+    }
+    for (size_t index = 0; index < directory_length; ++index) {
+        path[index] = directory->bytes[index];
+    }
+    path[directory_length] = '/';
+    for (size_t index = 0; index < name->length; ++index) {
+        path[directory_length + 1 + index] = name->bytes[index];
+    }
+    path[length] = '\0';
+    *path_length = length;
     return 1;
 }
 
@@ -918,6 +1041,7 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->version_definition_count = 0;
     result->version_requirement_count = 0;
     result->soname_offset = 0;
+    result->runpath_offset = 0;
     for (size_t index = 0; index < MAXIMUM_NEEDED_ENTRIES; ++index) {
         result->needed_offsets[index] = 0;
     }
@@ -927,6 +1051,7 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->flags = 0;
     result->flags_1 = 0;
     result->has_soname = 0;
+    result->has_runpath = 0;
     result->has_relative_count = 0;
     result->has_plt_relocation_type = 0;
     result->has_flags = 0;
@@ -944,6 +1069,7 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->has_version_definition_count = 0;
     result->has_version_requirements = 0;
     result->has_version_requirement_count = 0;
+    result->runpath.count = 0;
     for (size_t index = 0; index < entries; ++index) {
         uintptr_t pointer = 0;
         switch (dynamic[index].tag) {
@@ -1035,6 +1161,13 @@ static int parse_shared_dynamic(LoadedObject *object) {
             }
             result->soname_offset = (size_t)dynamic[index].value;
             result->has_soname = 1;
+            break;
+        case DYNAMIC_RUNPATH:
+            if (result->has_runpath || dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->runpath_offset = (size_t)dynamic[index].value;
+            result->has_runpath = 1;
             break;
         case DYNAMIC_INIT:
             if (result->has_init_function ||
@@ -1181,7 +1314,7 @@ static int parse_shared_dynamic(LoadedObject *object) {
         case DYNAMIC_REL_ENTRY:
         case DYNAMIC_DEBUG:
         case DYNAMIC_TEXT_RELOCATION:
-        case DYNAMIC_RUNPATH:
+        case DYNAMIC_RPATH:
         case DYNAMIC_PREINIT_ARRAY:
         case DYNAMIC_PREINIT_ARRAY_SIZE:
         case DYNAMIC_RELR_SIZE:
@@ -1244,6 +1377,14 @@ static int parse_shared_dynamic(LoadedObject *object) {
         (result->has_version_symbols !=
          (result->has_version_definitions ||
           result->has_version_requirements))) {
+        return 0;
+    }
+    if (result->has_runpath &&
+        (result->runpath_offset >= result->string_size ||
+         !parse_search_path(
+             (const char *)(result->string_table + result->runpath_offset),
+             result->string_size - result->runpath_offset,
+             &result->runpath))) {
         return 0;
     }
     ObjectName soname;
@@ -1420,6 +1561,46 @@ static int verify_probe_graph(const ObjectGraph *graph) {
            graph->relocation_order[1] == 1 &&
            graph->relocation_order[2] == 2 &&
            graph->relocation_order[3] == 0;
+}
+
+static int object_path_equals_literal(const LoadedObject *object,
+                                      const char *literal,
+                                      size_t literal_length) {
+    return object->path_length == literal_length &&
+           bytes_equal(object->path, literal, literal_length) &&
+           object->path[literal_length] == '\0';
+}
+
+static int has_expected_runpath(const LoadedObject *object) {
+    return object->dynamic.has_runpath &&
+           object->dynamic.runpath.count == 1 &&
+           search_directory_equals_literal(
+               &object->dynamic.runpath.directories[0], expected_runpath,
+               sizeof(expected_runpath) - 1);
+}
+
+static int verify_probe_runpaths(const ObjectGraph *graph) {
+    return graph->object_count == 4 &&
+           !graph->objects[0].loaded_from_runpath &&
+           graph->objects[1].loaded_from_runpath &&
+           graph->objects[2].loaded_from_runpath &&
+           graph->objects[3].loaded_from_runpath &&
+           object_path_equals_literal(
+               &graph->objects[0], expected_root_object_path,
+               sizeof(expected_root_object_path) - 1) &&
+           object_path_equals_literal(
+               &graph->objects[1], expected_provider_path,
+               sizeof(expected_provider_path) - 1) &&
+           object_path_equals_literal(
+               &graph->objects[2], expected_observer_path,
+               sizeof(expected_observer_path) - 1) &&
+           object_path_equals_literal(&graph->objects[3], expected_core_path,
+                                      sizeof(expected_core_path) - 1) &&
+           has_expected_runpath(&graph->objects[0]) &&
+           has_expected_runpath(&graph->objects[1]) &&
+           has_expected_runpath(&graph->objects[2]) &&
+           !graph->objects[3].dynamic.has_runpath &&
+           graph->objects[3].dynamic.runpath.count == 0;
 }
 
 static int dynamic_symbol_name(const LoadedObject *object,
@@ -2631,16 +2812,76 @@ static int release_shared_snapshot(const LoadedObject *object) {
                0;
 }
 
-static void load_shared_object(const ObjectName *name, uintptr_t base,
-                               LoadedObject *object) {
-    char path[MAXIMUM_OBJECT_NAME_BYTES + 2];
-    if (!build_object_path(name, path, sizeof(path))) {
-        fail_with(shared_open_failure, sizeof(shared_open_failure) - 1);
+static int record_opened_path(LoadedObject *object, const char *path,
+                              size_t path_length, int from_runpath) {
+    if (path_length > MAXIMUM_OBJECT_PATH_BYTES) {
+        return 0;
     }
+    for (size_t index = 0; index <= path_length; ++index) {
+        object->path[index] = path[index];
+    }
+    object->path_length = path_length;
+    object->loaded_from_runpath = from_runpath;
+    return 1;
+}
+
+static int open_shared_object(const ObjectName *name,
+                              const SearchPath *search_path,
+                              LoadedObject *object, long *descriptor) {
+    char path[MAXIMUM_OBJECT_PATH_BYTES + 1];
+    if (search_path != NULL) {
+        for (size_t index = 0; index < search_path->count; ++index) {
+            size_t path_length = 0;
+            if (!build_object_path_in_directory(
+                    &search_path->directories[index], name, path,
+                    sizeof(path), &path_length)) {
+                return 0;
+            }
+            long result = syscall3(SYS_OPEN, (uintptr_t)path, O_RDONLY, 0);
+            if (result >= 3) {
+                if (!record_opened_path(object, path, path_length, 1)) {
+                    (void)syscall3(SYS_CLOSE, (uint64_t)result, 0, 0);
+                    return 0;
+                }
+                *descriptor = result;
+                return 1;
+            }
+            if (result >= 0) {
+                (void)syscall3(SYS_CLOSE, (uint64_t)result, 0, 0);
+                return 0;
+            }
+            if (result != ERROR_NO_ENTRY) {
+                return 0;
+            }
+        }
+    }
+    size_t path_length = 0;
+    if (!build_object_path_in_directory(NULL, name, path, sizeof(path),
+                                        &path_length)) {
+        return 0;
+    }
+    long result = syscall3(SYS_OPEN, (uintptr_t)path, O_RDONLY, 0);
+    if (result < 3) {
+        if (result >= 0) {
+            (void)syscall3(SYS_CLOSE, (uint64_t)result, 0, 0);
+        }
+        return 0;
+    }
+    if (!record_opened_path(object, path, path_length, 0)) {
+        (void)syscall3(SYS_CLOSE, (uint64_t)result, 0, 0);
+        return 0;
+    }
+    *descriptor = result;
+    return 1;
+}
+
+static void load_shared_object(const ObjectName *name,
+                               const SearchPath *search_path, uintptr_t base,
+                               LoadedObject *object) {
     zero_bytes((uint8_t *)object, sizeof(*object));
     object->name = *name;
-    long descriptor = syscall3(SYS_OPEN, (uintptr_t)path, O_RDONLY, 0);
-    if (descriptor < 3) {
+    long descriptor = -1;
+    if (!open_shared_object(name, search_path, object, &descriptor)) {
         fail_with(shared_open_failure, sizeof(shared_open_failure) - 1);
     }
     long file_size = syscall3(SYS_LSEEK, (uint64_t)descriptor, 0, SEEK_END);
@@ -2790,6 +3031,7 @@ static void load_shared_object(const ObjectName *name, uintptr_t base,
 }
 
 static int load_graph_object(ObjectGraph *graph, const ObjectName *name,
+                             const SearchPath *search_path,
                              size_t *object_index) {
     size_t existing = 0;
     if (graph_find_object(graph, name, &existing)) {
@@ -2805,7 +3047,7 @@ static int load_graph_object(ObjectGraph *graph, const ObjectName *name,
     if (!checked_add(first_object_base, offset, &base)) {
         return 0;
     }
-    load_shared_object(name, base, &graph->objects[index]);
+    load_shared_object(name, search_path, base, &graph->objects[index]);
     ++graph->object_count;
     *object_index = index;
     return 1;
@@ -2819,7 +3061,8 @@ static int load_dependency_graph(const DependencyNames *roots,
     }
     for (size_t index = 0; index < roots->count; ++index) {
         size_t root_index = 0;
-        if (!load_graph_object(graph, &roots->names[index], &root_index) ||
+        if (!load_graph_object(graph, &roots->names[index], NULL,
+                               &root_index) ||
             root_index != index) {
             return 0;
         }
@@ -2833,9 +3076,13 @@ static int load_dependency_graph(const DependencyNames *roots,
              ++dependency_index) {
             ObjectName dependency_name;
             size_t provider_index = 0;
+            const SearchPath *search_path =
+                consumer->dynamic.has_runpath ? &consumer->dynamic.runpath
+                                              : NULL;
             if (!object_dependency_name(consumer, dependency_index,
                                         &dependency_name) ||
-                !load_graph_object(graph, &dependency_name, &provider_index) ||
+                !load_graph_object(graph, &dependency_name, search_path,
+                                   &provider_index) ||
                 consumer->dependency_count == MAXIMUM_NEEDED_ENTRIES) {
                 return 0;
             }
@@ -3129,6 +3376,11 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
         !write_marker(multi_object_marker,
                       sizeof(multi_object_marker) - 1)) {
         fail_with(shared_graph_failure, sizeof(shared_graph_failure) - 1);
+    }
+    if (!verify_probe_runpaths(&graph) ||
+        !write_marker(runpath_marker, sizeof(runpath_marker) - 1)) {
+        fail_with(shared_runpath_failure,
+                  sizeof(shared_runpath_failure) - 1);
     }
     StaticTlsLayout tls_layout;
     if (!install_static_tls(&graph, &tls_layout) ||

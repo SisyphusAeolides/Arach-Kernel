@@ -94,6 +94,9 @@ data Gate
   | DuplicateDependencyCoalescing
   | AcyclicRelocationOrder
   | GlobalSymbolScope
+  | DirectoryCreation
+  | CanonicalRunpath
+  | RunpathDependencySearch
   | StaticTlsLayout
   | TlsRelocation
   | DynamicTlsVector
@@ -328,13 +331,17 @@ record MultiObjectGraphCertificate where
   globalSymbolScope : Measurement GlobalSymbolScope
 
 ||| The first runtime-initialization certificate retains the complete bounded
-||| object graph and adds one finite Variant-II TLS arena, checked static and
-||| general-dynamic relocations, a bounded dynamic-thread vector, one exact
-||| resolver boundary, and dependency-first initializer execution.
+||| object graph and adds measured directory creation, canonical bounded
+||| runpaths, direct-dependency search, one finite Variant-II TLS arena,
+||| checked static and general-dynamic relocations, a bounded dynamic-thread
+||| vector, one exact resolver boundary, and dependency-first initialization.
 public export
 record RuntimeInitializationCertificate where
   constructor MkRuntimeInitializationCertificate
   multiObjectGraph : MultiObjectGraphCertificate
+  directoryCreation : Measurement DirectoryCreation
+  canonicalRunpath : Measurement CanonicalRunpath
+  runpathDependencySearch : Measurement RunpathDependencySearch
   staticTlsLayout : Measurement StaticTlsLayout
   tlsRelocation : Measurement TlsRelocation
   dynamicTlsVector : Measurement DynamicTlsVector
@@ -458,8 +465,9 @@ multiObjectGraphRequiresDependencyGraph :
   MultiObjectGraphCertificate -> DependencyGraphCertificate
 multiObjectGraphRequiresDependencyGraph certificate = certificate.dependencyGraph
 
-||| TLS and initializer qualification cannot be projected without the complete
-||| dependency graph, relocation, sealing, and global-scope evidence.
+||| Search-path, TLS, and initializer qualification cannot be projected without
+||| the complete dependency graph, relocation, sealing, and global-scope
+||| evidence.
 public export
 runtimeInitializationRequiresMultiObjectGraph :
   RuntimeInitializationCertificate -> MultiObjectGraphCertificate

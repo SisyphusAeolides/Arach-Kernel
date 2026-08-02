@@ -36,6 +36,7 @@ data Gate : Set where
   crossObjectCall : Gate
   boundedObjectClosure breadthFirstDiscovery : Gate
   duplicateDependencyCoalescing acyclicRelocationOrder globalSymbolScope : Gate
+  directoryCreation canonicalRunpath runpathDependencySearch : Gate
   staticTlsLayout tlsRelocation dynamicTlsVector tlsResolver : Gate
   generalDynamicTlsAccess initializerOrder : Gate
   boundedSymbolVersionTables exactSymbolVersionResolution : Gate
@@ -214,6 +215,9 @@ record RuntimeInitializationCertificate : Set where
   constructor runtimeInitializationCertificate
   field
     multiObjectGraph : MultiObjectGraphCertificate
+    directoryCreationEvidence : Measurement directoryCreation
+    canonicalRunpathEvidence : Measurement canonicalRunpath
+    runpathDependencySearchEvidence : Measurement runpathDependencySearch
     staticTlsLayoutEvidence : Measurement staticTlsLayout
     tlsRelocationEvidence : Measurement tlsRelocation
     dynamicTlsVectorEvidence : Measurement dynamicTlsVector
@@ -343,7 +347,8 @@ multiObjectGraphRequiresDependencyGraph certificate =
   MultiObjectGraphCertificate.dependencyGraph certificate
 
 -- Runtime initialization structurally retains bounded closure, provider-first
--- relocation, and deterministic process-global symbol scope.
+-- relocation, and deterministic process-global symbol scope before adding
+-- directory, runpath, TLS, resolver, and initializer evidence.
 runtimeInitializationRequiresMultiObjectGraph :
   RuntimeInitializationCertificate -> MultiObjectGraphCertificate
 runtimeInitializationRequiresMultiObjectGraph certificate =

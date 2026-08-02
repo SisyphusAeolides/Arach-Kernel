@@ -62,9 +62,12 @@ static size_t finalizer_count;
 static uintptr_t first_definition(uintptr_t value);
 static uintptr_t second_definition(uintptr_t value);
 static int set_name(ObjectName *name, const char *value, size_t length);
+static int set_path(LoadedObject *object, const char *value, size_t length,
+                    int from_runpath);
 static void prepare_symbol_object(LoadedObject *object, SymbolFixture *fixture,
                                   uintptr_t definition);
 static int test_names(void);
+static int test_runpath(void);
 static int test_graph_order(void);
 static int test_cycle_rejection(void);
 static int test_symbol_scope(void);
@@ -133,6 +136,11 @@ static int set_name(ObjectName *name, const char *value, size_t length) {
     return copy_object_name(value, length + 1, name);
 }
 
+static int set_path(LoadedObject *object, const char *value, size_t length,
+                    int from_runpath) {
+    return record_opened_path(object, value, length, from_runpath);
+}
+
 static int copy_fixture_string(char *strings, size_t capacity, size_t offset,
                                const char *value, size_t length) {
     if (offset > capacity || length > capacity - offset) {
@@ -194,6 +202,58 @@ static int test_names(void) {
            !copy_object_name(too_long, sizeof(too_long), &name);
 }
 
+static int test_runpath(void) {
+    SearchPath search_path;
+    ObjectName name;
+    char object_path[MAXIMUM_OBJECT_PATH_BYTES + 1];
+    size_t object_path_length = 0;
+    const char unterminated[] = {'/', 'r', 'u', 'n'};
+    const char too_many[] = "/a:/b:/c:/d:/e";
+    if (!parse_search_path("/runpath:/usr/lib",
+                           sizeof("/runpath:/usr/lib"), &search_path) ||
+        search_path.count != 2 ||
+        !search_directory_equals_literal(
+            &search_path.directories[0], "/runpath",
+            sizeof("/runpath") - 1) ||
+        !search_directory_equals_literal(
+            &search_path.directories[1], "/usr/lib",
+            sizeof("/usr/lib") - 1) ||
+        !copy_object_name("libarach-core.so", sizeof("libarach-core.so"),
+                          &name) ||
+        !build_object_path_in_directory(
+            &search_path.directories[0], &name, object_path,
+            sizeof(object_path), &object_path_length) ||
+        object_path_length != sizeof("/runpath/libarach-core.so") - 1 ||
+        !bounded_string_equals(
+            object_path, sizeof(object_path),
+            "/runpath/libarach-core.so",
+            sizeof("/runpath/libarach-core.so") - 1)) {
+        return 0;
+    }
+    return parse_search_path("/a:/b:/c:/d", sizeof("/a:/b:/c:/d"),
+                             &search_path) &&
+           search_path.count == MAXIMUM_RUNPATH_DIRECTORIES &&
+           !parse_search_path("/", sizeof("/"), &search_path) &&
+           !parse_search_path("runpath", sizeof("runpath"), &search_path) &&
+           !parse_search_path("/runpath/", sizeof("/runpath/"),
+                              &search_path) &&
+           !parse_search_path("/runpath:", sizeof("/runpath:"),
+                              &search_path) &&
+           !parse_search_path("/runpath/$ORIGIN",
+                              sizeof("/runpath/$ORIGIN"), &search_path) &&
+           !parse_search_path("/runpath//nested",
+                              sizeof("/runpath//nested"), &search_path) &&
+           !parse_search_path("/runpath/../escape",
+                              sizeof("/runpath/../escape"), &search_path) &&
+           !parse_search_path("/runpath:/runpath",
+                              sizeof("/runpath:/runpath"), &search_path) &&
+           !parse_search_path("/runpath::/usr/lib",
+                              sizeof("/runpath::/usr/lib"), &search_path) &&
+           !parse_search_path(too_many, sizeof(too_many), &search_path) &&
+           !parse_search_path(unterminated, sizeof(unterminated),
+                              &search_path);
+}
+
 static int test_graph_order(void) {
     ObjectGraph graph;
     zero_bytes((uint8_t *)&graph, sizeof(graph));
@@ -205,8 +265,23 @@ static int test_graph_order(void) {
         !set_name(&graph.objects[2].name, expected_observer,
                   sizeof(expected_observer) - 1) ||
         !set_name(&graph.objects[3].name, expected_core,
-                  sizeof(expected_core) - 1)) {
+                  sizeof(expected_core) - 1) ||
+        !set_path(&graph.objects[0], expected_root_object_path,
+                  sizeof(expected_root_object_path) - 1, 0) ||
+        !set_path(&graph.objects[1], expected_provider_path,
+                  sizeof(expected_provider_path) - 1, 1) ||
+        !set_path(&graph.objects[2], expected_observer_path,
+                  sizeof(expected_observer_path) - 1, 1) ||
+        !set_path(&graph.objects[3], expected_core_path,
+                  sizeof(expected_core_path) - 1, 1)) {
         return 0;
+    }
+    for (size_t index = 0; index < 3; ++index) {
+        graph.objects[index].dynamic.has_runpath = 1;
+        if (!parse_search_path(expected_runpath, sizeof(expected_runpath),
+                               &graph.objects[index].dynamic.runpath)) {
+            return 0;
+        }
     }
     graph.objects[0].dependencies[0] = 1;
     graph.objects[0].dependencies[1] = 2;
@@ -218,7 +293,8 @@ static int test_graph_order(void) {
     size_t core_index = 0;
     return graph_find_object(&graph, &graph.objects[3].name, &core_index) &&
            core_index == 3 && compute_relocation_order(&graph) &&
-           verify_probe_graph(&graph) && graph.relocation_order[0] == 3 &&
+           verify_probe_graph(&graph) && verify_probe_runpaths(&graph) &&
+           graph.relocation_order[0] == 3 &&
            graph.relocation_order[1] == 1 &&
            graph.relocation_order[2] == 2 &&
            graph.relocation_order[3] == 0;
@@ -794,7 +870,8 @@ static int test_finalizer_order(void) {
 }
 
 int main(void) {
-    return test_names() && test_graph_order() && test_cycle_rejection() &&
+    return test_names() && test_runpath() && test_graph_order() &&
+                   test_cycle_rejection() &&
                    test_symbol_scope() && test_symbol_versions() &&
                    test_tls_resolver_reference() &&
                    test_static_tls_layout() && test_dynamic_tls_index() &&

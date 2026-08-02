@@ -209,9 +209,10 @@ The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C1_LINUX_SYSCALL_PASS`,
 `ARACH_C2_RUNTIME_LINKER_ENTER`,
 `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
-`ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_SHARED_RELOCATION_PASS`,
+`ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_RUNPATH_PASS`,
+`ARACH_C2_SHARED_RELOCATION_PASS`,
 `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_SYMBOL_VERSION_PASS`,
-`ARACH_C2_STATIC_TLS_PASS`,
+`ARACH_C2_STATIC_TLS_PASS`, `ARACH_C2_DYNAMIC_TLS_PASS`,
 `ARACH_C2_INITIALIZER_ORDER_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,
 `ARACH_C2_RUNTIME_LINKER_PASS`, `ARACH_C1_EXECVE_PASS`, and
 `ARACH_C2_FINALIZATION_PASS`. The
@@ -240,8 +241,22 @@ one object, capacity overflow, missing providers, SONAME mismatches,
 self-edges, and all other cycles. A bounded topological pass computes
 provider-first relocation order before any object is made executable.
 
+The admitted Linux directory slice accepts `mkdir` and `mkdirat` only for an
+exact 0755 request. Relative `mkdirat` is limited to `AT_FDCWD`; absolute paths
+ignore its directory descriptor as Linux requires. The measured probe creates
+the ephemeral `/runpath` directory and proves duplicate creation returns
+`EEXIST`. This is not a claim of persistent Unix ownership, ACL, or umask
+semantics.
+
 Each dependency must be a regular generation-owned Akashic file no larger than
-64 KiB. The linker opens it read-only, derives its exact size with `lseek`, and
+64 KiB. A shared object may carry one `DT_RUNPATH` containing one to four
+unique absolute directories, with a 255-byte total and 63-byte per-directory
+bound. Empty components, trailing or repeated slashes, `.` and `..`
+components, relative directories, and unsupported bytes fail closed. Lookup
+applies that runpath only to the object's direct dependencies, continues only
+after exact `ENOENT`, and then tries the qualified Akashic root. The selected
+path is retained as evidence. The linker opens each object read-only, derives
+its exact size with `lseek`, and
 uses a temporary private file mapping to validate one x86-64 ET_DYN image with
 at most 16 program headers and eight page-aligned load segments. Object slots
 begin at `0x30000000` and are separated by 16 MiB, while each object is bounded
@@ -279,7 +294,11 @@ Defined default-visible global TLS symbols must remain inside their exact
 template. Bounded `R_X86_64_DTPMOD64`, `R_X86_64_DTPOFF64`, and
 `R_X86_64_TPOFF64` writes use the same deterministic symbol scope, target only
 final-writable aligned words, use checked signed thread-pointer arithmetic,
-and are read back after each write.
+and are read back after each write. A finite DTV at `FS:8` records one exact
+module address and size per object. Only the compiler-generated undefined,
+default-visible global `STT_NOTYPE` symbol `__tls_get_addr` may bind to the
+linker's resolver, which checks the DTV, module, offset, arena, and resulting
+address before every startup general-dynamic access.
 
 All object relocations run in provider-first order before external PLT binding.
 After every object reaches final W^X permissions, each optional `DT_INIT`
@@ -291,8 +310,9 @@ one-shot finalization plan containing each optional `DT_FINI`, at most 16
 plan's callback in x86-64 process-entry register `RDX`. The main image invokes
 that callback once; objects run in reverse dependency order, each finalization
 array runs in reverse index order, and `DT_FINI` follows its array.
-Preinitializers, lazy binding, `DT_REL`, `DT_RELR`, text relocations, runpaths,
-weak symbols, version inheritance, and unknown dynamic tags remain rejected.
+Preinitializers, lazy binding, `DT_REL`, `DT_RELR`, text relocations,
+`DT_RPATH`, `$ORIGIN`, environment/cache/hwcaps search, weak symbols, version
+inheritance, and unknown dynamic tags remain rejected.
 
 The measured fixture is the four-object diamond `libarach-probe.so` to
 `libarach-provider.so` and `libarach-observer.so`, with both middle objects
@@ -300,9 +320,10 @@ depending on `libarach-core.so`. Breadth-first order is probe, provider,
 observer, core; the core is snapshotted once and relocation order is core,
 provider, observer, probe. The core contributes three relative relocations and
 one `R_X86_64_TPOFF64`; each other object contributes one initializer and one
-finalizer-array relocation. The middle objects contribute two eager PLT edges
-each and the root contributes three. Exact evidence therefore requires nine
-relative, one static-TLS, seven external, and eight versioned writes.
+finalizer-array relocation. The middle objects contribute two versioned object
+PLT edges each and the root contributes three; the provider adds the one
+unversioned resolver edge. Exact evidence therefore requires nine relative,
+three TLS, eight external, and ten versioned writes.
 
 After relocation, the linker changes every complete VMA to its declared R,
 RW, or RX permission and executes core, provider, observer, and root
@@ -324,14 +345,16 @@ adds graph closure, external-symbol relocation, eager PLT binding, and an
 observed cross-object call. `MultiObjectGraphCertificate` then requires bounded
 closure, breadth-first discovery, duplicate-dependency coalescing, acyclic
 provider-first order, and deterministic global symbol scope.
-`RuntimeInitializationCertificate` adds the finite static TLS layout, checked
-TLS relocation, and initializer order while retaining the complete graph
-certificate. `RuntimeFinalizationCertificate` then requires bounded GNU
+`RuntimeInitializationCertificate` adds measured directory creation,
+canonical bounded runpaths, direct-dependency search, the finite startup TLS
+layout and DTV, checked TLS relocation/resolution, and initializer order while
+retaining the complete graph certificate. `RuntimeFinalizationCertificate`
+then requires bounded GNU
 version tables, exact version-and-provider resolution, the process-entry
 finalizer handoff, and reverse finalizer execution. This is not yet a general
-system linker: dynamic TLS allocation, search paths, weak binding, lazy
-binding, ASLR, general VMA splitting, demand paging, and cryptographically
-qualified process entropy remain separate acceptance gates.
+system linker: late dynamic TLS allocation, general search policy, weak
+binding, lazy binding, ASLR, general VMA splitting, demand paging, and
+cryptographically qualified process entropy remain separate acceptance gates.
 
 The current tree passes external-Kbuild and static load-admission gates against
 real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux

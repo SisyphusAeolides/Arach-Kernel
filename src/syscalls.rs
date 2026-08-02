@@ -117,7 +117,7 @@ const LINUX_POLLNVAL: u16 = 0x020;
 // The limit remains explicit so an untrusted caller cannot turn present into
 // an unbounded kernel copy.
 const MAXIMUM_CREST_PRESENT_BYTES: usize = 1024 * 1024;
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", test))]
 const LINUX_AT_FDCWD: i64 = -100;
 #[cfg(target_os = "none")]
 const LINUX_AT_REMOVEDIR: u32 = 0x200;
@@ -1380,6 +1380,8 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Pipe2) => linux_pipe(arguments, arguments[1]),
         Some(crate::process::abi::LinuxSyscall::Fcntl) => linux_fcntl(arguments),
         Some(crate::process::abi::LinuxSyscall::Ftruncate) => linux_ftruncate(arguments),
+        Some(crate::process::abi::LinuxSyscall::Mkdir) => linux_mkdir(arguments),
+        Some(crate::process::abi::LinuxSyscall::MkdirAt) => linux_mkdirat(arguments),
         Some(crate::process::abi::LinuxSyscall::Socket) => linux_socket(arguments),
         Some(crate::process::abi::LinuxSyscall::Connect) => linux_connect(arguments),
         Some(crate::process::abi::LinuxSyscall::Accept) => linux_accept(arguments, 0),
@@ -2949,6 +2951,47 @@ fn linux_open_path(pointer: u64, flags: u32, dirfd: Option<i64>) -> isize {
     ) {
         Ok(fd) => fd as isize,
         Err(error) => map_linux_descriptor_error(error),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_mkdir(arguments: [u64; 6]) -> isize {
+    linux_mkdir_path(arguments[0], arguments[1], None)
+}
+
+#[cfg(target_os = "none")]
+fn linux_mkdirat(arguments: [u64; 6]) -> isize {
+    linux_mkdir_path(arguments[1], arguments[2], Some(arguments[0] as i64))
+}
+
+#[cfg(any(target_os = "none", test))]
+fn admitted_linux_directory_mode(mode: u64) -> bool {
+    mode == 0o755
+}
+
+#[cfg(any(target_os = "none", test))]
+fn admitted_linux_directory_base(was_absolute: bool, dirfd: Option<i64>) -> bool {
+    was_absolute || dirfd.is_none_or(|fd| fd == LINUX_AT_FDCWD)
+}
+
+#[cfg(target_os = "none")]
+fn linux_mkdir_path(pointer: u64, mode: u64, dirfd: Option<i64>) -> isize {
+    if !admitted_linux_directory_mode(mode) {
+        return ERROR_NOT_SUPPORTED;
+    }
+    let (path, length, was_absolute) = match copy_linux_path(pointer) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    if !admitted_linux_directory_base(was_absolute, dirfd) {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    }
+    if let Err(error) = current_akashic_owner() {
+        return error;
+    }
+    match crate::akashic_vfs::mkdir(&path[..length], crate::interrupts::monotonic_nanoseconds()) {
+        Ok(()) => 0,
+        Err(error) => map_akashic_error(error),
     }
 }
 
@@ -4625,6 +4668,19 @@ mod tests {
         assert_eq!(map_akashic_error(VfsError::Capacity), -28);
         assert_eq!(map_akashic_error(VfsError::DirectoryNotEmpty), -39);
         assert_eq!(map_akashic_error(VfsError::Unsupported), -95);
+    }
+
+    #[test]
+    fn linux_directory_admission_is_exact_and_bounded() {
+        assert!(admitted_linux_directory_mode(0o755));
+        assert!(!admitted_linux_directory_mode(0));
+        assert!(!admitted_linux_directory_mode(0o700));
+        assert!(!admitted_linux_directory_mode(0o1755));
+        assert!(admitted_linux_directory_base(true, None));
+        assert!(admitted_linux_directory_base(true, Some(42)));
+        assert!(admitted_linux_directory_base(false, None));
+        assert!(admitted_linux_directory_base(false, Some(LINUX_AT_FDCWD)));
+        assert!(!admitted_linux_directory_base(false, Some(3)));
     }
 
     #[test]
