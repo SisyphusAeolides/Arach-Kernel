@@ -57,6 +57,11 @@ data Gate
   | PrivateFileMapping
   | WriteXorExecuteTransition
   | MappedCodeEntry
+  | NeededEntryDiscovery
+  | BoundedSharedObjectSnapshot
+  | RelativeRelocation
+  | SharedObjectWxSeal
+  | SharedSymbolCall
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -187,6 +192,20 @@ record FileMappingCertificate where
   writeXorExecuteTransition : Measurement WriteXorExecuteTransition
   mappedCodeEntry : Measurement MappedCodeEntry
 
+||| Shared-object execution remains downstream of the qualified private-file
+||| mapping boundary. A certificate cannot omit dependency discovery, bounded
+||| snapshot ownership, relocation, final W^X sealing, or the observed symbol
+||| call that consumes relocated state.
+public export
+record SharedObjectCertificate where
+  constructor MkSharedObjectCertificate
+  fileMapping : FileMappingCertificate
+  neededEntryDiscovery : Measurement NeededEntryDiscovery
+  boundedSharedObjectSnapshot : Measurement BoundedSharedObjectSnapshot
+  relativeRelocation : Measurement RelativeRelocation
+  sharedObjectWxSeal : Measurement SharedObjectWxSeal
+  sharedSymbolCall : Measurement SharedSymbolCall
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -234,3 +253,10 @@ public export
 fileMappingRequiresDynamicExec :
   FileMappingCertificate -> DynamicExecCertificate
 fileMappingRequiresDynamicExec certificate = certificate.dynamicExec
+
+||| Shared-object relocation cannot be projected without the complete private
+||| file-mapping and protection contract used to stage and seal every segment.
+public export
+sharedObjectRequiresFileMapping :
+  SharedObjectCertificate -> FileMappingCertificate
+sharedObjectRequiresFileMapping certificate = certificate.fileMapping

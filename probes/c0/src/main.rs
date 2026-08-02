@@ -14,11 +14,13 @@ const LINUX_PASS: &[u8] = b"ARACH_C1_LINUX_SYSCALL_PASS\n";
 const PANIC: &[u8] = b"ARACH_C0_RING3_PANIC\n";
 const EXEC_PATH: &[u8] = b"/exec-target\0";
 const RUNTIME_LINKER_PATH: &[u8] = b"/arach-ld.so\0";
+const SHARED_OBJECT_PATH: &[u8] = b"/libarach-probe.so\0";
 const MMAP_PATH: &[u8] = b"/mmap-probe\0";
 const EXEC_ARG0: &[u8] = b"exec-target\0";
 const EXEC_ENV0: &[u8] = b"ARACH_EXEC_TRANSACTION=1\0";
 const EXEC_TARGET: &[u8] = include_bytes!(env!("ARACH_EXEC_TARGET_IMAGE_PATH"));
 const RUNTIME_LINKER: &[u8] = include_bytes!(env!("ARACH_RUNTIME_LINKER_IMAGE_PATH"));
+const SHARED_OBJECT: &[u8] = include_bytes!(env!("ARACH_SHARED_OBJECT_IMAGE_PATH"));
 const MAPPED_CODE: &[u8] = &[0xb8, 42, 0, 0, 0, 0xc3];
 
 const SYS_WRITE: usize = 1;
@@ -1076,6 +1078,20 @@ pub extern "C" fn _start() -> ! {
 
     // Materialize an immutable VFS snapshot, then replace this same PID with
     // the measured target. Successful execve cannot return to this image.
+    let shared_object = unsafe {
+        linux_syscall3(
+            SYS_OPEN,
+            SHARED_OBJECT_PATH.as_ptr() as usize,
+            O_CREAT | O_EXCL | O_RDWR,
+            0,
+        )
+    };
+    if shared_object < 3
+        || !write_all(shared_object as usize, SHARED_OBJECT)
+        || unsafe { linux_syscall1(SYS_CLOSE, shared_object as usize) } != 0
+    {
+        fail();
+    }
     let runtime_linker = unsafe {
         linux_syscall3(
             SYS_OPEN,

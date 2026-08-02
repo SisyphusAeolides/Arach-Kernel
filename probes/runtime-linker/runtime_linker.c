@@ -11,34 +11,207 @@ enum {
     AT_ENTRY = 9,
     AT_RANDOM = 25,
     AT_EXECFN = 31,
+    SYS_READ = 0,
     SYS_WRITE = 1,
+    SYS_OPEN = 2,
+    SYS_CLOSE = 3,
+    SYS_LSEEK = 8,
+    SYS_MMAP = 9,
+    SYS_MPROTECT = 10,
+    SYS_MUNMAP = 11,
     SYS_EXIT_GROUP = 231,
+    O_RDONLY = 0,
+    SEEK_SET = 0,
+    SEEK_END = 2,
+    PROT_READ = 1,
+    PROT_WRITE = 2,
+    PROT_EXEC = 4,
+    MAP_PRIVATE = 2,
+    ELF_CLASS_64 = 2,
+    ELF_DATA_LITTLE_ENDIAN = 1,
+    ELF_VERSION_CURRENT = 1,
+    ELF_TYPE_SHARED_OBJECT = 3,
+    ELF_MACHINE_X86_64 = 62,
+    PROGRAM_LOAD = 1,
+    PROGRAM_DYNAMIC = 2,
+    PROGRAM_HEADERS = 6,
+    PROGRAM_EXECUTABLE = 1,
+    PROGRAM_WRITABLE = 2,
+    PROGRAM_READABLE = 4,
+    DYNAMIC_NULL = 0,
+    DYNAMIC_NEEDED = 1,
+    DYNAMIC_PLT_RELOCATION_SIZE = 2,
+    DYNAMIC_PLT_GOT = 3,
+    DYNAMIC_HASH = 4,
+    DYNAMIC_STRING_TABLE = 5,
+    DYNAMIC_SYMBOL_TABLE = 6,
+    DYNAMIC_RELA = 7,
+    DYNAMIC_RELA_SIZE = 8,
+    DYNAMIC_RELA_ENTRY = 9,
+    DYNAMIC_STRING_SIZE = 10,
+    DYNAMIC_SYMBOL_ENTRY = 11,
+    DYNAMIC_INIT = 12,
+    DYNAMIC_FINI = 13,
+    DYNAMIC_SONAME = 14,
+    DYNAMIC_SYMBOLIC = 16,
+    DYNAMIC_REL = 17,
+    DYNAMIC_REL_SIZE = 18,
+    DYNAMIC_REL_ENTRY = 19,
+    DYNAMIC_PLT_RELOCATION_TYPE = 20,
+    DYNAMIC_DEBUG = 21,
+    DYNAMIC_JUMP_RELOCATION = 23,
+    DYNAMIC_TEXT_RELOCATION = 22,
+    DYNAMIC_BIND_NOW = 24,
+    DYNAMIC_INIT_ARRAY = 25,
+    DYNAMIC_FINI_ARRAY = 26,
+    DYNAMIC_INIT_ARRAY_SIZE = 27,
+    DYNAMIC_FINI_ARRAY_SIZE = 28,
+    DYNAMIC_RUNPATH = 29,
+    DYNAMIC_FLAGS = 30,
+    DYNAMIC_PREINIT_ARRAY = 32,
+    DYNAMIC_PREINIT_ARRAY_SIZE = 33,
+    DYNAMIC_RELR_SIZE = 35,
+    DYNAMIC_RELR = 36,
+    DYNAMIC_RELR_ENTRY = 37,
+    DYNAMIC_GNU_RELA_COUNT = 0x6ffffff9,
+    RELOCATION_X86_64_RELATIVE = 8,
+    SYMBOL_UNDEFINED = 0,
+    SYMBOL_FUNCTION = 2,
+    PAGE_SIZE = 4096,
+    MAXIMUM_PROGRAM_HEADERS = 16,
+    MAXIMUM_DYNAMIC_ENTRIES = 64,
+    MAXIMUM_SHARED_LOADS = 8,
+    MAXIMUM_SHARED_FILE_BYTES = 64 * 1024,
+    MAXIMUM_DYNAMIC_SYMBOLS = 256,
 };
 
-static const char pass_marker[] = "ARACH_C2_RUNTIME_LINKER_PASS\n";
+static const uintptr_t shared_object_base = UINT64_C(0x30000000);
+static const char expected_path[] = "/exec-target";
+static const char expected_needed[] = "libarach-probe.so";
+static const char expected_symbol[] = "arach_shared_probe";
 static const char enter_marker[] = "ARACH_C2_RUNTIME_LINKER_ENTER\n";
+static const char needed_marker[] = "ARACH_C2_DT_NEEDED_PASS\n";
+static const char relocation_marker[] = "ARACH_C2_SHARED_RELOCATION_PASS\n";
+static const char pass_marker[] = "ARACH_C2_RUNTIME_LINKER_PASS\n";
 static const char stack_failure[] = "ARACH_C2_LINKER_STACK_FAIL\n";
 static const char headers_failure[] = "ARACH_C2_LINKER_HEADERS_FAIL\n";
 static const char base_failure[] = "ARACH_C2_LINKER_BASE_FAIL\n";
 static const char pointers_failure[] = "ARACH_C2_LINKER_POINTERS_FAIL\n";
 static const char path_failure[] = "ARACH_C2_LINKER_PATH_FAIL\n";
 static const char random_failure[] = "ARACH_C2_LINKER_RANDOM_FAIL\n";
-static const char expected_path[] = "/exec-target";
+static const char dependency_failure[] = "ARACH_C2_LINKER_DEPENDENCY_FAIL\n";
+static const char shared_open_failure[] = "ARACH_C2_LINKER_SHARED_OPEN_FAIL\n";
+static const char shared_elf_failure[] = "ARACH_C2_LINKER_SHARED_ELF_FAIL\n";
+static const char shared_map_failure[] = "ARACH_C2_LINKER_SHARED_MAP_FAIL\n";
+static const char shared_dynamic_failure[] = "ARACH_C2_LINKER_SHARED_DYNAMIC_FAIL\n";
+static const char shared_relocation_failure[] =
+    "ARACH_C2_LINKER_SHARED_RELOCATION_FAIL\n";
+static const char shared_symbol_failure[] = "ARACH_C2_LINKER_SHARED_SYMBOL_FAIL\n";
+static const char shared_call_failure[] = "ARACH_C2_LINKER_SHARED_CALL_FAIL\n";
+
+typedef struct {
+    uint8_t identity[16];
+    uint16_t type;
+    uint16_t machine;
+    uint32_t version;
+    uint64_t entry;
+    uint64_t program_header_offset;
+    uint64_t section_header_offset;
+    uint32_t flags;
+    uint16_t header_size;
+    uint16_t program_header_size;
+    uint16_t program_header_count;
+    uint16_t section_header_size;
+    uint16_t section_header_count;
+    uint16_t section_name_index;
+} Elf64Header;
+
+typedef struct {
+    uint32_t type;
+    uint32_t flags;
+    uint64_t offset;
+    uint64_t virtual_address;
+    uint64_t physical_address;
+    uint64_t file_size;
+    uint64_t memory_size;
+    uint64_t alignment;
+} Elf64ProgramHeader;
+
+typedef struct {
+    int64_t tag;
+    uint64_t value;
+} Elf64Dynamic;
+
+typedef struct {
+    uint32_t name;
+    uint8_t information;
+    uint8_t other;
+    uint16_t section_index;
+    uint64_t value;
+    uint64_t size;
+} Elf64Symbol;
+
+typedef struct {
+    uint64_t offset;
+    uint64_t information;
+    int64_t addend;
+} Elf64Rela;
+
+typedef struct {
+    uintptr_t address;
+    size_t memory_size;
+    size_t mapping_size;
+    uint32_t flags;
+} MappedLoad;
+
+typedef struct {
+    uintptr_t hash;
+    uintptr_t string_table;
+    uintptr_t symbol_table;
+    uintptr_t relocations;
+    size_t string_size;
+    size_t relocation_size;
+    size_t relocation_entry_size;
+    size_t symbol_entry_size;
+    size_t soname_offset;
+    size_t relative_count;
+    int has_soname;
+    int has_relative_count;
+} SharedDynamic;
+
+_Static_assert(sizeof(Elf64Header) == 64, "ELF64 header layout");
+_Static_assert(sizeof(Elf64ProgramHeader) == 56, "ELF64 program header layout");
+_Static_assert(sizeof(Elf64Dynamic) == 16, "ELF64 dynamic entry layout");
+_Static_assert(sizeof(Elf64Symbol) == 24, "ELF64 symbol layout");
+_Static_assert(sizeof(Elf64Rela) == 24, "ELF64 relocation layout");
 
 extern void _start(void);
+uintptr_t arach_runtime_linker_start(const uintptr_t *stack);
 
-static long syscall3(uint64_t number, uint64_t first, uint64_t second,
-                     uint64_t third) {
+static long syscall6(uint64_t number, uint64_t first, uint64_t second,
+                     uint64_t third, uint64_t fourth, uint64_t fifth,
+                     uint64_t sixth) {
     register uint64_t rax __asm__("rax") = number;
     register uint64_t rdi __asm__("rdi") = first;
     register uint64_t rsi __asm__("rsi") = second;
     register uint64_t rdx __asm__("rdx") = third;
+    register uint64_t r10 __asm__("r10") = fourth;
+    register uint64_t r8 __asm__("r8") = fifth;
+    register uint64_t r9 __asm__("r9") = sixth;
     __asm__ volatile("syscall"
                      : "+a"(rax)
-                     : "D"(rdi), "S"(rsi), "d"(rdx)
+                     : "D"(rdi), "S"(rsi), "d"(rdx), "r"(r10), "r"(r8),
+                       "r"(r9)
                      : "rcx", "r11", "memory");
     return (long)rax;
 }
+
+static long syscall3(uint64_t number, uint64_t first, uint64_t second,
+                     uint64_t third) {
+    return syscall6(number, first, second, third, 0, 0, 0);
+}
+
+static int syscall_failed(long result) { return result < 0; }
 
 static void fail(void) {
     (void)syscall3(SYS_EXIT_GROUP, 127, 0, 0);
@@ -52,6 +225,10 @@ static void fail_with(const char *marker, size_t length) {
     fail();
 }
 
+static int write_marker(const char *marker, size_t length) {
+    return syscall3(SYS_WRITE, 1, (uintptr_t)marker, length) == (long)length;
+}
+
 static int bytes_equal(const char *left, const char *right, size_t length) {
     for (size_t index = 0; index < length; ++index) {
         if (left[index] != right[index]) {
@@ -61,9 +238,593 @@ static int bytes_equal(const char *left, const char *right, size_t length) {
     return 1;
 }
 
+static int bounded_string_equals(const char *value, size_t capacity,
+                                 const char *expected,
+                                 size_t expected_length) {
+    return expected_length < capacity &&
+           bytes_equal(value, expected, expected_length) &&
+           value[expected_length] == '\0';
+}
+
+static int checked_add(uintptr_t base, uint64_t offset, uintptr_t *result) {
+    if (offset > UINTPTR_MAX - base) {
+        return 0;
+    }
+    *result = base + (uintptr_t)offset;
+    return 1;
+}
+
+static int checked_range(uintptr_t start, size_t length, uintptr_t *end) {
+    if (length > UINTPTR_MAX - start) {
+        return 0;
+    }
+    *end = start + length;
+    return 1;
+}
+
+static int round_to_pages(size_t length, size_t *rounded) {
+    if (length == 0 || length > SIZE_MAX - (PAGE_SIZE - 1)) {
+        return 0;
+    }
+    *rounded = (length + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
+    return 1;
+}
+
+static int main_range_contains(const Elf64ProgramHeader *headers,
+                               size_t header_count, uintptr_t load_base,
+                               uintptr_t address, size_t length) {
+    uintptr_t requested_end = 0;
+    if (!checked_range(address, length, &requested_end)) {
+        return 0;
+    }
+    for (size_t index = 0; index < header_count; ++index) {
+        if (headers[index].type != PROGRAM_LOAD) {
+            continue;
+        }
+        uintptr_t start = 0;
+        uintptr_t end = 0;
+        if (!checked_add(load_base, headers[index].virtual_address, &start) ||
+            headers[index].memory_size > SIZE_MAX ||
+            !checked_range(start, (size_t)headers[index].memory_size, &end)) {
+            return 0;
+        }
+        if (address >= start && requested_end <= end) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int discover_dependency(const Elf64ProgramHeader *headers,
+                               size_t header_count, uintptr_t *main_base,
+                               char *path, size_t path_capacity) {
+    const Elf64ProgramHeader *header_table = NULL;
+    const Elf64ProgramHeader *dynamic_program = NULL;
+    for (size_t index = 0; index < header_count; ++index) {
+        if (headers[index].type == PROGRAM_HEADERS) {
+            if (header_table != NULL) {
+                return 0;
+            }
+            header_table = &headers[index];
+        } else if (headers[index].type == PROGRAM_DYNAMIC) {
+            if (dynamic_program != NULL) {
+                return 0;
+            }
+            dynamic_program = &headers[index];
+        }
+    }
+    if (header_table == NULL || dynamic_program == NULL ||
+        header_table->virtual_address > (uintptr_t)headers ||
+        dynamic_program->memory_size < sizeof(Elf64Dynamic) ||
+        dynamic_program->memory_size / sizeof(Elf64Dynamic) >
+            MAXIMUM_DYNAMIC_ENTRIES) {
+        return 0;
+    }
+    *main_base = (uintptr_t)headers - header_table->virtual_address;
+
+    uintptr_t dynamic_address = 0;
+    if (!checked_add(*main_base, dynamic_program->virtual_address,
+                     &dynamic_address) ||
+        !main_range_contains(headers, header_count, *main_base, dynamic_address,
+                             (size_t)dynamic_program->memory_size)) {
+        return 0;
+    }
+    const Elf64Dynamic *dynamic = (const Elf64Dynamic *)dynamic_address;
+    size_t needed_offset = 0;
+    size_t string_size = 0;
+    uintptr_t string_table = 0;
+    int has_needed = 0;
+    int has_terminator = 0;
+    size_t entries = (size_t)dynamic_program->memory_size / sizeof(*dynamic);
+    for (size_t index = 0; index < entries; ++index) {
+        switch (dynamic[index].tag) {
+        case DYNAMIC_NULL:
+            has_terminator = 1;
+            index = entries;
+            break;
+        case DYNAMIC_NEEDED:
+            if (has_needed || dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            needed_offset = (size_t)dynamic[index].value;
+            has_needed = 1;
+            break;
+        case DYNAMIC_STRING_TABLE:
+            if (string_table != 0 ||
+                !checked_add(*main_base, dynamic[index].value,
+                             &string_table)) {
+                return 0;
+            }
+            break;
+        case DYNAMIC_STRING_SIZE:
+            if (string_size != 0 || dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            string_size = (size_t)dynamic[index].value;
+            break;
+        default:
+            return 0;
+        }
+    }
+    if (!has_terminator || !has_needed || string_table == 0 ||
+        string_size == 0 || needed_offset >= string_size ||
+        !main_range_contains(headers, header_count, *main_base, string_table,
+                             string_size)) {
+        return 0;
+    }
+    const char *needed = (const char *)(string_table + needed_offset);
+    size_t available = string_size - needed_offset;
+    if (!bounded_string_equals(needed, available, expected_needed,
+                               sizeof(expected_needed) - 1) ||
+        path_capacity < sizeof(expected_needed) + 1) {
+        return 0;
+    }
+    path[0] = '/';
+    for (size_t index = 0; index < sizeof(expected_needed); ++index) {
+        path[index + 1] = needed[index];
+    }
+    return 1;
+}
+
+static int mapped_range_contains(const MappedLoad *loads, size_t load_count,
+                                 uintptr_t address, size_t length,
+                                 uint32_t required_flags) {
+    uintptr_t requested_end = 0;
+    if (!checked_range(address, length, &requested_end)) {
+        return 0;
+    }
+    for (size_t index = 0; index < load_count; ++index) {
+        uintptr_t load_end = 0;
+        if (!checked_range(loads[index].address, loads[index].memory_size,
+                           &load_end)) {
+            return 0;
+        }
+        if (address >= loads[index].address && requested_end <= load_end &&
+            (loads[index].flags & required_flags) == required_flags) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int mappings_overlap(const MappedLoad *loads, size_t load_count,
+                            uintptr_t address, size_t length) {
+    uintptr_t end = 0;
+    if (!checked_range(address, length, &end)) {
+        return 1;
+    }
+    for (size_t index = 0; index < load_count; ++index) {
+        uintptr_t existing_end = 0;
+        if (!checked_range(loads[index].address, loads[index].mapping_size,
+                           &existing_end) ||
+            (address < existing_end && loads[index].address < end)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void zero_bytes(uint8_t *bytes, size_t length) {
+    for (size_t index = 0; index < length; ++index) {
+        bytes[index] = 0;
+    }
+}
+
+static int parse_shared_dynamic(const Elf64ProgramHeader *headers,
+                                size_t header_count, const MappedLoad *loads,
+                                size_t load_count, SharedDynamic *result) {
+    const Elf64ProgramHeader *dynamic_program = NULL;
+    for (size_t index = 0; index < header_count; ++index) {
+        if (headers[index].type == PROGRAM_DYNAMIC) {
+            if (dynamic_program != NULL) {
+                return 0;
+            }
+            dynamic_program = &headers[index];
+        }
+    }
+    if (dynamic_program == NULL ||
+        dynamic_program->memory_size < sizeof(Elf64Dynamic) ||
+        dynamic_program->memory_size / sizeof(Elf64Dynamic) >
+            MAXIMUM_DYNAMIC_ENTRIES) {
+        return 0;
+    }
+    uintptr_t address = 0;
+    if (!checked_add(shared_object_base, dynamic_program->virtual_address,
+                     &address) ||
+        !mapped_range_contains(loads, load_count, address,
+                               (size_t)dynamic_program->memory_size, 0)) {
+        return 0;
+    }
+    const Elf64Dynamic *dynamic = (const Elf64Dynamic *)address;
+    size_t entries = (size_t)dynamic_program->memory_size / sizeof(*dynamic);
+    int terminator = 0;
+    result->hash = 0;
+    result->string_table = 0;
+    result->symbol_table = 0;
+    result->relocations = 0;
+    result->string_size = 0;
+    result->relocation_size = 0;
+    result->relocation_entry_size = 0;
+    result->symbol_entry_size = 0;
+    result->soname_offset = 0;
+    result->relative_count = 0;
+    result->has_soname = 0;
+    result->has_relative_count = 0;
+    for (size_t index = 0; index < entries; ++index) {
+        uintptr_t pointer = 0;
+        switch (dynamic[index].tag) {
+        case DYNAMIC_NULL:
+            terminator = 1;
+            index = entries;
+            break;
+        case DYNAMIC_HASH:
+            if (result->hash != 0 ||
+                !checked_add(shared_object_base, dynamic[index].value,
+                             &pointer)) {
+                return 0;
+            }
+            result->hash = pointer;
+            break;
+        case DYNAMIC_STRING_TABLE:
+            if (result->string_table != 0 ||
+                !checked_add(shared_object_base, dynamic[index].value,
+                             &pointer)) {
+                return 0;
+            }
+            result->string_table = pointer;
+            break;
+        case DYNAMIC_SYMBOL_TABLE:
+            if (result->symbol_table != 0 ||
+                !checked_add(shared_object_base, dynamic[index].value,
+                             &pointer)) {
+                return 0;
+            }
+            result->symbol_table = pointer;
+            break;
+        case DYNAMIC_RELA:
+            if (result->relocations != 0 ||
+                !checked_add(shared_object_base, dynamic[index].value,
+                             &pointer)) {
+                return 0;
+            }
+            result->relocations = pointer;
+            break;
+        case DYNAMIC_STRING_SIZE:
+            if (result->string_size != 0 || dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->string_size = (size_t)dynamic[index].value;
+            break;
+        case DYNAMIC_RELA_SIZE:
+            if (result->relocation_size != 0 ||
+                dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->relocation_size = (size_t)dynamic[index].value;
+            break;
+        case DYNAMIC_RELA_ENTRY:
+            if (result->relocation_entry_size != 0 ||
+                dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->relocation_entry_size = (size_t)dynamic[index].value;
+            break;
+        case DYNAMIC_SYMBOL_ENTRY:
+            if (result->symbol_entry_size != 0 ||
+                dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->symbol_entry_size = (size_t)dynamic[index].value;
+            break;
+        case DYNAMIC_SONAME:
+            if (result->has_soname || dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->soname_offset = (size_t)dynamic[index].value;
+            result->has_soname = 1;
+            break;
+        case DYNAMIC_SYMBOLIC:
+            if (dynamic[index].value != 0) {
+                return 0;
+            }
+            break;
+        case DYNAMIC_FLAGS:
+            if (dynamic[index].value != 2) {
+                return 0;
+            }
+            break;
+        case DYNAMIC_GNU_RELA_COUNT:
+            if (result->has_relative_count ||
+                dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->relative_count = (size_t)dynamic[index].value;
+            result->has_relative_count = 1;
+            break;
+        case DYNAMIC_NEEDED:
+        case DYNAMIC_PLT_RELOCATION_SIZE:
+        case DYNAMIC_PLT_GOT:
+        case DYNAMIC_INIT:
+        case DYNAMIC_FINI:
+        case DYNAMIC_REL:
+        case DYNAMIC_REL_SIZE:
+        case DYNAMIC_REL_ENTRY:
+        case DYNAMIC_PLT_RELOCATION_TYPE:
+        case DYNAMIC_DEBUG:
+        case DYNAMIC_JUMP_RELOCATION:
+        case DYNAMIC_TEXT_RELOCATION:
+        case DYNAMIC_BIND_NOW:
+        case DYNAMIC_INIT_ARRAY:
+        case DYNAMIC_FINI_ARRAY:
+        case DYNAMIC_INIT_ARRAY_SIZE:
+        case DYNAMIC_FINI_ARRAY_SIZE:
+        case DYNAMIC_RUNPATH:
+        case DYNAMIC_PREINIT_ARRAY:
+        case DYNAMIC_PREINIT_ARRAY_SIZE:
+        case DYNAMIC_RELR_SIZE:
+        case DYNAMIC_RELR:
+        case DYNAMIC_RELR_ENTRY:
+            return 0;
+        default:
+            return 0;
+        }
+    }
+    return terminator && result->hash != 0 && result->string_table != 0 &&
+           result->symbol_table != 0 && result->relocations != 0 &&
+           result->string_size != 0 && result->relocation_size != 0 &&
+           result->relocation_entry_size == sizeof(Elf64Rela) &&
+           result->symbol_entry_size == sizeof(Elf64Symbol) &&
+           result->has_soname &&
+           result->has_relative_count &&
+           result->relative_count ==
+               result->relocation_size / sizeof(Elf64Rela) &&
+           result->soname_offset < result->string_size &&
+           result->relocation_size % sizeof(Elf64Rela) == 0 &&
+           mapped_range_contains(loads, load_count, result->hash,
+                                 2 * sizeof(uint32_t), 0) &&
+           mapped_range_contains(loads, load_count, result->string_table,
+                                 result->string_size, 0) &&
+           mapped_range_contains(loads, load_count, result->relocations,
+                                 result->relocation_size, 0) &&
+           bounded_string_equals(
+               (const char *)(result->string_table + result->soname_offset),
+               result->string_size - result->soname_offset, expected_needed,
+               sizeof(expected_needed) - 1);
+}
+
+static int apply_shared_relocations(const MappedLoad *loads, size_t load_count,
+                                    const SharedDynamic *dynamic) {
+    const Elf64Rela *relocations = (const Elf64Rela *)dynamic->relocations;
+    size_t count = dynamic->relocation_size / sizeof(*relocations);
+    if (count == 0 || count > MAXIMUM_DYNAMIC_ENTRIES) {
+        return 0;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        uint32_t relocation_type = (uint32_t)relocations[index].information;
+        uint32_t symbol = (uint32_t)(relocations[index].information >> 32);
+        uintptr_t target = 0;
+        uintptr_t value = 0;
+        if (relocation_type != RELOCATION_X86_64_RELATIVE || symbol != 0 ||
+            relocations[index].addend < 0 ||
+            !checked_add(shared_object_base, relocations[index].offset,
+                         &target) ||
+            !checked_add(shared_object_base,
+                         (uint64_t)relocations[index].addend, &value) ||
+            target % sizeof(uintptr_t) != 0 ||
+            !mapped_range_contains(loads, load_count, target,
+                                   sizeof(uintptr_t), PROGRAM_WRITABLE) ||
+            !mapped_range_contains(loads, load_count, value, 1, 0)) {
+            return 0;
+        }
+        *(volatile uintptr_t *)target = value;
+        if (*(volatile const uintptr_t *)target != value) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int find_shared_symbol(const MappedLoad *loads, size_t load_count,
+                              const SharedDynamic *dynamic,
+                              uintptr_t *symbol_address) {
+    const uint32_t *hash = (const uint32_t *)dynamic->hash;
+    uint32_t chain_count = hash[1];
+    if (chain_count == 0 || chain_count > MAXIMUM_DYNAMIC_SYMBOLS ||
+        !mapped_range_contains(loads, load_count, dynamic->symbol_table,
+                               (size_t)chain_count * sizeof(Elf64Symbol), 0)) {
+        return 0;
+    }
+    const Elf64Symbol *symbols = (const Elf64Symbol *)dynamic->symbol_table;
+    for (uint32_t index = 0; index < chain_count; ++index) {
+        if (symbols[index].name >= dynamic->string_size ||
+            symbols[index].section_index == SYMBOL_UNDEFINED ||
+            (symbols[index].information & 0x0f) != SYMBOL_FUNCTION) {
+            continue;
+        }
+        const char *name =
+            (const char *)(dynamic->string_table + symbols[index].name);
+        size_t available = dynamic->string_size - symbols[index].name;
+        uintptr_t address = 0;
+        if (bounded_string_equals(name, available, expected_symbol,
+                                  sizeof(expected_symbol) - 1) &&
+            checked_add(shared_object_base, symbols[index].value, &address) &&
+            mapped_range_contains(loads, load_count, address,
+                                  symbols[index].size == 0
+                                      ? 1
+                                      : (size_t)symbols[index].size,
+                                  PROGRAM_EXECUTABLE)) {
+            *symbol_address = address;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int seal_shared_loads(const MappedLoad *loads, size_t load_count) {
+    for (size_t index = 0; index < load_count; ++index) {
+        uint64_t protection = PROT_READ;
+        if ((loads[index].flags & PROGRAM_READABLE) == 0 ||
+            ((loads[index].flags & PROGRAM_WRITABLE) != 0 &&
+             (loads[index].flags & PROGRAM_EXECUTABLE) != 0)) {
+            return 0;
+        }
+        if ((loads[index].flags & PROGRAM_WRITABLE) != 0) {
+            protection |= PROT_WRITE;
+        }
+        if ((loads[index].flags & PROGRAM_EXECUTABLE) != 0) {
+            protection |= PROT_EXEC;
+        }
+        if (syscall3(SYS_MPROTECT, loads[index].address,
+                     loads[index].mapping_size, protection) != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static uintptr_t load_shared_object(const char *path) {
+    long descriptor = syscall3(SYS_OPEN, (uintptr_t)path, O_RDONLY, 0);
+    if (descriptor < 3) {
+        fail_with(shared_open_failure, sizeof(shared_open_failure) - 1);
+    }
+    long file_size = syscall3(SYS_LSEEK, (uint64_t)descriptor, 0, SEEK_END);
+    if (file_size < (long)sizeof(Elf64Header) ||
+        file_size > MAXIMUM_SHARED_FILE_BYTES ||
+        syscall3(SYS_LSEEK, (uint64_t)descriptor, 0, SEEK_SET) != 0) {
+        fail_with(shared_open_failure, sizeof(shared_open_failure) - 1);
+    }
+    size_t temporary_size = 0;
+    if (!round_to_pages((size_t)file_size, &temporary_size)) {
+        fail_with(shared_elf_failure, sizeof(shared_elf_failure) - 1);
+    }
+    long temporary_result =
+        syscall6(SYS_MMAP, 0, (uint64_t)file_size, PROT_READ, MAP_PRIVATE,
+                 (uint64_t)descriptor, 0);
+    if (syscall_failed(temporary_result)) {
+        fail_with(shared_map_failure, sizeof(shared_map_failure) - 1);
+    }
+    uintptr_t temporary = (uintptr_t)temporary_result;
+    const Elf64Header *header = (const Elf64Header *)temporary;
+    if (header->identity[0] != 0x7f || header->identity[1] != 'E' ||
+        header->identity[2] != 'L' || header->identity[3] != 'F' ||
+        header->identity[4] != ELF_CLASS_64 ||
+        header->identity[5] != ELF_DATA_LITTLE_ENDIAN ||
+        header->identity[6] != ELF_VERSION_CURRENT ||
+        header->type != ELF_TYPE_SHARED_OBJECT ||
+        header->machine != ELF_MACHINE_X86_64 ||
+        header->version != ELF_VERSION_CURRENT ||
+        header->header_size != sizeof(Elf64Header) ||
+        header->program_header_size != sizeof(Elf64ProgramHeader) ||
+        header->program_header_count == 0 ||
+        header->program_header_count > MAXIMUM_PROGRAM_HEADERS ||
+        header->program_header_offset > (uint64_t)file_size ||
+        (uint64_t)header->program_header_count * sizeof(Elf64ProgramHeader) >
+            (uint64_t)file_size - header->program_header_offset) {
+        fail_with(shared_elf_failure, sizeof(shared_elf_failure) - 1);
+    }
+    const Elf64ProgramHeader *headers = (const Elf64ProgramHeader *)(
+        temporary + (uintptr_t)header->program_header_offset);
+    MappedLoad loads[MAXIMUM_SHARED_LOADS];
+    size_t load_count = 0;
+    for (size_t index = 0; index < header->program_header_count; ++index) {
+        const Elf64ProgramHeader *program = &headers[index];
+        if (program->type != PROGRAM_LOAD) {
+            continue;
+        }
+        if (load_count == MAXIMUM_SHARED_LOADS || program->memory_size == 0 ||
+            program->file_size == 0 ||
+            program->file_size > program->memory_size ||
+            program->memory_size > SIZE_MAX || program->file_size > SIZE_MAX ||
+            program->offset % PAGE_SIZE != 0 ||
+            program->virtual_address % PAGE_SIZE != 0 ||
+            program->alignment != PAGE_SIZE ||
+            program->offset > (uint64_t)file_size ||
+            program->file_size > (uint64_t)file_size - program->offset ||
+            (program->flags & PROGRAM_READABLE) == 0 ||
+            ((program->flags & PROGRAM_WRITABLE) != 0 &&
+             (program->flags & PROGRAM_EXECUTABLE) != 0)) {
+            fail_with(shared_elf_failure, sizeof(shared_elf_failure) - 1);
+        }
+        size_t mapping_size = 0;
+        size_t available_file_span = 0;
+        if (!round_to_pages((size_t)program->memory_size, &mapping_size) ||
+            !round_to_pages((size_t)file_size - (size_t)program->offset,
+                            &available_file_span) ||
+            mapping_size > available_file_span) {
+            fail_with(shared_elf_failure, sizeof(shared_elf_failure) - 1);
+        }
+        uintptr_t address = 0;
+        if (!checked_add(shared_object_base, program->virtual_address,
+                         &address) ||
+            address < shared_object_base ||
+            address + mapping_size >
+                shared_object_base + MAXIMUM_SHARED_FILE_BYTES ||
+            mappings_overlap(loads, load_count, address, mapping_size)) {
+            fail_with(shared_map_failure, sizeof(shared_map_failure) - 1);
+        }
+        long mapped = syscall6(SYS_MMAP, address, mapping_size,
+                               PROT_READ | PROT_WRITE, MAP_PRIVATE,
+                               (uint64_t)descriptor, program->offset);
+        if (mapped != (long)address) {
+            fail_with(shared_map_failure, sizeof(shared_map_failure) - 1);
+        }
+        zero_bytes((uint8_t *)(address + (size_t)program->file_size),
+                   mapping_size - (size_t)program->file_size);
+        loads[load_count++] = (MappedLoad){
+            .address = address,
+            .memory_size = (size_t)program->memory_size,
+            .mapping_size = mapping_size,
+            .flags = program->flags,
+        };
+    }
+    if (load_count == 0) {
+        fail_with(shared_elf_failure, sizeof(shared_elf_failure) - 1);
+    }
+
+    SharedDynamic dynamic;
+    if (!parse_shared_dynamic(headers, header->program_header_count, loads,
+                              load_count, &dynamic)) {
+        fail_with(shared_dynamic_failure,
+                  sizeof(shared_dynamic_failure) - 1);
+    }
+    if (!apply_shared_relocations(loads, load_count, &dynamic)) {
+        fail_with(shared_relocation_failure,
+                  sizeof(shared_relocation_failure) - 1);
+    }
+    uintptr_t symbol = 0;
+    if (!find_shared_symbol(loads, load_count, &dynamic, &symbol)) {
+        fail_with(shared_symbol_failure, sizeof(shared_symbol_failure) - 1);
+    }
+    if (!seal_shared_loads(loads, load_count) ||
+        syscall3(SYS_CLOSE, (uint64_t)descriptor, 0, 0) != 0 ||
+        syscall3(SYS_MUNMAP, temporary, temporary_size, 0) != 0) {
+        fail_with(shared_map_failure, sizeof(shared_map_failure) - 1);
+    }
+    return symbol;
+}
+
 uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
-    if (syscall3(SYS_WRITE, 1, (uintptr_t)enter_marker,
-                 sizeof(enter_marker) - 1) != (long)(sizeof(enter_marker) - 1)) {
+    if (!write_marker(enter_marker, sizeof(enter_marker) - 1)) {
         fail();
     }
     if (stack == NULL || stack[0] != 1) {
@@ -140,15 +901,19 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
     }
 
     const uintptr_t own_entry = (uintptr_t)&_start;
-    if (!found_terminator || program_headers == 0 || program_header_size != 56 ||
-        program_header_count < 4 || page_size != 4096) {
+    if (!found_terminator || program_headers == 0 ||
+        program_header_size != sizeof(Elf64ProgramHeader) ||
+        program_header_count < 4 ||
+        program_header_count > MAXIMUM_PROGRAM_HEADERS ||
+        page_size != PAGE_SIZE) {
         fail_with(headers_failure, sizeof(headers_failure) - 1);
     }
     if (runtime_linker_base == 0 || own_entry < runtime_linker_base ||
         own_entry >= runtime_linker_base + (64 * 1024)) {
         fail_with(base_failure, sizeof(base_failure) - 1);
     }
-    if (executable_entry == 0 || random_address == 0 || executable_path == 0) {
+    if (executable_entry == 0 || random_address == 0 ||
+        executable_path == 0) {
         fail_with(pointers_failure, sizeof(pointers_failure) - 1);
     }
     if (!bytes_equal((const char *)executable_path, expected_path,
@@ -160,10 +925,31 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
     for (size_t index = 0; index < 16; ++index) {
         aggregate |= random[index];
     }
-    if (aggregate == 0 ||
-        syscall3(SYS_WRITE, 1, (uintptr_t)pass_marker,
-                 sizeof(pass_marker) - 1) != (long)(sizeof(pass_marker) - 1)) {
+    if (aggregate == 0) {
         fail_with(random_failure, sizeof(random_failure) - 1);
+    }
+
+    char dependency_path[sizeof(expected_needed) + 1];
+    uintptr_t main_base = 0;
+    if (!discover_dependency((const Elf64ProgramHeader *)program_headers,
+                             program_header_count, &main_base,
+                             dependency_path, sizeof(dependency_path)) ||
+        main_base == 0 ||
+        !write_marker(needed_marker, sizeof(needed_marker) - 1)) {
+        fail_with(dependency_failure, sizeof(dependency_failure) - 1);
+    }
+    uintptr_t shared_symbol = load_shared_object(dependency_path);
+    typedef uint64_t (*SharedProbe)(uint64_t);
+    SharedProbe shared_probe = (SharedProbe)shared_symbol;
+    const uint64_t input = UINT64_C(0x1122334455667788);
+    const uint64_t expected =
+        input + UINT64_C(0x1020304050607080);
+    if (shared_probe(input) != expected ||
+        !write_marker(relocation_marker, sizeof(relocation_marker) - 1)) {
+        fail_with(shared_call_failure, sizeof(shared_call_failure) - 1);
+    }
+    if (!write_marker(pass_marker, sizeof(pass_marker) - 1)) {
+        fail();
     }
     return executable_entry;
 }

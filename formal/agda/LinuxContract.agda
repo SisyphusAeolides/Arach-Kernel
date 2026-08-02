@@ -21,6 +21,8 @@ data Gate : Set where
   linuxAuxiliaryVector runtimeLinkerEntry mainEntryTransfer : Gate
   generationBoundDescriptorSnapshot privateFileMapping : Gate
   writeXorExecuteTransition mappedCodeEntry : Gate
+  neededEntryDiscovery boundedSharedObjectSnapshot relativeRelocation : Gate
+  sharedObjectWxSeal sharedSymbolCall : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -124,6 +126,16 @@ record FileMappingCertificate : Set where
     writeXorExecuteTransitionEvidence : Measurement writeXorExecuteTransition
     mappedCodeEntryEvidence : Measurement mappedCodeEntry
 
+record SharedObjectCertificate : Set where
+  constructor sharedObjectCertificate
+  field
+    fileMapping : FileMappingCertificate
+    neededEntryDiscoveryEvidence : Measurement neededEntryDiscovery
+    boundedSharedObjectSnapshotEvidence : Measurement boundedSharedObjectSnapshot
+    relativeRelocationEvidence : Measurement relativeRelocation
+    sharedObjectWxSealEvidence : Measurement sharedObjectWxSeal
+    sharedSymbolCallEvidence : Measurement sharedSymbolCall
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -168,3 +180,10 @@ fileMappingRequiresDynamicExec :
   FileMappingCertificate -> DynamicExecCertificate
 fileMappingRequiresDynamicExec certificate =
   FileMappingCertificate.dynamicExec certificate
+
+-- Shared-object relocation structurally retains the qualified private-file
+-- mapping and W^X transition boundary used by every admitted segment.
+sharedObjectRequiresFileMapping :
+  SharedObjectCertificate -> FileMappingCertificate
+sharedObjectRequiresFileMapping certificate =
+  SharedObjectCertificate.fileMapping certificate

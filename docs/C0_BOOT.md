@@ -8,10 +8,10 @@ produce four boot artifacts and then execute them under UEFI/QEMU:
 3. Push PID 1;
 4. the bounded ring-3 syscall probe in `probes/c0`.
 
-The syscall probe embeds two additional independently hashed execution inputs:
-the PIE exec target and the freestanding C runtime-linker probe. They are
-materialized as separate Akashic files at runtime and are never treated as one
-prelinked blob.
+The syscall probe embeds three additional independently hashed execution
+inputs: the PIE exec target, the freestanding C runtime-linker probe, and a
+freestanding ET_DYN shared object. They are materialized as separate Akashic
+files at runtime and are never treated as one prelinked blob.
 
 `scripts/build-c0-bundle.sh` builds those artifacts from separate immutable
 component checkouts. `ARACH_PUSH_IMAGE` and `ARACH_BOOTSTRAP_IMAGE` remove the
@@ -55,11 +55,19 @@ containing all of the following evidence from the same bundle:
   shared descriptor access, independent private robust-futex and
   clear-child-tid block/wake paths, kernel owner-death publication, measured
   signal delivery/return, bounded whole-group exit, and clean supervisor reap;
-- `ARACH_C2_RUNTIME_LINKER_ENTER` and `ARACH_C2_RUNTIME_LINKER_PASS` were
-  emitted by the separately measured C interpreter after the kernel entered
-  its ET_DYN entry point and it validated `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`,
-  `AT_PAGESZ`, `AT_BASE`, `AT_ENTRY`, `AT_RANDOM`, and `AT_EXECFN`. The later
-  `ARACH_C1_EXECVE_PASS` proves control transferred to the Rust main image.
+- `ARACH_C2_RUNTIME_LINKER_ENTER` was emitted by the separately measured C
+  interpreter after the kernel entered its ET_DYN entry point and it validated
+  `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_BASE`, `AT_ENTRY`,
+  `AT_RANDOM`, and `AT_EXECFN`;
+- `ARACH_C2_DT_NEEDED_PASS` was emitted only after the interpreter derived the
+  PIE load bias, bounded its dynamic table, and discovered the exact shared
+  object name; and
+- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after private segment
+  snapshots, one real relative relocation, final W^X sealing, SysV symbol
+  lookup, and execution through the relocated shared-object state succeeded;
+- `ARACH_C2_RUNTIME_LINKER_PASS` was emitted after that complete transaction,
+  and the later `ARACH_C1_EXECVE_PASS` proves control transferred to the Rust
+  main image.
 
 The execution gate is implemented in the Arach validation workflow: CI installs
 QEMU/OVMF, runs this helper against the freshly assembled image, and uploads

@@ -101,14 +101,15 @@ monotonic timerfd implementation now covers create, settime, gettime,
 expiration reads, ownership, close, periodic expiry accounting, and readiness
 generation for edge-triggered epoll. These are real wake primitives for early
 COSMIC services, not a claim that every descriptor family is unified yet.
-General VMA split/merge, shared mappings, demand paging, shared-object dependency
-loading and relocation remain gated. Every other decoded
+General VMA split/merge, shared mappings, demand paging, and general
+multi-library linking remain gated. Every other decoded
 Linux syscall returns `ENOSYS` until its complete memory, signal, file, or IPC
 semantics are implemented and tested.
 
-The C0 probe now writes a PIE main executable and a separately built C runtime
-linker into Akashic VFS before replacing its own image through `execve`. The
-syscall copies bounded argv and environment vectors from the old hierarchy,
+The C0 probe now writes a PIE main executable, a separately built C runtime
+linker, and one ET_DYN shared object into Akashic VFS before replacing its own
+image through `execve`. The syscall copies bounded argv and environment vectors
+from the old hierarchy,
 validates `PT_INTERP`, atomically snapshots both files, measures them
 independently, and activation-validates one inactive composite W^X hierarchy.
 It constructs a bounded System V auxiliary vector and enters the runtime
@@ -116,10 +117,16 @@ linker, whose measured marker precedes its `AT_ENTRY` transfer to the Rust main
 image. Registry and lifecycle ownership exchange retains the PID generation;
 caught signal handlers and close-on-exec objects reset only after publication,
 and the former hierarchy is reclaimed only after CR3 points at the replacement.
-The admitted slice remains single-threaded at exec and each Akashic file is
-bounded to 64 KiB. This is the first `PT_INTERP` handoff slice, not completion
-of C2: general `DT_NEEDED` discovery, shared-object relocation, general file
-mapping semantics, ASLR, and production entropy remain fail-closed.
+The interpreter now derives the main load bias from `AT_PHDR`, discovers one
+allowlisted `DT_NEEDED` entry, opens that generation-owned Akashic object,
+privately maps its page-aligned segments RW, applies and verifies its real
+`R_X86_64_RELATIVE` relocation, seals final R/RW/RX permissions, resolves an
+exported symbol through the SysV hash table, and calls code that dereferences
+the relocated pointer. The admitted slice remains single-threaded at exec and
+each Akashic file is bounded to 64 KiB. This is one bounded shared-object
+profile, not completion of C2: recursive dependencies, external symbol/PLT/TLS
+relocations, constructors, symbol versions, general file mapping semantics,
+ASLR, and production entropy remain fail-closed.
 
 The measured probe now also creates a bounded pthread-style clone sharing VM,
 filesystem context, descriptor ownership, signal-handler identity, and SysV

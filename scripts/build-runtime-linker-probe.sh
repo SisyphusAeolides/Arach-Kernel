@@ -13,6 +13,7 @@ common_flags=(
     -ffreestanding
     -fPIC
     -fno-asynchronous-unwind-tables
+    -fno-builtin
     -fno-jump-tables
     -fno-stack-protector
     -fcf-protection=none
@@ -22,7 +23,9 @@ common_flags=(
     -mno-sse2
 )
 
-"$cc_bin" "${common_flags[@]}" -std=c11 -O2 -Wall -Wextra -Werror \
+"$cc_bin" "${common_flags[@]}" -std=c11 -O2 -Wall -Wextra -Wconversion \
+    -Werror -Wmissing-prototypes -Wpointer-arith -Wshadow -Wsign-conversion \
+    -Wstrict-prototypes \
     -c "$root/probes/runtime-linker/runtime_linker.c" \
     -o "$build_directory/runtime_linker.o"
 "$cc_bin" "${common_flags[@]}" \

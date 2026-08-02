@@ -108,19 +108,55 @@ base, and close-on-exec descriptors. The architecture return gate changes CR3
 before it reclaims the deferred old hierarchy.
 
 The measured QEMU chain requires the file-mapping markers above, followed by
-`ARACH_C1_LINUX_SYSCALL_PASS`, `ARACH_C2_RUNTIME_LINKER_ENTER`, then
-`ARACH_C2_RUNTIME_LINKER_PASS`, then `ARACH_C1_EXECVE_PASS`. The freestanding C
-runtime-linker probe validates the kernel-generated auxiliary vector and jumps
-to `AT_ENTRY`; the Rust main image then supplies the existing live-peer
+`ARACH_C1_LINUX_SYSCALL_PASS`, `ARACH_C2_RUNTIME_LINKER_ENTER`,
+`ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_SHARED_RELOCATION_PASS`,
+`ARACH_C2_RUNTIME_LINKER_PASS`, and then `ARACH_C1_EXECVE_PASS`. The
+freestanding C runtime-linker probe validates the kernel-generated auxiliary
+vector, completes the bounded shared-object transaction below, and jumps to
+`AT_ENTRY`; the Rust main image then supplies the existing live-peer
 `exit_group` evidence. Host tests separately cover bounded vector capture,
 atomic pair snapshots, independent measurements, composite installation,
 auxiliary-vector bytes, lifecycle epoch invalidation, registry exchange,
 close-on-exec families, signal reset, rollback ownership, and process-pool
 recycling. Idris 2 and Agda make those gates fields of a downstream dynamic exec
-certificate. This qualifies the kernel-to-interpreter handoff, not full dynamic
-linking: ELF dependency discovery, shared-library relocation, general VMA
-splitting, demand paging, ASLR, and cryptographically qualified process entropy
-remain separate acceptance gates.
+certificate.
+
+### Bounded dependency and shared-object relocation
+
+The first dependency profile admits exactly one `DT_NEEDED` entry in the main
+PIE. Its dynamic table may contain only `DT_NEEDED`, `DT_STRTAB`, `DT_STRSZ`,
+and `DT_NULL`. The runtime linker derives the main load bias from `AT_PHDR`,
+validates every dynamic pointer against a mapped main-image `PT_LOAD`, obtains
+the dependency name from the bounded string table, and constructs the path from
+that discovered name. The measured target names `libarach-probe.so`.
+
+The dependency must be a regular generation-owned Akashic file no larger than
+64 KiB. The linker opens it read-only, derives its exact size with `lseek`, and
+uses a temporary private file mapping to validate one x86-64 ET_DYN image with
+at most 16 program headers and eight page-aligned load segments. It then maps
+each segment at the isolated `0x30000000` bias as an eager private RW snapshot,
+zeros bytes beyond `p_filesz`, and keeps every page non-executable while
+relocation is possible.
+
+The admitted shared object has one exact SONAME, a SysV hash table, bounded
+dynamic symbol and string tables, and a bounded `DT_RELA` table containing only
+symbol-zero `R_X86_64_RELATIVE` entries whose targets lie in final-writable
+segments. The measured artifact contains one such relocation. Nested
+dependencies, constructors and destructors, PLT/GOT relocation, `DT_REL`,
+`DT_RELR`, text relocations, runpaths, and unknown dynamic tags are rejected.
+After relocation and readback, the linker changes each complete VMA to its
+declared R, RW, or RX permission, closes the descriptor, removes the temporary
+mapping, resolves `arach_shared_probe` through the validated SysV symbol table,
+and calls it. The function dereferences the relocated pointer, so the measured
+success marker cannot be emitted by merely parsing relocation metadata.
+
+Idris 2 and Agda place dependency discovery, bounded snapshot ownership,
+relative relocation, final W^X sealing, and observed symbol execution in a
+`SharedObjectCertificate` downstream of the prior file-mapping and dynamic-exec
+certificates. This is not a general system linker: recursive dependency graphs,
+external symbol and PLT relocation, TLS, constructors, symbol versions, search
+paths, lazy binding, ASLR, general VMA splitting, demand paging, and
+cryptographically qualified process entropy remain separate acceptance gates.
 
 The current tree passes external-Kbuild and static load-admission gates against
 real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux
