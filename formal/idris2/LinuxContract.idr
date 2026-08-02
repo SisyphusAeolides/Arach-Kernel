@@ -94,6 +94,8 @@ data Gate
   | DuplicateDependencyCoalescing
   | AcyclicRelocationOrder
   | GlobalSymbolScope
+  | FirstDefinitionWeakBinding
+  | UnresolvedWeakZero
   | DirectoryCreation
   | CanonicalRunpath
   | RunpathDependencySearch
@@ -333,8 +335,9 @@ record MultiObjectGraphCertificate where
 ||| The first runtime-initialization certificate retains the complete bounded
 ||| object graph and adds measured directory creation, canonical bounded
 ||| runpaths, direct-dependency search, one finite Variant-II TLS arena,
-||| checked static and general-dynamic relocations, a bounded dynamic-thread
-||| vector, one exact resolver boundary, and dependency-first initialization.
+||| checked static and general-dynamic relocations, Linux-compatible weak
+||| function binding, a bounded dynamic-thread vector, one exact resolver
+||| boundary, and dependency-first initialization.
 public export
 record RuntimeInitializationCertificate where
   constructor MkRuntimeInitializationCertificate
@@ -342,6 +345,8 @@ record RuntimeInitializationCertificate where
   directoryCreation : Measurement DirectoryCreation
   canonicalRunpath : Measurement CanonicalRunpath
   runpathDependencySearch : Measurement RunpathDependencySearch
+  firstDefinitionWeakBinding : Measurement FirstDefinitionWeakBinding
+  unresolvedWeakZero : Measurement UnresolvedWeakZero
   staticTlsLayout : Measurement StaticTlsLayout
   tlsRelocation : Measurement TlsRelocation
   dynamicTlsVector : Measurement DynamicTlsVector
@@ -465,9 +470,9 @@ multiObjectGraphRequiresDependencyGraph :
   MultiObjectGraphCertificate -> DependencyGraphCertificate
 multiObjectGraphRequiresDependencyGraph certificate = certificate.dependencyGraph
 
-||| Search-path, TLS, and initializer qualification cannot be projected without
-||| the complete dependency graph, relocation, sealing, and global-scope
-||| evidence.
+||| Search-path, weak binding, TLS, and initializer qualification cannot be
+||| projected without the complete dependency graph, relocation, sealing, and
+||| global-scope evidence.
 public export
 runtimeInitializationRequiresMultiObjectGraph :
   RuntimeInitializationCertificate -> MultiObjectGraphCertificate

@@ -211,7 +211,8 @@ The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_RUNPATH_PASS`,
 `ARACH_C2_SHARED_RELOCATION_PASS`,
-`ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_SYMBOL_VERSION_PASS`,
+`ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_WEAK_BINDING_PASS`,
+`ARACH_C2_SYMBOL_VERSION_PASS`,
 `ARACH_C2_STATIC_TLS_PASS`, `ARACH_C2_DYNAMIC_TLS_PASS`,
 `ARACH_C2_INITIALIZER_ORDER_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,
 `ARACH_C2_RUNTIME_LINKER_PASS`, `ARACH_C1_EXECVE_PASS`, and
@@ -268,10 +269,15 @@ Every object requires an exact SONAME, a SysV hash table, and bounded dynamic
 symbol and string tables. Each relocation table is bounded to 64 entries.
 Symbol-zero `R_X86_64_RELATIVE` entries are checked against final-writable
 targets and mapped addends. Eager `R_X86_64_JUMP_SLOT` entries must reference
-undefined default-visible global functions and final-writable GOT slots. With
-`DT_SYMBOLIC`, the requesting object is searched first; remaining definitions
-are searched in deterministic breadth-first object order. Each definition must
-be a bounded executable global function, and every written slot is read back.
+undefined default-visible global or weak functions and final-writable GOT
+slots. GNU's unversioned weak function-reference `STT_NOTYPE` form is admitted
+at version index zero. With `DT_SYMBOLIC`, the requesting object is searched
+first; remaining definitions are searched in deterministic breadth-first
+object order. The first matching bounded executable global or weak function
+wins, matching normal Linux runtime scope semantics. An unversioned weak
+function with no definition is written as zero; an unresolved global or
+explicitly versioned weak reference fails the transaction. Every written slot
+is read back.
 
 Versioned objects may provide one `DT_VERSYM` table, at most 16 linked
 `DT_VERDEF` records, at most 16 linked `DT_VERNEED` records, and at most 32
@@ -311,8 +317,9 @@ plan's callback in x86-64 process-entry register `RDX`. The main image invokes
 that callback once; objects run in reverse dependency order, each finalization
 array runs in reverse index order, and `DT_FINI` follows its array.
 Preinitializers, lazy binding, `DT_REL`, `DT_RELR`, text relocations,
-`DT_RPATH`, `$ORIGIN`, environment/cache/hwcaps search, weak symbols, version
-inheritance, and unknown dynamic tags remain rejected.
+`DT_RPATH`, `$ORIGIN`, environment/cache/hwcaps search, weak object/TLS
+symbols, unresolved versioned weak functions, version inheritance, and unknown
+dynamic tags remain rejected.
 
 The measured fixture is the four-object diamond `libarach-probe.so` to
 `libarach-provider.so` and `libarach-observer.so`, with both middle objects
@@ -321,17 +328,22 @@ observer, core; the core is snapshotted once and relocation order is core,
 provider, observer, probe. The core contributes three relative relocations and
 one `R_X86_64_TPOFF64`; each other object contributes one initializer and one
 finalizer-array relocation. The middle objects contribute two versioned object
-PLT edges each and the root contributes three; the provider adds the one
-unversioned resolver edge. Exact evidence therefore requires nine relative,
-three TLS, eight external, and ten versioned writes.
+PLT edges each and the root contributes three versioned plus two unversioned
+weak edges; the provider adds the one unversioned resolver edge. The first weak
+edge selects the provider's earlier weak definition even though the observer
+exports a later strong definition. The second has no definition and is written
+as zero without being called. Exact evidence therefore requires nine relative,
+three TLS, ten external, one resolved weak definition, one unresolved weak
+zero, and ten versioned writes.
 
 After relocation, the linker changes every complete VMA to its declared R,
 RW, or RX permission and executes core, provider, observer, and root
 initializers in that order. It then closes all four descriptors, removes all
 four temporary mappings, resolves `arach_shared_probe` through the root's SysV
-table, and calls it. Execution crosses all three root PLT edges and both PLT
-edges in each middle object before the core dereferences its
-relative-relocated pointer and FS-relative TLS word. Each dependent initializer
+table, and calls it. Execution measures the provider's first-scope weak result,
+crosses the callable root and middle-object PLT edges, and leaves the optional
+weak slot at zero before the core dereferences its relative-relocated pointer
+and FS-relative TLS word. Each dependent initializer
 records success only after observing its providers' state. After transfer to
 the main image, the callback executes root, observer, provider, and core
 finalizers; each array precedes that object's `DT_FINI`, and an eight-state TLS
@@ -346,14 +358,15 @@ observed cross-object call. `MultiObjectGraphCertificate` then requires bounded
 closure, breadth-first discovery, duplicate-dependency coalescing, acyclic
 provider-first order, and deterministic global symbol scope.
 `RuntimeInitializationCertificate` adds measured directory creation,
-canonical bounded runpaths, direct-dependency search, the finite startup TLS
-layout and DTV, checked TLS relocation/resolution, and initializer order while
-retaining the complete graph certificate. `RuntimeFinalizationCertificate`
+canonical bounded runpaths, direct-dependency search, first-definition weak
+binding, unresolved weak-to-zero behavior, the finite startup TLS layout and
+DTV, checked TLS relocation/resolution, and initializer order while retaining
+the complete graph certificate. `RuntimeFinalizationCertificate`
 then requires bounded GNU
 version tables, exact version-and-provider resolution, the process-entry
 finalizer handoff, and reverse finalizer execution. This is not yet a general
 system linker: late dynamic TLS allocation, general search policy, weak
-binding, lazy binding, ASLR, general VMA splitting, demand paging, and
+data/TLS binding, lazy binding, ASLR, general VMA splitting, demand paging, and
 cryptographically qualified process entropy remain separate acceptance gates.
 
 The current tree passes external-Kbuild and static load-admission gates against

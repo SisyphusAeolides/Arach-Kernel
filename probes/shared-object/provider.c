@@ -7,6 +7,7 @@ extern __thread __attribute__((tls_model("global-dynamic")))
 uint64_t arach_provider_value(uint64_t input);
 uint64_t arach_provider_finalize_step(uint64_t expected,
                                       uint64_t replacement);
+uint64_t arach_scope_choice(uint64_t input);
 void arach_provider_finish(void);
 static uint64_t provider_stage;
 
@@ -32,6 +33,11 @@ arach_provider_value(uint64_t input) {
 __attribute__((visibility("default"))) uint64_t
 arach_provider_finalize_step(uint64_t expected, uint64_t replacement) {
     return arach_core_finalize_step(expected, replacement);
+}
+
+__attribute__((weak, visibility("default"))) uint64_t
+arach_scope_choice(uint64_t input) {
+    return input + UINT64_C(0x13579bdf2468ace0);
 }
 
 static void __attribute__((destructor)) arach_provider_finalize_array(void) {

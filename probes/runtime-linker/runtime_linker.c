@@ -96,6 +96,7 @@ enum {
     RELOCATION_X86_64_TPOFF64 = 18,
     SYMBOL_UNDEFINED = 0,
     SYMBOL_BIND_GLOBAL = 1,
+    SYMBOL_BIND_WEAK = 2,
     SYMBOL_NO_TYPE = 0,
     SYMBOL_OBJECT = 1,
     SYMBOL_FUNCTION = 2,
@@ -156,6 +157,7 @@ static const char multi_object_marker[] =
 static const char relocation_marker[] = "ARACH_C2_SHARED_RELOCATION_PASS\n";
 static const char symbol_scope_marker[] =
     "ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS\n";
+static const char weak_binding_marker[] = "ARACH_C2_WEAK_BINDING_PASS\n";
 static const char version_marker[] = "ARACH_C2_SYMBOL_VERSION_PASS\n";
 static const char static_tls_marker[] = "ARACH_C2_STATIC_TLS_PASS\n";
 static const char dynamic_tls_marker[] = "ARACH_C2_DYNAMIC_TLS_PASS\n";
@@ -181,6 +183,8 @@ static const char shared_relocation_failure[] =
     "ARACH_C2_LINKER_SHARED_RELOCATION_FAIL\n";
 static const char shared_external_failure[] =
     "ARACH_C2_LINKER_SHARED_EXTERNAL_FAIL\n";
+static const char shared_weak_binding_failure[] =
+    "ARACH_C2_LINKER_WEAK_BINDING_FAIL\n";
 static const char shared_tls_failure[] = "ARACH_C2_LINKER_STATIC_TLS_FAIL\n";
 static const char shared_dynamic_tls_failure[] =
     "ARACH_C2_LINKER_DYNAMIC_TLS_FAIL\n";
@@ -388,7 +392,14 @@ typedef struct {
     size_t external;
     size_t tls;
     size_t versioned;
+    size_t weak_definitions;
+    size_t unresolved_weak;
 } RelocationEvidence;
+
+typedef struct {
+    uintptr_t address;
+    uint8_t binding;
+} FunctionSymbolResolution;
 
 typedef struct {
     uintptr_t address;
@@ -1699,6 +1710,16 @@ static int is_tls_resolver_reference(const LoadedObject *object,
            is_tls_resolver_name(name, name_length);
 }
 
+static int is_weak_function_reference(const Elf64Symbol *symbol) {
+    uint8_t symbol_type = symbol->information & 0x0f;
+    return symbol->section_index == SYMBOL_UNDEFINED &&
+           (symbol_type == SYMBOL_NO_TYPE ||
+            symbol_type == SYMBOL_FUNCTION) &&
+           (symbol->information >> 4) == SYMBOL_BIND_WEAK &&
+           symbol->other == SYMBOL_VISIBILITY_DEFAULT && symbol->value == 0 &&
+           symbol->size == 0;
+}
+
 static uint32_t version_name_hash(const char *name, size_t length) {
     uint32_t hash = 0;
     for (size_t index = 0; index < length; ++index) {
@@ -2019,7 +2040,8 @@ static int validate_symbol_versions(const LoadedObject *object,
         uint16_t version_index = raw & VERSION_INDEX_MASK;
         if (version_index == VERSION_INDEX_LOCAL) {
             if ((raw & VERSION_INDEX_HIDDEN) != 0 ||
-                !is_tls_resolver_reference(object, &symbols[index])) {
+                (!is_tls_resolver_reference(object, &symbols[index]) &&
+                 !is_weak_function_reference(&symbols[index]))) {
                 return 0;
             }
             continue;
@@ -2080,13 +2102,19 @@ static int validate_dynamic_symbols(const LoadedObject *object) {
         size_t name_length = 0;
         uint8_t symbol_type = symbol->information & 0x0f;
         uint8_t symbol_binding = symbol->information >> 4;
-        if (symbol_binding != SYMBOL_BIND_GLOBAL ||
+        if ((symbol_binding != SYMBOL_BIND_GLOBAL &&
+             symbol_binding != SYMBOL_BIND_WEAK) ||
             symbol->other != SYMBOL_VISIBILITY_DEFAULT ||
             !dynamic_symbol_name(object, symbol, &name, &name_length)) {
             return 0;
         }
-        if (symbol_type != SYMBOL_NO_TYPE &&
-            is_tls_resolver_name(name, name_length)) {
+        if (symbol_binding == SYMBOL_BIND_WEAK &&
+            symbol_type != SYMBOL_FUNCTION &&
+            !is_weak_function_reference(symbol)) {
+            return 0;
+        }
+        if (is_tls_resolver_name(name, name_length) &&
+            !is_tls_resolver_reference(object, symbol)) {
             return 0;
         }
         if (symbol_type == SYMBOL_OBJECT) {
@@ -2112,7 +2140,8 @@ static int validate_dynamic_symbols(const LoadedObject *object) {
             continue;
         }
         if (symbol_type == SYMBOL_NO_TYPE) {
-            if (!is_tls_resolver_reference(object, symbol)) {
+            if (!is_tls_resolver_reference(object, symbol) &&
+                !is_weak_function_reference(symbol)) {
                 return 0;
             }
             continue;
@@ -2170,7 +2199,8 @@ static int symbol_version_requirement(
     }
     if (version_index == VERSION_INDEX_LOCAL) {
         return (raw & VERSION_INDEX_HIDDEN) == 0 &&
-               is_tls_resolver_reference(object, &symbols[symbol_index]);
+               (is_tls_resolver_reference(object, &symbols[symbol_index]) ||
+                is_weak_function_reference(&symbols[symbol_index]));
     }
     if (symbols[symbol_index].section_index == SYMBOL_UNDEFINED) {
         if (!find_version_requirement(
@@ -2509,7 +2539,7 @@ static int find_exported_symbol_versioned(
     const LoadedObject *object, const char *expected_name,
     size_t expected_name_length,
     const SymbolVersionRequirement *version_requirement,
-    uintptr_t *symbol_address) {
+    FunctionSymbolResolution *resolution) {
     uint32_t symbol_count = 0;
     if (!dynamic_symbol_count(object, &symbol_count)) {
         return 0;
@@ -2517,10 +2547,12 @@ static int find_exported_symbol_versioned(
     const Elf64Symbol *symbols =
         (const Elf64Symbol *)object->dynamic.symbol_table;
     for (uint32_t index = 0; index < symbol_count; ++index) {
+        uint8_t binding = symbols[index].information >> 4;
         if (symbols[index].name >= object->dynamic.string_size ||
             symbols[index].section_index == SYMBOL_UNDEFINED ||
             (symbols[index].information & 0x0f) != SYMBOL_FUNCTION ||
-            (symbols[index].information >> 4) != SYMBOL_BIND_GLOBAL ||
+            (binding != SYMBOL_BIND_GLOBAL &&
+             binding != SYMBOL_BIND_WEAK) ||
             (symbols[index].other & 0x03) != SYMBOL_VISIBILITY_DEFAULT ||
             symbols[index].size == 0 || symbols[index].size > SIZE_MAX) {
             continue;
@@ -2538,7 +2570,8 @@ static int find_exported_symbol_versioned(
             mapped_range_contains(object->loads, object->load_count, address,
                                   (size_t)symbols[index].size,
                                   PROGRAM_EXECUTABLE)) {
-            *symbol_address = address;
+            resolution->address = address;
+            resolution->binding = binding;
             return 1;
         }
     }
@@ -2550,11 +2583,17 @@ static int find_exported_symbol(const LoadedObject *object,
                                 size_t expected_name_length,
                                 uintptr_t *symbol_address) {
     SymbolVersionRequirement version_requirement;
+    FunctionSymbolResolution resolution;
     zero_bytes((uint8_t *)&version_requirement,
                sizeof(version_requirement));
-    return find_exported_symbol_versioned(
-        object, expected_name, expected_name_length, &version_requirement,
-        symbol_address);
+    if (!find_exported_symbol_versioned(
+            object, expected_name, expected_name_length,
+            &version_requirement, &resolution) ||
+        resolution.binding != SYMBOL_BIND_GLOBAL) {
+        return 0;
+    }
+    *symbol_address = resolution.address;
+    return 1;
 }
 
 static int dynamic_symbol_name(const LoadedObject *object,
@@ -2657,7 +2696,7 @@ static int resolve_global_symbol_versioned(
     const ObjectGraph *graph, size_t requester_index, const char *name,
     size_t name_length,
     const SymbolVersionRequirement *version_requirement,
-    uintptr_t *address) {
+    FunctionSymbolResolution *resolution) {
     if (requester_index >= graph->object_count || name_length == 0 ||
         name_length > MAXIMUM_SYMBOL_NAME_BYTES) {
         return 0;
@@ -2665,20 +2704,20 @@ static int resolve_global_symbol_versioned(
     const LoadedObject *requester = &graph->objects[requester_index];
     if (requester->dynamic.has_symbolic &&
         find_exported_symbol_versioned(requester, name, name_length,
-                                       version_requirement, address)) {
+                                       version_requirement, resolution)) {
         return 1;
     }
     for (size_t index = 0; index < graph->object_count; ++index) {
         if (index != requester_index &&
             find_exported_symbol_versioned(
                 &graph->objects[index], name, name_length,
-                version_requirement, address)) {
+                version_requirement, resolution)) {
             return 1;
         }
     }
     if (!requester->dynamic.has_symbolic) {
         return find_exported_symbol_versioned(
-            requester, name, name_length, version_requirement, address);
+            requester, name, name_length, version_requirement, resolution);
     }
     return 0;
 }
@@ -2721,13 +2760,17 @@ static int apply_external_relocations(ObjectGraph *graph,
         const char *name = NULL;
         size_t name_length = 0;
         uintptr_t provider_symbol = 0;
+        FunctionSymbolResolution resolution;
         SymbolVersionRequirement version_requirement;
         uint8_t symbol_type = symbol->information & 0x0f;
+        uint8_t symbol_binding = symbol->information >> 4;
         int tls_resolver_reference =
             is_tls_resolver_reference(consumer, symbol);
         if (symbol->section_index != SYMBOL_UNDEFINED ||
-            (symbol_type != SYMBOL_FUNCTION && !tls_resolver_reference) ||
-            (symbol->information >> 4) != SYMBOL_BIND_GLOBAL ||
+            (symbol_type != SYMBOL_FUNCTION && !tls_resolver_reference &&
+             !is_weak_function_reference(symbol)) ||
+            (symbol_binding != SYMBOL_BIND_GLOBAL &&
+             symbol_binding != SYMBOL_BIND_WEAK) ||
             (symbol->other & 0x03) != SYMBOL_VISIBILITY_DEFAULT ||
             symbol->value != 0 || symbol->size != 0 ||
             !dynamic_symbol_name(consumer, symbol, &name, &name_length) ||
@@ -2738,6 +2781,9 @@ static int apply_external_relocations(ObjectGraph *graph,
             return 0;
         }
         if (tls_resolver_reference) {
+            if (symbol_binding != SYMBOL_BIND_GLOBAL) {
+                return 0;
+            }
             if (version_requirement.explicit_version ||
                 version_requirement.has_provider) {
                 return 0;
@@ -2745,8 +2791,18 @@ static int apply_external_relocations(ObjectGraph *graph,
             provider_symbol = (uintptr_t)&arach_tls_get_addr;
         } else if (!resolve_global_symbol_versioned(
                        graph, object_index, name, name_length,
-                       &version_requirement, &provider_symbol)) {
-            return 0;
+                       &version_requirement, &resolution)) {
+            if (symbol_binding != SYMBOL_BIND_WEAK ||
+                version_requirement.explicit_version ||
+                version_requirement.has_provider) {
+                return 0;
+            }
+            ++evidence->unresolved_weak;
+        } else {
+            provider_symbol = resolution.address;
+            if (resolution.binding == SYMBOL_BIND_WEAK) {
+                ++evidence->weak_definitions;
+            }
         }
         *(volatile uintptr_t *)target = provider_symbol;
         if (*(volatile const uintptr_t *)target != provider_symbol) {
@@ -2767,6 +2823,8 @@ static int relocate_graph(ObjectGraph *graph,
     evidence->external = 0;
     evidence->tls = 0;
     evidence->versioned = 0;
+    evidence->weak_definitions = 0;
+    evidence->unresolved_weak = 0;
     for (size_t index = 0; index < graph->relocation_count; ++index) {
         size_t object_index = graph->relocation_order[index];
         if (object_index >= graph->object_count ||
@@ -3396,7 +3454,7 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
     }
     RelocationEvidence evidence;
     if (!relocate_graph(&graph, &tls_layout, &evidence) ||
-        evidence.relative != 9 || evidence.external != 8 ||
+        evidence.relative != 9 || evidence.external != 10 ||
         evidence.tls != 3 ||
         !write_marker(relocation_marker, sizeof(relocation_marker) - 1)) {
         fail_with(shared_relocation_failure,
@@ -3406,6 +3464,12 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
                       sizeof(symbol_scope_marker) - 1)) {
         fail_with(shared_external_failure,
                   sizeof(shared_external_failure) - 1);
+    }
+    if (evidence.weak_definitions != 1 || evidence.unresolved_weak != 1 ||
+        !write_marker(weak_binding_marker,
+                      sizeof(weak_binding_marker) - 1)) {
+        fail_with(shared_weak_binding_failure,
+                  sizeof(shared_weak_binding_failure) - 1);
     }
     if (evidence.versioned != 10 ||
         !write_marker(version_marker, sizeof(version_marker) - 1)) {
@@ -3451,9 +3515,11 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
     const uint64_t observer =
         (input ^ UINT64_C(0x0f0ff0f05a5aa5a5)) + core +
         UINT64_C(0x4444444444444444);
+    const uint64_t weak_choice =
+        input + UINT64_C(0x13579bdf2468ace0);
     const uint64_t expected =
-        provider ^ observer ^ UINT64_C(0xa5a55a5af0f00f0f) ^
-        UINT64_C(0x5555555555555555);
+        provider ^ observer ^ weak_choice ^
+        UINT64_C(0xa5a55a5af0f00f0f) ^ UINT64_C(0x5555555555555555);
     if (shared_probe(input) != expected) {
         fail_with(shared_call_failure, sizeof(shared_call_failure) - 1);
     }

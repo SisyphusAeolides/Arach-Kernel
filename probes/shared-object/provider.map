@@ -2,6 +2,4 @@ ARACH_PROVIDER_1.0 {
     global:
         arach_provider_value;
         arach_provider_finalize_step;
-    local:
-        *;
 };
