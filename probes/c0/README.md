@@ -56,22 +56,23 @@ with bounded argv and environment vectors. The interpreter emits
 `ARACH_C2_RUNTIME_LINKER_ENTER`, validates the Linux auxiliary vector,
 discovers the closure breadth-first, coalesces both middle dependencies onto
 one core snapshot, rejects cycles, applies provider-first relocation, and
-packs and installs one static TLS template, eagerly binds four external PLT
-symbols through deterministic global scope, seals all objects, and executes
-four dependency-first initializers. It
+packs and installs one static TLS template, resolves seven external PLT symbols
+through exact SONAME-bound GNU versions and deterministic global scope, seals
+all objects, and executes four dependency-first initializers. It
 emits `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_SHARED_RELOCATION_PASS`,
-`ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_STATIC_TLS_PASS`,
+`ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_SYMBOL_VERSION_PASS`,
+`ARACH_C2_STATIC_TLS_PASS`,
 `ARACH_C2_INITIALIZER_ORDER_PASS`, and `ARACH_C2_EXTERNAL_SYMBOL_PASS`, then
 emits `ARACH_C2_RUNTIME_LINKER_PASS` and transfers to the main image's
 `AT_ENTRY`. That replacement emits
-`ARACH_C1_EXECVE_PASS`,
-creates a live thread-group peer, and then emits the existing exit-group
-marker. This proves that the old image cannot resume, same-PID ownership
+`ARACH_C1_EXECVE_PASS`, creates a live thread-group peer, invokes the one-shot
+x86-64 finalizer callback, emits `ARACH_C2_FINALIZATION_PASS`, and then emits
+the existing exit-group marker. This proves that the old image cannot resume,
+same-PID ownership
 reaches the two-image replacement, and deferred reclamation does not destroy
 the new hierarchy. The admitted graph remains bounded to eight objects and
-does not claim dynamic TLS allocation, finalizers, versioned lookup, runpaths,
-or lazy binding.
+does not claim dynamic TLS allocation, runpaths, weak binding, or lazy binding.
 
 The kernel currently carries a legacy internal `crest` name for its second
 boot-process slot. `ARACH_BOOTSTRAP_IMAGE` deliberately replaces that artifact

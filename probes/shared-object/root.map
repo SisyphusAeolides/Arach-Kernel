@@ -1,0 +1,6 @@
+ARACH_PROBE_1.0 {
+    global:
+        arach_shared_probe;
+    local:
+        *;
+};

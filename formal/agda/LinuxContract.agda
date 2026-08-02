@@ -37,6 +37,8 @@ data Gate : Set where
   boundedObjectClosure breadthFirstDiscovery : Gate
   duplicateDependencyCoalescing acyclicRelocationOrder globalSymbolScope : Gate
   staticTlsLayout tlsRelocation initializerOrder : Gate
+  boundedSymbolVersionTables exactSymbolVersionResolution : Gate
+  finalizerHandoff reverseFinalizerOrder : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -215,6 +217,15 @@ record RuntimeInitializationCertificate : Set where
     tlsRelocationEvidence : Measurement tlsRelocation
     initializerOrderEvidence : Measurement initializerOrder
 
+record RuntimeFinalizationCertificate : Set where
+  constructor runtimeFinalizationCertificate
+  field
+    runtimeInitialization : RuntimeInitializationCertificate
+    boundedSymbolVersionTablesEvidence : Measurement boundedSymbolVersionTables
+    exactSymbolVersionResolutionEvidence : Measurement exactSymbolVersionResolution
+    finalizerHandoffEvidence : Measurement finalizerHandoff
+    reverseFinalizerOrderEvidence : Measurement reverseFinalizerOrder
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -333,3 +344,10 @@ runtimeInitializationRequiresMultiObjectGraph :
   RuntimeInitializationCertificate -> MultiObjectGraphCertificate
 runtimeInitializationRequiresMultiObjectGraph certificate =
   RuntimeInitializationCertificate.multiObjectGraph certificate
+
+-- Finalization and version binding structurally retain the complete bounded
+-- runtime-initialization certificate.
+runtimeFinalizationRequiresInitialization :
+  RuntimeFinalizationCertificate -> RuntimeInitializationCertificate
+runtimeFinalizationRequiresInitialization certificate =
+  RuntimeFinalizationCertificate.runtimeInitialization certificate

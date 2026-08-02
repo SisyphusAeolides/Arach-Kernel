@@ -77,8 +77,13 @@ enum {
     DYNAMIC_RELR_SIZE = 35,
     DYNAMIC_RELR = 36,
     DYNAMIC_RELR_ENTRY = 37,
+    DYNAMIC_VERSION_SYMBOL = 0x6ffffff0,
     DYNAMIC_GNU_RELA_COUNT = 0x6ffffff9,
     DYNAMIC_FLAGS_1 = 0x6ffffffb,
+    DYNAMIC_VERSION_DEFINITION = 0x6ffffffc,
+    DYNAMIC_VERSION_DEFINITION_COUNT = 0x6ffffffd,
+    DYNAMIC_VERSION_REQUIREMENT = 0x6ffffffe,
+    DYNAMIC_VERSION_REQUIREMENT_COUNT = 0x6fffffff,
     DYNAMIC_FLAG_SYMBOLIC = 2,
     DYNAMIC_FLAG_BIND_NOW = 8,
     DYNAMIC_FLAG_STATIC_TLS = 16,
@@ -90,9 +95,17 @@ enum {
     RELOCATION_X86_64_TPOFF64 = 18,
     SYMBOL_UNDEFINED = 0,
     SYMBOL_BIND_GLOBAL = 1,
+    SYMBOL_OBJECT = 1,
     SYMBOL_FUNCTION = 2,
     SYMBOL_TLS = 6,
+    SYMBOL_ABSOLUTE = 0xfff1,
     SYMBOL_VISIBILITY_DEFAULT = 0,
+    VERSION_CURRENT = 1,
+    VERSION_FLAG_BASE = 1,
+    VERSION_INDEX_LOCAL = 0,
+    VERSION_INDEX_GLOBAL = 1,
+    VERSION_INDEX_HIDDEN = 0x8000,
+    VERSION_INDEX_MASK = 0x7fff,
     PAGE_SIZE = 4096,
     MAXIMUM_PROGRAM_HEADERS = 16,
     MAXIMUM_DYNAMIC_ENTRIES = 64,
@@ -105,6 +118,9 @@ enum {
     MAXIMUM_SYMBOL_NAME_BYTES = 127,
     MAXIMUM_RELOCATIONS = 64,
     MAXIMUM_INITIALIZERS = 16,
+    MAXIMUM_VERSION_DEFINITIONS = 16,
+    MAXIMUM_VERSION_REQUIREMENTS = 16,
+    MAXIMUM_VERSION_AUXILIARIES = 32,
     MAXIMUM_TLS_ALIGNMENT = PAGE_SIZE,
     MAXIMUM_STATIC_TLS_BYTES = 16 * 1024,
 };
@@ -125,9 +141,11 @@ static const char multi_object_marker[] =
 static const char relocation_marker[] = "ARACH_C2_SHARED_RELOCATION_PASS\n";
 static const char symbol_scope_marker[] =
     "ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS\n";
+static const char version_marker[] = "ARACH_C2_SYMBOL_VERSION_PASS\n";
 static const char static_tls_marker[] = "ARACH_C2_STATIC_TLS_PASS\n";
 static const char initializer_marker[] =
     "ARACH_C2_INITIALIZER_ORDER_PASS\n";
+static const char finalization_marker[] = "ARACH_C2_FINALIZATION_PASS\n";
 static const char external_marker[] = "ARACH_C2_EXTERNAL_SYMBOL_PASS\n";
 static const char pass_marker[] = "ARACH_C2_RUNTIME_LINKER_PASS\n";
 static const char stack_failure[] = "ARACH_C2_LINKER_STACK_FAIL\n";
@@ -147,8 +165,12 @@ static const char shared_relocation_failure[] =
 static const char shared_external_failure[] =
     "ARACH_C2_LINKER_SHARED_EXTERNAL_FAIL\n";
 static const char shared_tls_failure[] = "ARACH_C2_LINKER_STATIC_TLS_FAIL\n";
+static const char shared_version_failure[] =
+    "ARACH_C2_LINKER_SYMBOL_VERSION_FAIL\n";
 static const char shared_initializer_failure[] =
     "ARACH_C2_LINKER_INITIALIZER_FAIL\n";
+static const char shared_finalization_failure[] =
+    "ARACH_C2_LINKER_FINALIZATION_FAIL\n";
 static const char shared_symbol_failure[] = "ARACH_C2_LINKER_SHARED_SYMBOL_FAIL\n";
 static const char shared_call_failure[] = "ARACH_C2_LINKER_SHARED_CALL_FAIL\n";
 
@@ -201,6 +223,37 @@ typedef struct {
 } Elf64Rela;
 
 typedef struct {
+    uint16_t version;
+    uint16_t flags;
+    uint16_t index;
+    uint16_t auxiliary_count;
+    uint32_t hash;
+    uint32_t auxiliary;
+    uint32_t next;
+} Elf64VersionDefinition;
+
+typedef struct {
+    uint32_t name;
+    uint32_t next;
+} Elf64VersionDefinitionAuxiliary;
+
+typedef struct {
+    uint16_t version;
+    uint16_t auxiliary_count;
+    uint32_t file;
+    uint32_t auxiliary;
+    uint32_t next;
+} Elf64VersionRequirement;
+
+typedef struct {
+    uint32_t hash;
+    uint16_t flags;
+    uint16_t other;
+    uint32_t name;
+    uint32_t next;
+} Elf64VersionRequirementAuxiliary;
+
+typedef struct {
     uintptr_t address;
     size_t memory_size;
     size_t mapping_size;
@@ -226,12 +279,20 @@ typedef struct {
     uintptr_t plt_got;
     uintptr_t init_function;
     uintptr_t init_array;
+    uintptr_t fini_function;
+    uintptr_t fini_array;
+    uintptr_t version_symbols;
+    uintptr_t version_definitions;
+    uintptr_t version_requirements;
     size_t string_size;
     size_t relocation_size;
     size_t jump_relocation_size;
     size_t relocation_entry_size;
     size_t symbol_entry_size;
     size_t init_array_size;
+    size_t fini_array_size;
+    size_t version_definition_count;
+    size_t version_requirement_count;
     size_t soname_offset;
     size_t needed_offsets[MAXIMUM_NEEDED_ENTRIES];
     size_t needed_count;
@@ -249,6 +310,14 @@ typedef struct {
     int has_init_function;
     int has_init_array;
     int has_init_array_size;
+    int has_fini_function;
+    int has_fini_array;
+    int has_fini_array_size;
+    int has_version_symbols;
+    int has_version_definitions;
+    int has_version_definition_count;
+    int has_version_requirements;
+    int has_version_requirement_count;
 } SharedDynamic;
 
 typedef struct {
@@ -281,6 +350,7 @@ typedef struct {
     size_t relative;
     size_t external;
     size_t tls;
+    size_t versioned;
 } RelocationEvidence;
 
 typedef struct {
@@ -295,14 +365,51 @@ typedef struct {
     size_t calls;
 } InitializerEvidence;
 
+typedef struct {
+    const char *name;
+    size_t name_length;
+    ObjectName provider;
+    int explicit_version;
+    int has_provider;
+} SymbolVersionRequirement;
+
+typedef struct {
+    uintptr_t fini_function;
+    uintptr_t fini_array[MAXIMUM_INITIALIZERS];
+    size_t fini_array_count;
+} FinalizerObject;
+
+typedef struct {
+    FinalizerObject objects[MAXIMUM_LOADED_OBJECTS];
+    size_t object_count;
+    size_t expected_calls;
+    uintptr_t tls_instance;
+    int armed;
+} FinalizationPlan;
+
+typedef struct {
+    size_t calls;
+} FinalizerEvidence;
+
 _Static_assert(sizeof(Elf64Header) == 64, "ELF64 header layout");
 _Static_assert(sizeof(Elf64ProgramHeader) == 56, "ELF64 program header layout");
 _Static_assert(sizeof(Elf64Dynamic) == 16, "ELF64 dynamic entry layout");
 _Static_assert(sizeof(Elf64Symbol) == 24, "ELF64 symbol layout");
 _Static_assert(sizeof(Elf64Rela) == 24, "ELF64 relocation layout");
+_Static_assert(sizeof(Elf64VersionDefinition) == 20,
+               "ELF64 version definition layout");
+_Static_assert(sizeof(Elf64VersionDefinitionAuxiliary) == 8,
+               "ELF64 version definition auxiliary layout");
+_Static_assert(sizeof(Elf64VersionRequirement) == 16,
+               "ELF64 version requirement layout");
+_Static_assert(sizeof(Elf64VersionRequirementAuxiliary) == 16,
+               "ELF64 version requirement auxiliary layout");
+
+static FinalizationPlan finalization_plan;
 
 extern void _start(void);
 uintptr_t arach_runtime_linker_start(const uintptr_t *stack);
+void arach_runtime_linker_finalize(void);
 
 static long syscall6(uint64_t number, uint64_t first, uint64_t second,
                      uint64_t third, uint64_t fourth, uint64_t fifth,
@@ -708,12 +815,20 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->plt_got = 0;
     result->init_function = 0;
     result->init_array = 0;
+    result->fini_function = 0;
+    result->fini_array = 0;
+    result->version_symbols = 0;
+    result->version_definitions = 0;
+    result->version_requirements = 0;
     result->string_size = 0;
     result->relocation_size = 0;
     result->jump_relocation_size = 0;
     result->relocation_entry_size = 0;
     result->symbol_entry_size = 0;
     result->init_array_size = 0;
+    result->fini_array_size = 0;
+    result->version_definition_count = 0;
+    result->version_requirement_count = 0;
     result->soname_offset = 0;
     for (size_t index = 0; index < MAXIMUM_NEEDED_ENTRIES; ++index) {
         result->needed_offsets[index] = 0;
@@ -733,6 +848,14 @@ static int parse_shared_dynamic(LoadedObject *object) {
     result->has_init_function = 0;
     result->has_init_array = 0;
     result->has_init_array_size = 0;
+    result->has_fini_function = 0;
+    result->has_fini_array = 0;
+    result->has_fini_array_size = 0;
+    result->has_version_symbols = 0;
+    result->has_version_definitions = 0;
+    result->has_version_definition_count = 0;
+    result->has_version_requirements = 0;
+    result->has_version_requirement_count = 0;
     for (size_t index = 0; index < entries; ++index) {
         uintptr_t pointer = 0;
         switch (dynamic[index].tag) {
@@ -849,6 +972,30 @@ static int parse_shared_dynamic(LoadedObject *object) {
             result->init_array_size = (size_t)dynamic[index].value;
             result->has_init_array_size = 1;
             break;
+        case DYNAMIC_FINI:
+            if (result->has_fini_function ||
+                !checked_add(object->base, dynamic[index].value, &pointer)) {
+                return 0;
+            }
+            result->fini_function = pointer;
+            result->has_fini_function = 1;
+            break;
+        case DYNAMIC_FINI_ARRAY:
+            if (result->has_fini_array ||
+                !checked_add(object->base, dynamic[index].value, &pointer)) {
+                return 0;
+            }
+            result->fini_array = pointer;
+            result->has_fini_array = 1;
+            break;
+        case DYNAMIC_FINI_ARRAY_SIZE:
+            if (result->has_fini_array_size || dynamic[index].value == 0 ||
+                dynamic[index].value > SIZE_MAX) {
+                return 0;
+            }
+            result->fini_array_size = (size_t)dynamic[index].value;
+            result->has_fini_array_size = 1;
+            break;
         case DYNAMIC_SYMBOLIC:
             if (result->has_symbolic || dynamic[index].value != 0) {
                 return 0;
@@ -897,14 +1044,55 @@ static int parse_shared_dynamic(LoadedObject *object) {
             result->flags_1 = dynamic[index].value;
             result->has_flags_1 = 1;
             break;
-        case DYNAMIC_FINI:
+        case DYNAMIC_VERSION_SYMBOL:
+            if (result->has_version_symbols ||
+                !checked_add(object->base, dynamic[index].value, &pointer)) {
+                return 0;
+            }
+            result->version_symbols = pointer;
+            result->has_version_symbols = 1;
+            break;
+        case DYNAMIC_VERSION_DEFINITION:
+            if (result->has_version_definitions ||
+                !checked_add(object->base, dynamic[index].value, &pointer)) {
+                return 0;
+            }
+            result->version_definitions = pointer;
+            result->has_version_definitions = 1;
+            break;
+        case DYNAMIC_VERSION_DEFINITION_COUNT:
+            if (result->has_version_definition_count ||
+                dynamic[index].value == 0 ||
+                dynamic[index].value > MAXIMUM_VERSION_DEFINITIONS) {
+                return 0;
+            }
+            result->version_definition_count =
+                (size_t)dynamic[index].value;
+            result->has_version_definition_count = 1;
+            break;
+        case DYNAMIC_VERSION_REQUIREMENT:
+            if (result->has_version_requirements ||
+                !checked_add(object->base, dynamic[index].value, &pointer)) {
+                return 0;
+            }
+            result->version_requirements = pointer;
+            result->has_version_requirements = 1;
+            break;
+        case DYNAMIC_VERSION_REQUIREMENT_COUNT:
+            if (result->has_version_requirement_count ||
+                dynamic[index].value == 0 ||
+                dynamic[index].value > MAXIMUM_VERSION_REQUIREMENTS) {
+                return 0;
+            }
+            result->version_requirement_count =
+                (size_t)dynamic[index].value;
+            result->has_version_requirement_count = 1;
+            break;
         case DYNAMIC_REL:
         case DYNAMIC_REL_SIZE:
         case DYNAMIC_REL_ENTRY:
         case DYNAMIC_DEBUG:
         case DYNAMIC_TEXT_RELOCATION:
-        case DYNAMIC_FINI_ARRAY:
-        case DYNAMIC_FINI_ARRAY_SIZE:
         case DYNAMIC_RUNPATH:
         case DYNAMIC_PREINIT_ARRAY:
         case DYNAMIC_PREINIT_ARRAY_SIZE:
@@ -939,13 +1127,35 @@ static int parse_shared_dynamic(LoadedObject *object) {
                                 PROGRAM_EXECUTABLE)) ||
         (result->has_init_array != result->has_init_array_size) ||
         (result->has_init_array &&
-         (result->init_array_size % sizeof(uintptr_t) != 0 ||
+         (result->init_array % _Alignof(uintptr_t) != 0 ||
+          result->init_array_size % sizeof(uintptr_t) != 0 ||
           result->init_array_size / sizeof(uintptr_t) >
               MAXIMUM_INITIALIZERS ||
           !mapped_range_contains(object->loads, object->load_count,
                                  result->init_array,
                                  result->init_array_size,
-                                 PROGRAM_WRITABLE)))) {
+                                 PROGRAM_WRITABLE))) ||
+        (result->has_fini_function &&
+         !mapped_range_contains(object->loads, object->load_count,
+                                result->fini_function, 1,
+                                PROGRAM_EXECUTABLE)) ||
+        (result->has_fini_array != result->has_fini_array_size) ||
+        (result->has_fini_array &&
+         (result->fini_array % _Alignof(uintptr_t) != 0 ||
+          result->fini_array_size % sizeof(uintptr_t) != 0 ||
+          result->fini_array_size / sizeof(uintptr_t) >
+              MAXIMUM_INITIALIZERS ||
+          !mapped_range_contains(object->loads, object->load_count,
+                                 result->fini_array,
+                                 result->fini_array_size,
+                                 PROGRAM_WRITABLE))) ||
+        (result->has_version_definitions !=
+         result->has_version_definition_count) ||
+        (result->has_version_requirements !=
+         result->has_version_requirement_count) ||
+        (result->has_version_symbols !=
+         (result->has_version_definitions ||
+          result->has_version_requirements))) {
         return 0;
     }
     ObjectName soname;
@@ -1130,6 +1340,7 @@ static int dynamic_symbol_name(const LoadedObject *object,
 static int resolve_global_tls_symbol(const ObjectGraph *graph,
                                      size_t requester_index,
                                      const char *name, size_t name_length,
+                                     const SymbolVersionRequirement *version,
                                      size_t *provider_index,
                                      const Elf64Symbol **provider_symbol);
 
@@ -1179,9 +1390,388 @@ static int dynamic_symbol_count(const LoadedObject *object,
     return 1;
 }
 
+static int dynamic_string_name(const LoadedObject *object, uint32_t offset,
+                               const char **name, size_t *name_length) {
+    if ((size_t)offset >= object->dynamic.string_size) {
+        return 0;
+    }
+    const char *candidate =
+        (const char *)(object->dynamic.string_table + (size_t)offset);
+    size_t available = object->dynamic.string_size - (size_t)offset;
+    size_t length = 0;
+    while (length < available && length <= MAXIMUM_SYMBOL_NAME_BYTES &&
+           candidate[length] != '\0') {
+        ++length;
+    }
+    if (length == 0 || length > MAXIMUM_SYMBOL_NAME_BYTES ||
+        length == available || candidate[length] != '\0') {
+        return 0;
+    }
+    *name = candidate;
+    *name_length = length;
+    return 1;
+}
+
+static uint32_t version_name_hash(const char *name, size_t length) {
+    uint32_t hash = 0;
+    for (size_t index = 0; index < length; ++index) {
+        hash = (hash << 4) + (uint8_t)name[index];
+        uint32_t high = hash & UINT32_C(0xf0000000);
+        if (high != 0) {
+            hash ^= high >> 24;
+            hash &= ~high;
+        }
+    }
+    return hash;
+}
+
+static int needed_object_index(const LoadedObject *object,
+                               const ObjectName *name, size_t *index) {
+    for (size_t candidate = 0;
+         candidate < object->dynamic.needed_count; ++candidate) {
+        size_t offset = object->dynamic.needed_offsets[candidate];
+        ObjectName dependency;
+        if (offset >= object->dynamic.string_size ||
+            !copy_object_name(
+                (const char *)(object->dynamic.string_table + offset),
+                object->dynamic.string_size - offset, &dependency)) {
+            return 0;
+        }
+        if (object_names_equal(&dependency, name)) {
+            *index = candidate;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int find_version_definition(const LoadedObject *object,
+                                   uint16_t expected_index,
+                                   const char **name,
+                                   size_t *name_length) {
+    if (!object->dynamic.has_version_definitions) {
+        return expected_index == 0;
+    }
+    uintptr_t cursor = object->dynamic.version_definitions;
+    int found = expected_index == 0;
+    for (size_t entry = 0;
+         entry < object->dynamic.version_definition_count; ++entry) {
+        if (cursor % _Alignof(Elf64VersionDefinition) != 0 ||
+            !mapped_range_contains(object->loads, object->load_count, cursor,
+                                   sizeof(Elf64VersionDefinition), 0)) {
+            return 0;
+        }
+        const Elf64VersionDefinition *definition =
+            (const Elf64VersionDefinition *)cursor;
+        uint16_t required_index = (uint16_t)(entry + 1);
+        uint16_t required_flags =
+            entry == 0 ? VERSION_FLAG_BASE : 0;
+        if (definition->version != VERSION_CURRENT ||
+            definition->flags != required_flags ||
+            definition->index != required_index ||
+            definition->auxiliary_count != 1 ||
+            definition->auxiliary != sizeof(*definition)) {
+            return 0;
+        }
+        uintptr_t auxiliary_address = 0;
+        if (!checked_add(cursor, definition->auxiliary,
+                         &auxiliary_address) ||
+            auxiliary_address %
+                    _Alignof(Elf64VersionDefinitionAuxiliary) !=
+                0 ||
+            !mapped_range_contains(
+                object->loads, object->load_count, auxiliary_address,
+                sizeof(Elf64VersionDefinitionAuxiliary), 0)) {
+            return 0;
+        }
+        const Elf64VersionDefinitionAuxiliary *auxiliary =
+            (const Elf64VersionDefinitionAuxiliary *)auxiliary_address;
+        const char *definition_name = NULL;
+        size_t definition_name_length = 0;
+        if (auxiliary->next != 0 ||
+            !dynamic_string_name(object, auxiliary->name,
+                                 &definition_name,
+                                 &definition_name_length) ||
+            definition->hash != version_name_hash(
+                                    definition_name,
+                                    definition_name_length)) {
+            return 0;
+        }
+        if (entry == 0) {
+            if (!bounded_string_equals(
+                    definition_name, definition_name_length + 1,
+                    object->name.bytes, object->name.length)) {
+                return 0;
+            }
+        } else if (bounded_string_equals(
+                       definition_name, definition_name_length + 1,
+                       object->name.bytes, object->name.length)) {
+            return 0;
+        }
+        if (definition->index == expected_index) {
+            if (name != NULL) {
+                *name = definition_name;
+            }
+            if (name_length != NULL) {
+                *name_length = definition_name_length;
+            }
+            found = 1;
+        }
+        if (entry + 1 == object->dynamic.version_definition_count) {
+            if (definition->next != 0) {
+                return 0;
+            }
+        } else {
+            uintptr_t next = 0;
+            if (definition->next !=
+                    sizeof(*definition) +
+                        sizeof(Elf64VersionDefinitionAuxiliary) ||
+                !checked_add(cursor, definition->next, &next) ||
+                next <= cursor) {
+                return 0;
+            }
+            cursor = next;
+        }
+    }
+    return found;
+}
+
+static int validate_version_requirements(const LoadedObject *object,
+                                         uint64_t *index_mask) {
+    *index_mask = 0;
+    if (!object->dynamic.has_version_requirements) {
+        return 1;
+    }
+    uintptr_t cursor = object->dynamic.version_requirements;
+    uint64_t needed_mask = 0;
+    size_t auxiliary_total = 0;
+    size_t definition_count =
+        object->dynamic.has_version_definitions
+            ? object->dynamic.version_definition_count
+            : 1;
+    for (size_t entry = 0;
+         entry < object->dynamic.version_requirement_count; ++entry) {
+        if (cursor % _Alignof(Elf64VersionRequirement) != 0 ||
+            !mapped_range_contains(object->loads, object->load_count, cursor,
+                                   sizeof(Elf64VersionRequirement), 0)) {
+            return 0;
+        }
+        const Elf64VersionRequirement *requirement =
+            (const Elf64VersionRequirement *)cursor;
+        const char *file_name = NULL;
+        size_t file_name_length = 0;
+        ObjectName provider;
+        size_t needed_index = 0;
+        if (requirement->version != VERSION_CURRENT ||
+            requirement->auxiliary_count == 0 ||
+            requirement->auxiliary_count >
+                MAXIMUM_VERSION_AUXILIARIES ||
+            auxiliary_total > (size_t)MAXIMUM_VERSION_AUXILIARIES -
+                                  (size_t)requirement->auxiliary_count ||
+            requirement->auxiliary != sizeof(*requirement) ||
+            !dynamic_string_name(object, requirement->file, &file_name,
+                                 &file_name_length) ||
+            !copy_object_name(file_name, file_name_length + 1, &provider) ||
+            !needed_object_index(object, &provider, &needed_index) ||
+            needed_index >= 64 ||
+            (needed_mask & (UINT64_C(1) << needed_index)) != 0) {
+            return 0;
+        }
+        needed_mask |= UINT64_C(1) << needed_index;
+        uintptr_t auxiliary_cursor = 0;
+        if (!checked_add(cursor, requirement->auxiliary,
+                         &auxiliary_cursor) ||
+            auxiliary_cursor %
+                    _Alignof(Elf64VersionRequirementAuxiliary) !=
+                0) {
+            return 0;
+        }
+        for (size_t auxiliary_index = 0;
+             auxiliary_index < requirement->auxiliary_count;
+             ++auxiliary_index) {
+            if (!mapped_range_contains(
+                    object->loads, object->load_count, auxiliary_cursor,
+                    sizeof(Elf64VersionRequirementAuxiliary), 0)) {
+                return 0;
+            }
+            const Elf64VersionRequirementAuxiliary *auxiliary =
+                (const Elf64VersionRequirementAuxiliary *)auxiliary_cursor;
+            const char *version_name = NULL;
+            size_t version_name_length = 0;
+            uint16_t version_index = auxiliary->other;
+            if (auxiliary->flags != 0 ||
+                (version_index & VERSION_INDEX_HIDDEN) != 0 ||
+                version_index <= definition_count || version_index >= 64 ||
+                version_index >
+                    definition_count + MAXIMUM_VERSION_AUXILIARIES ||
+                (*index_mask & (UINT64_C(1) << version_index)) != 0 ||
+                !dynamic_string_name(object, auxiliary->name,
+                                     &version_name,
+                                     &version_name_length) ||
+                auxiliary->hash != version_name_hash(
+                                       version_name,
+                                       version_name_length)) {
+                return 0;
+            }
+            *index_mask |= UINT64_C(1) << version_index;
+            ++auxiliary_total;
+            if (auxiliary_index + 1 == requirement->auxiliary_count) {
+                if (auxiliary->next != 0) {
+                    return 0;
+                }
+            } else {
+                uintptr_t next = 0;
+                if (auxiliary->next != sizeof(*auxiliary) ||
+                    !checked_add(auxiliary_cursor, auxiliary->next, &next) ||
+                    next <= auxiliary_cursor) {
+                    return 0;
+                }
+                auxiliary_cursor = next;
+            }
+        }
+        if (entry + 1 == object->dynamic.version_requirement_count) {
+            if (requirement->next != 0) {
+                return 0;
+            }
+        } else {
+            uintptr_t next = 0;
+            size_t required_next =
+                sizeof(*requirement) +
+                (size_t)requirement->auxiliary_count *
+                    sizeof(Elf64VersionRequirementAuxiliary);
+            if (requirement->next != required_next ||
+                !checked_add(cursor, requirement->next, &next) ||
+                next <= cursor) {
+                return 0;
+            }
+            cursor = next;
+        }
+    }
+    uint64_t expected_mask = 0;
+    for (size_t index = definition_count + 1;
+         index <= definition_count + auxiliary_total; ++index) {
+        if (index >= 64) {
+            return 0;
+        }
+        expected_mask |= UINT64_C(1) << index;
+    }
+    return auxiliary_total != 0 && *index_mask == expected_mask;
+}
+
+static int find_version_requirement(
+    const LoadedObject *object, uint16_t expected_index, const char **name,
+    size_t *name_length, ObjectName *provider) {
+    if (!object->dynamic.has_version_requirements) {
+        return 0;
+    }
+    uintptr_t cursor = object->dynamic.version_requirements;
+    for (size_t entry = 0;
+         entry < object->dynamic.version_requirement_count; ++entry) {
+        const Elf64VersionRequirement *requirement =
+            (const Elf64VersionRequirement *)cursor;
+        const char *file_name = NULL;
+        size_t file_name_length = 0;
+        uintptr_t auxiliary_cursor = 0;
+        if (!dynamic_string_name(object, requirement->file, &file_name,
+                                 &file_name_length) ||
+            !copy_object_name(file_name, file_name_length + 1, provider) ||
+            !checked_add(cursor, requirement->auxiliary,
+                         &auxiliary_cursor)) {
+            return 0;
+        }
+        for (size_t auxiliary_index = 0;
+             auxiliary_index < requirement->auxiliary_count;
+             ++auxiliary_index) {
+            const Elf64VersionRequirementAuxiliary *auxiliary =
+                (const Elf64VersionRequirementAuxiliary *)auxiliary_cursor;
+            if (auxiliary->other == expected_index) {
+                return dynamic_string_name(object, auxiliary->name, name,
+                                           name_length);
+            }
+            if (auxiliary_index + 1 < requirement->auxiliary_count &&
+                !checked_add(auxiliary_cursor, auxiliary->next,
+                             &auxiliary_cursor)) {
+                return 0;
+            }
+        }
+        if (entry + 1 < object->dynamic.version_requirement_count &&
+            !checked_add(cursor, requirement->next, &cursor)) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static int validate_symbol_versions(const LoadedObject *object,
+                                    uint32_t symbol_count) {
+    if (!object->dynamic.has_version_symbols) {
+        return 1;
+    }
+    if (!mapped_range_contains(object->loads, object->load_count,
+                               object->dynamic.version_symbols,
+                               (size_t)symbol_count * sizeof(uint16_t), 0) ||
+        object->dynamic.version_symbols % _Alignof(uint16_t) != 0 ||
+        !find_version_definition(object, 0, NULL, NULL)) {
+        return 0;
+    }
+    uint64_t requirement_mask = 0;
+    if (!validate_version_requirements(object, &requirement_mask)) {
+        return 0;
+    }
+    const uint16_t *versions =
+        (const uint16_t *)object->dynamic.version_symbols;
+    const Elf64Symbol *symbols =
+        (const Elf64Symbol *)object->dynamic.symbol_table;
+    if (versions[0] != VERSION_INDEX_LOCAL) {
+        return 0;
+    }
+    uint64_t referenced_definitions = 0;
+    uint64_t referenced_requirements = 0;
+    for (uint32_t index = 1; index < symbol_count; ++index) {
+        uint16_t raw = versions[index];
+        uint16_t version_index = raw & VERSION_INDEX_MASK;
+        if (version_index == VERSION_INDEX_LOCAL ||
+            (version_index == VERSION_INDEX_GLOBAL &&
+             (raw & VERSION_INDEX_HIDDEN) != 0)) {
+            return 0;
+        }
+        if (version_index == VERSION_INDEX_GLOBAL) {
+            continue;
+        }
+        const char *version_name = NULL;
+        size_t version_name_length = 0;
+        if (symbols[index].section_index == SYMBOL_UNDEFINED) {
+            ObjectName provider;
+            if ((raw & VERSION_INDEX_HIDDEN) != 0 || version_index >= 64 ||
+                !find_version_requirement(object, version_index,
+                                          &version_name,
+                                          &version_name_length, &provider)) {
+                return 0;
+            }
+            referenced_requirements |= UINT64_C(1) << version_index;
+        } else {
+            if (version_index >= 64 ||
+                !find_version_definition(object, version_index,
+                                         &version_name,
+                                         &version_name_length)) {
+                return 0;
+            }
+            referenced_definitions |= UINT64_C(1) << version_index;
+        }
+    }
+    uint64_t expected_definitions = 0;
+    for (size_t index = 2;
+         index <= object->dynamic.version_definition_count; ++index) {
+        expected_definitions |= UINT64_C(1) << index;
+    }
+    return referenced_definitions == expected_definitions &&
+           referenced_requirements == requirement_mask;
+}
+
 static int validate_dynamic_symbols(const LoadedObject *object) {
     uint32_t symbol_count = 0;
-    if (!dynamic_symbol_count(object, &symbol_count)) {
+    if (!dynamic_symbol_count(object, &symbol_count) ||
+        !validate_symbol_versions(object, symbol_count)) {
         return 0;
     }
     const Elf64Symbol *symbols =
@@ -1198,9 +1788,33 @@ static int validate_dynamic_symbols(const LoadedObject *object) {
         uint8_t symbol_type = symbol->information & 0x0f;
         uint8_t symbol_binding = symbol->information >> 4;
         if (symbol_binding != SYMBOL_BIND_GLOBAL ||
-            (symbol_type != SYMBOL_FUNCTION && symbol_type != SYMBOL_TLS) ||
             symbol->other != SYMBOL_VISIBILITY_DEFAULT ||
             !dynamic_symbol_name(object, symbol, &name, &name_length)) {
+            return 0;
+        }
+        if (symbol_type == SYMBOL_OBJECT) {
+            const char *version_name = NULL;
+            size_t version_name_length = 0;
+            if (symbol->section_index != SYMBOL_ABSOLUTE ||
+                symbol->value != 0 || symbol->size != 0 ||
+                !object->dynamic.has_version_symbols) {
+                return 0;
+            }
+            const uint16_t *versions =
+                (const uint16_t *)object->dynamic.version_symbols;
+            uint16_t version_index =
+                versions[index] & VERSION_INDEX_MASK;
+            if (version_index <= VERSION_INDEX_GLOBAL ||
+                !find_version_definition(object, version_index,
+                                         &version_name,
+                                         &version_name_length) ||
+                name_length != version_name_length ||
+                !bytes_equal(name, version_name, name_length)) {
+                return 0;
+            }
+            continue;
+        }
+        if (symbol_type != SYMBOL_FUNCTION && symbol_type != SYMBOL_TLS) {
             return 0;
         }
         if (symbol->section_index == SYMBOL_UNDEFINED) {
@@ -1228,6 +1842,83 @@ static int validate_dynamic_symbols(const LoadedObject *object) {
         }
     }
     return 1;
+}
+
+static int symbol_version_requirement(
+    const LoadedObject *object, uint32_t symbol_index,
+    SymbolVersionRequirement *requirement) {
+    zero_bytes((uint8_t *)requirement, sizeof(*requirement));
+    uint32_t symbol_count = 0;
+    if (!dynamic_symbol_count(object, &symbol_count) ||
+        symbol_index == 0 || symbol_index >= symbol_count) {
+        return 0;
+    }
+    if (!object->dynamic.has_version_symbols) {
+        return 1;
+    }
+    const uint16_t *versions =
+        (const uint16_t *)object->dynamic.version_symbols;
+    uint16_t version_index = versions[symbol_index] & VERSION_INDEX_MASK;
+    if (version_index == VERSION_INDEX_GLOBAL) {
+        return 1;
+    }
+    if (version_index == VERSION_INDEX_LOCAL) {
+        return 0;
+    }
+    const Elf64Symbol *symbols =
+        (const Elf64Symbol *)object->dynamic.symbol_table;
+    if (symbols[symbol_index].section_index == SYMBOL_UNDEFINED) {
+        if (!find_version_requirement(
+                object, version_index, &requirement->name,
+                &requirement->name_length, &requirement->provider)) {
+            return 0;
+        }
+        requirement->has_provider = 1;
+    } else {
+        if (!find_version_definition(object, version_index,
+                                     &requirement->name,
+                                     &requirement->name_length)) {
+            return 0;
+        }
+        requirement->provider = object->name;
+        requirement->has_provider = 1;
+    }
+    requirement->explicit_version = 1;
+    return 1;
+}
+
+static int defined_symbol_matches_version(
+    const LoadedObject *object, uint32_t symbol_index,
+    const SymbolVersionRequirement *requirement) {
+    if (requirement->has_provider &&
+        !object_names_equal(&object->name, &requirement->provider)) {
+        return 0;
+    }
+    if (!object->dynamic.has_version_symbols) {
+        return !requirement->explicit_version;
+    }
+    const uint16_t *versions =
+        (const uint16_t *)object->dynamic.version_symbols;
+    uint16_t raw = versions[symbol_index];
+    uint16_t version_index = raw & VERSION_INDEX_MASK;
+    if (version_index == VERSION_INDEX_LOCAL) {
+        return 0;
+    }
+    if (version_index == VERSION_INDEX_GLOBAL) {
+        return !requirement->explicit_version;
+    }
+    const char *definition_name = NULL;
+    size_t definition_name_length = 0;
+    if (!find_version_definition(object, version_index, &definition_name,
+                                 &definition_name_length)) {
+        return 0;
+    }
+    if (!requirement->explicit_version) {
+        return (raw & VERSION_INDEX_HIDDEN) == 0;
+    }
+    return definition_name_length == requirement->name_length &&
+           bytes_equal(definition_name, requirement->name,
+                       definition_name_length);
 }
 
 static int plan_static_tls(ObjectGraph *graph, StaticTlsLayout *layout) {
@@ -1373,6 +2064,10 @@ static int apply_object_relocations(ObjectGraph *graph, size_t object_index,
         }
         size_t provider_index = object_index;
         const Elf64Symbol *provider_symbol = NULL;
+        SymbolVersionRequirement version_requirement;
+        int versioned = 0;
+        zero_bytes((uint8_t *)&version_requirement,
+                   sizeof(version_requirement));
         if (symbol_index == 0) {
             if (relocation_type != RELOCATION_X86_64_DTPMOD64 ||
                 relocations[index].addend != 0) {
@@ -1390,11 +2085,15 @@ static int apply_object_relocations(ObjectGraph *graph, size_t object_index,
                 (symbol->information >> 4) != SYMBOL_BIND_GLOBAL ||
                 symbol->other != SYMBOL_VISIBILITY_DEFAULT ||
                 !dynamic_symbol_name(object, symbol, &name, &name_length) ||
+                !symbol_version_requirement(object, symbol_index,
+                                            &version_requirement) ||
                 !resolve_global_tls_symbol(
-                    graph, object_index, name, name_length, &provider_index,
+                    graph, object_index, name, name_length,
+                    &version_requirement, &provider_index,
                     &provider_symbol)) {
                 return 0;
             }
+            versioned = version_requirement.explicit_version;
         }
         const LoadedObject *provider = &graph->objects[provider_index];
         uint64_t value = 0;
@@ -1457,14 +2156,18 @@ static int apply_object_relocations(ObjectGraph *graph, size_t object_index,
             return 0;
         }
         ++evidence->tls;
+        if (versioned) {
+            ++evidence->versioned;
+        }
     }
     return 1;
 }
 
-static int find_exported_symbol(const LoadedObject *object,
-                                const char *expected_name,
-                                size_t expected_name_length,
-                                uintptr_t *symbol_address) {
+static int find_exported_symbol_versioned(
+    const LoadedObject *object, const char *expected_name,
+    size_t expected_name_length,
+    const SymbolVersionRequirement *version_requirement,
+    uintptr_t *symbol_address) {
     uint32_t symbol_count = 0;
     if (!dynamic_symbol_count(object, &symbol_count)) {
         return 0;
@@ -1487,6 +2190,8 @@ static int find_exported_symbol(const LoadedObject *object,
         uintptr_t address = 0;
         if (bounded_string_equals(name, available, expected_name,
                                   expected_name_length) &&
+            defined_symbol_matches_version(object, index,
+                                           version_requirement) &&
             checked_add(object->base, symbols[index].value, &address) &&
             mapped_range_contains(object->loads, object->load_count, address,
                                   (size_t)symbols[index].size,
@@ -1496,6 +2201,18 @@ static int find_exported_symbol(const LoadedObject *object,
         }
     }
     return 0;
+}
+
+static int find_exported_symbol(const LoadedObject *object,
+                                const char *expected_name,
+                                size_t expected_name_length,
+                                uintptr_t *symbol_address) {
+    SymbolVersionRequirement version_requirement;
+    zero_bytes((uint8_t *)&version_requirement,
+               sizeof(version_requirement));
+    return find_exported_symbol_versioned(
+        object, expected_name, expected_name_length, &version_requirement,
+        symbol_address);
 }
 
 static int dynamic_symbol_name(const LoadedObject *object,
@@ -1521,10 +2238,11 @@ static int dynamic_symbol_name(const LoadedObject *object,
     return 1;
 }
 
-static int find_exported_tls_symbol(const LoadedObject *object,
-                                    const char *expected_name,
-                                    size_t expected_name_length,
-                                    const Elf64Symbol **symbol) {
+static int find_exported_tls_symbol(
+    const LoadedObject *object, const char *expected_name,
+    size_t expected_name_length,
+    const SymbolVersionRequirement *version_requirement,
+    const Elf64Symbol **symbol) {
     uint32_t symbol_count = 0;
     if (object->tls_program == NULL ||
         !dynamic_symbol_count(object, &symbol_count)) {
@@ -1540,7 +2258,9 @@ static int find_exported_tls_symbol(const LoadedObject *object,
             symbols[index].size == 0 ||
             symbols[index].value > object->tls_program->memory_size ||
             symbols[index].size >
-                object->tls_program->memory_size - symbols[index].value) {
+                object->tls_program->memory_size - symbols[index].value ||
+            !defined_symbol_matches_version(object, index,
+                                            version_requirement)) {
             continue;
         }
         const char *name = NULL;
@@ -1559,6 +2279,7 @@ static int find_exported_tls_symbol(const LoadedObject *object,
 static int resolve_global_tls_symbol(const ObjectGraph *graph,
                                      size_t requester_index,
                                      const char *name, size_t name_length,
+                                     const SymbolVersionRequirement *version,
                                      size_t *provider_index,
                                      const Elf64Symbol **provider_symbol) {
     if (requester_index >= graph->object_count || name_length == 0 ||
@@ -1568,48 +2289,54 @@ static int resolve_global_tls_symbol(const ObjectGraph *graph,
     const LoadedObject *requester = &graph->objects[requester_index];
     if (requester->dynamic.has_symbolic &&
         find_exported_tls_symbol(requester, name, name_length,
-                                 provider_symbol)) {
+                                 version, provider_symbol)) {
         *provider_index = requester_index;
         return 1;
     }
     for (size_t index = 0; index < graph->object_count; ++index) {
         if (index != requester_index &&
             find_exported_tls_symbol(&graph->objects[index], name,
-                                     name_length, provider_symbol)) {
+                                     name_length, version,
+                                     provider_symbol)) {
             *provider_index = index;
             return 1;
         }
     }
     if (!requester->dynamic.has_symbolic &&
         find_exported_tls_symbol(requester, name, name_length,
-                                 provider_symbol)) {
+                                 version, provider_symbol)) {
         *provider_index = requester_index;
         return 1;
     }
     return 0;
 }
 
-static int resolve_global_symbol(const ObjectGraph *graph,
-                                 size_t requester_index, const char *name,
-                                 size_t name_length, uintptr_t *address) {
+static int resolve_global_symbol_versioned(
+    const ObjectGraph *graph, size_t requester_index, const char *name,
+    size_t name_length,
+    const SymbolVersionRequirement *version_requirement,
+    uintptr_t *address) {
     if (requester_index >= graph->object_count || name_length == 0 ||
         name_length > MAXIMUM_SYMBOL_NAME_BYTES) {
         return 0;
     }
     const LoadedObject *requester = &graph->objects[requester_index];
     if (requester->dynamic.has_symbolic &&
-        find_exported_symbol(requester, name, name_length, address)) {
+        find_exported_symbol_versioned(requester, name, name_length,
+                                       version_requirement, address)) {
         return 1;
     }
     for (size_t index = 0; index < graph->object_count; ++index) {
         if (index != requester_index &&
-            find_exported_symbol(&graph->objects[index], name, name_length,
-                                 address)) {
+            find_exported_symbol_versioned(
+                &graph->objects[index], name, name_length,
+                version_requirement, address)) {
             return 1;
         }
     }
     if (!requester->dynamic.has_symbolic) {
-        return find_exported_symbol(requester, name, name_length, address);
+        return find_exported_symbol_versioned(
+            requester, name, name_length, version_requirement, address);
     }
     return 0;
 }
@@ -1652,13 +2379,17 @@ static int apply_external_relocations(ObjectGraph *graph,
         const char *name = NULL;
         size_t name_length = 0;
         uintptr_t provider_symbol = 0;
+        SymbolVersionRequirement version_requirement;
         if (symbol->section_index != SYMBOL_UNDEFINED ||
             (symbol->information & 0x0f) != SYMBOL_FUNCTION ||
             (symbol->information >> 4) != SYMBOL_BIND_GLOBAL ||
             (symbol->other & 0x03) != SYMBOL_VISIBILITY_DEFAULT ||
             !dynamic_symbol_name(consumer, symbol, &name, &name_length) ||
-            !resolve_global_symbol(graph, object_index, name, name_length,
-                                   &provider_symbol)) {
+            !symbol_version_requirement(consumer, symbol_index,
+                                        &version_requirement) ||
+            !resolve_global_symbol_versioned(
+                graph, object_index, name, name_length,
+                &version_requirement, &provider_symbol)) {
             return 0;
         }
         *(volatile uintptr_t *)target = provider_symbol;
@@ -1666,6 +2397,9 @@ static int apply_external_relocations(ObjectGraph *graph,
             return 0;
         }
         ++evidence->external;
+        if (version_requirement.explicit_version) {
+            ++evidence->versioned;
+        }
     }
     return 1;
 }
@@ -1676,6 +2410,7 @@ static int relocate_graph(ObjectGraph *graph,
     evidence->relative = 0;
     evidence->external = 0;
     evidence->tls = 0;
+    evidence->versioned = 0;
     for (size_t index = 0; index < graph->relocation_count; ++index) {
         size_t object_index = graph->relocation_order[index];
         if (object_index >= graph->object_count ||
@@ -1993,6 +2728,99 @@ static int run_initializers(const ObjectGraph *graph,
     return 1;
 }
 
+static int prepare_finalization_plan(const ObjectGraph *graph,
+                                     uintptr_t tls_instance,
+                                     FinalizationPlan *plan) {
+    zero_bytes((uint8_t *)plan, sizeof(*plan));
+    if (graph->relocation_count > MAXIMUM_LOADED_OBJECTS) {
+        return 0;
+    }
+    for (size_t index = 0; index < graph->relocation_count; ++index) {
+        size_t object_index = graph->relocation_order[index];
+        if (object_index >= graph->object_count) {
+            return 0;
+        }
+        const LoadedObject *object = &graph->objects[object_index];
+        FinalizerObject *finalizer = &plan->objects[index];
+        if (object->dynamic.has_fini_function) {
+            if (!mapped_range_contains(
+                    object->loads, object->load_count,
+                    object->dynamic.fini_function, 1,
+                    PROGRAM_EXECUTABLE)) {
+                return 0;
+            }
+            finalizer->fini_function = object->dynamic.fini_function;
+            ++plan->expected_calls;
+        }
+        const uintptr_t *array =
+            (const uintptr_t *)object->dynamic.fini_array;
+        size_t count = object->dynamic.fini_array_size / sizeof(*array);
+        if (count > MAXIMUM_INITIALIZERS) {
+            return 0;
+        }
+        for (size_t entry = 0; entry < count; ++entry) {
+            if (!mapped_range_contains(object->loads, object->load_count,
+                                       array[entry], 1,
+                                       PROGRAM_EXECUTABLE)) {
+                return 0;
+            }
+            finalizer->fini_array[entry] = array[entry];
+            ++plan->expected_calls;
+        }
+        finalizer->fini_array_count = count;
+    }
+    plan->object_count = graph->relocation_count;
+    plan->tls_instance = tls_instance;
+    plan->armed = 1;
+    return 1;
+}
+
+static int run_finalizers(FinalizationPlan *plan,
+                          FinalizerEvidence *evidence) {
+    evidence->calls = 0;
+    if (!plan->armed || plan->object_count > MAXIMUM_LOADED_OBJECTS) {
+        return 0;
+    }
+    plan->armed = 0;
+    typedef void (*Finalizer)(void);
+    for (size_t remaining = plan->object_count; remaining > 0;
+         --remaining) {
+        const FinalizerObject *object = &plan->objects[remaining - 1];
+        if (object->fini_array_count > MAXIMUM_INITIALIZERS) {
+            return 0;
+        }
+        for (size_t entries = object->fini_array_count; entries > 0;
+             --entries) {
+            Finalizer finalizer =
+                (Finalizer)object->fini_array[entries - 1];
+            finalizer();
+            ++evidence->calls;
+        }
+        if (object->fini_function != 0) {
+            Finalizer finalizer = (Finalizer)object->fini_function;
+            finalizer();
+            ++evidence->calls;
+        }
+    }
+    return evidence->calls == plan->expected_calls;
+}
+
+void arach_runtime_linker_finalize(void) {
+    FinalizerEvidence evidence;
+    if (!run_finalizers(&finalization_plan, &evidence) ||
+        evidence.calls != 8 || finalization_plan.tls_instance == 0 ||
+        *(volatile const uint64_t *)finalization_plan.tls_instance !=
+            UINT64_C(0xdddddddddddddddd)) {
+        (void)write_marker(shared_finalization_failure,
+                           sizeof(shared_finalization_failure) - 1);
+        fail();
+    }
+    if (!write_marker(finalization_marker,
+                      sizeof(finalization_marker) - 1)) {
+        fail();
+    }
+}
+
 static int release_graph(const ObjectGraph *graph) {
     for (size_t index = 0; index < graph->object_count; ++index) {
         if (!release_shared_snapshot(&graph->objects[index])) {
@@ -2137,7 +2965,7 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
     }
     RelocationEvidence evidence;
     if (!relocate_graph(&graph, &tls_layout, &evidence) ||
-        evidence.relative != 5 || evidence.external != 4 ||
+        evidence.relative != 9 || evidence.external != 7 ||
         evidence.tls != 1 ||
         !write_marker(relocation_marker, sizeof(relocation_marker) - 1)) {
         fail_with(shared_relocation_failure,
@@ -2147,6 +2975,11 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
                       sizeof(symbol_scope_marker) - 1)) {
         fail_with(shared_external_failure,
                   sizeof(shared_external_failure) - 1);
+    }
+    if (evidence.versioned != 8 ||
+        !write_marker(version_marker, sizeof(version_marker) - 1)) {
+        fail_with(shared_version_failure,
+                  sizeof(shared_version_failure) - 1);
     }
     uintptr_t shared_symbol = 0;
     if (!find_exported_symbol(&graph.objects[0], expected_symbol,
@@ -2164,6 +2997,13 @@ uintptr_t arach_runtime_linker_start(const uintptr_t *stack) {
             UINT64_C(0x1111111111111111)) {
         fail_with(shared_initializer_failure,
                   sizeof(shared_initializer_failure) - 1);
+    }
+    if (!prepare_finalization_plan(
+            &graph, graph.objects[3].tls_instance, &finalization_plan) ||
+        finalization_plan.object_count != 4 ||
+        finalization_plan.expected_calls != 8) {
+        fail_with(shared_finalization_failure,
+                  sizeof(shared_finalization_failure) - 1);
     }
     if (!release_graph(&graph)) {
         fail_with(shared_map_failure, sizeof(shared_map_failure) - 1);

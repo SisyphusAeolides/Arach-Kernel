@@ -82,11 +82,15 @@ containing all of the following evidence from the same bundle:
 - `ARACH_C2_MULTI_OBJECT_GRAPH_PASS` was emitted only after the measured
   four-object diamond coalesced both middle-object references to one core
   snapshot and produced provider-first relocation order;
-- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after five real relative
-  relocations, one real static-TLS relocation, and all four eager external
+- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after nine real relative
+  relocations, one real static-TLS relocation, and all seven eager external
   relocations were written to final-writable targets and read back;
 - `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS` was emitted only after each undefined
   function was resolved through deterministic breadth-first SysV symbol scope;
+- `ARACH_C2_SYMBOL_VERSION_PASS` was emitted only after every GNU version
+  table passed its finite structural bounds and all eight symbol-bearing
+  relocations matched an exact version, including the importing dependency's
+  SONAME;
 - `ARACH_C2_STATIC_TLS_PASS` was emitted only after the bounded initial TLS
   template was copied, its checked TPOFF relocation installed, FS base
   published, and the core consumed its initialized TLS word;
@@ -94,11 +98,14 @@ containing all of the following evidence from the same bundle:
   observer, and root initializers ran in provider-first order and each
   dependent observed its providers' initialized state;
 - `ARACH_C2_EXTERNAL_SYMBOL_PASS` was emitted only after all four objects were
-  sealed R/RW/RX and the root call crossed both middle PLT edges, both shared
-  core PLT edges, and consumed the core's relocated state;
+  sealed R/RW/RX and the root call crossed three root, two provider, and two
+  observer PLT edges and consumed the core's relocated state;
 - `ARACH_C2_RUNTIME_LINKER_PASS` was emitted after that complete transaction,
   and the later `ARACH_C1_EXECVE_PASS` proves control transferred to the Rust
-  main image.
+  main image;
+- `ARACH_C2_FINALIZATION_PASS` was emitted only after that image invoked the
+  one-shot x86-64 process-entry callback and four `DT_FINI_ARRAY` functions
+  followed by four `DT_FINI` functions completed in reverse dependency order.
 
 The execution gate is implemented in the Arach validation workflow: CI installs
 QEMU/OVMF, runs this helper against the freshly assembled image, and uploads

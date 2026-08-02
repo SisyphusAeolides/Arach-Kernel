@@ -1,0 +1,6 @@
+ARACH_OBSERVER_1.0 {
+    global:
+        arach_observer_value;
+    local:
+        *;
+};

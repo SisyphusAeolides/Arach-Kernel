@@ -97,6 +97,10 @@ data Gate
   | StaticTlsLayout
   | TlsRelocation
   | InitializerOrder
+  | BoundedSymbolVersionTables
+  | ExactSymbolVersionResolution
+  | FinalizerHandoff
+  | ReverseFinalizerOrder
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -331,6 +335,19 @@ record RuntimeInitializationCertificate where
   tlsRelocation : Measurement TlsRelocation
   initializerOrder : Measurement InitializerOrder
 
+||| Versioned binding and process finalization remain downstream of the
+||| complete runtime-initialization boundary. The certificate requires finite
+||| GNU version tables, exact version-and-provider matching, the ABI finalizer
+||| handoff, and reverse dependency/array execution.
+public export
+record RuntimeFinalizationCertificate where
+  constructor MkRuntimeFinalizationCertificate
+  runtimeInitialization : RuntimeInitializationCertificate
+  boundedSymbolVersionTables : Measurement BoundedSymbolVersionTables
+  exactSymbolVersionResolution : Measurement ExactSymbolVersionResolution
+  finalizerHandoff : Measurement FinalizerHandoff
+  reverseFinalizerOrder : Measurement ReverseFinalizerOrder
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -441,3 +458,11 @@ runtimeInitializationRequiresMultiObjectGraph :
   RuntimeInitializationCertificate -> MultiObjectGraphCertificate
 runtimeInitializationRequiresMultiObjectGraph certificate =
   certificate.multiObjectGraph
+
+||| Finalization and exact version binding cannot be projected without the
+||| complete static-TLS, relocation, and initializer certificate.
+public export
+runtimeFinalizationRequiresInitialization :
+  RuntimeFinalizationCertificate -> RuntimeInitializationCertificate
+runtimeFinalizationRequiresInitialization certificate =
+  certificate.runtimeInitialization

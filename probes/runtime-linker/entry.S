@@ -6,6 +6,7 @@ _start:
     call arach_runtime_linker_start
     test %rax, %rax
     jz .Linvalid_entry
+    lea arach_runtime_linker_finalize(%rip), %rdx
     jmp *%rax
 .Linvalid_entry:
     ud2

@@ -66,6 +66,7 @@ core::arch::global_asm!(
     .global _start
     .type _start,@function
 _start:
+    mov rsi, rdx
     mov rdi, rsp
     call arach_exec_start
     ud2
@@ -172,8 +173,9 @@ unsafe fn stack_string_matches(pointer: usize, expected: &[u8]) -> bool {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn arach_exec_start(stack: *const usize) -> ! {
+extern "C" fn arach_exec_start(stack: *const usize, finalizer: usize) -> ! {
     if stack.is_null()
+        || finalizer == 0
         || unsafe { stack.read() } != 1
         || !unsafe { stack_string_matches(stack.add(1).read(), EXPECTED_ARG0) }
         || unsafe { stack.add(2).read() } != 0
@@ -216,6 +218,9 @@ extern "C" fn arach_exec_start(stack: *const usize) -> ! {
     {
         fail();
     }
+    let finalize: unsafe extern "C" fn() =
+        unsafe { core::mem::transmute(finalizer) };
+    unsafe { finalize() };
     if unsafe {
         syscall3(
             SYS_WRITE,

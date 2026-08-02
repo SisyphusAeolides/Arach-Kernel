@@ -210,13 +210,16 @@ The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C2_RUNTIME_LINKER_ENTER`,
 `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
 `ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_SHARED_RELOCATION_PASS`,
-`ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_STATIC_TLS_PASS`,
+`ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_SYMBOL_VERSION_PASS`,
+`ARACH_C2_STATIC_TLS_PASS`,
 `ARACH_C2_INITIALIZER_ORDER_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,
-`ARACH_C2_RUNTIME_LINKER_PASS`, and then `ARACH_C1_EXECVE_PASS`. The
+`ARACH_C2_RUNTIME_LINKER_PASS`, `ARACH_C1_EXECVE_PASS`, and
+`ARACH_C2_FINALIZATION_PASS`. The
 freestanding C runtime-linker probe validates the kernel-generated auxiliary
 vector, completes the bounded shared-object transaction below, and jumps to
-`AT_ENTRY`; the Rust main image then supplies the existing live-peer
-`exit_group` evidence. Host tests separately cover bounded vector capture,
+`AT_ENTRY`; the Rust main image invokes the ABI finalizer callback and then
+supplies the existing live-peer `exit_group` evidence. Host tests separately
+cover bounded vector capture,
 atomic pair snapshots, independent measurements, composite installation,
 auxiliary-vector bytes, lifecycle epoch invalidation, registry exchange,
 close-on-exec families, signal reset, rollback ownership, and process-pool
@@ -255,6 +258,18 @@ undefined default-visible global functions and final-writable GOT slots. With
 are searched in deterministic breadth-first object order. Each definition must
 be a bounded executable global function, and every written slot is read back.
 
+Versioned objects may provide one `DT_VERSYM` table, at most 16 linked
+`DT_VERDEF` records, at most 16 linked `DT_VERNEED` records, and at most 32
+requirement auxiliaries. The version-symbol table has exactly one entry per
+SysV dynamic symbol. Version-definition index 1 is the base definition and
+must name the object's exact SONAME; later definition indices are contiguous,
+have validated ELF hashes, and do not inherit other versions. Every version
+requirement names one direct `DT_NEEDED` provider, uses a unique bounded index,
+and carries an exact validated version hash and name. Explicit imports match
+both version and provider SONAME. An unversioned lookup accepts only an
+unversioned or default definition, while a hidden definition remains available
+only to an explicit version request.
+
 At most one bounded `PT_TLS` template is admitted per object. The linker
 packs all admitted templates into one zeroed Variant-II initial-exec arena of
 at most 16 KiB, preserves each template alignment up to 4 KiB, assigns stable
@@ -270,28 +285,36 @@ All object relocations run in provider-first order before external PLT binding.
 After every object reaches final W^X permissions, each optional `DT_INIT`
 function and at most 16 `DT_INIT_ARRAY` entries per object execute in the same
 dependency-first order. Every initializer target must remain inside that
-object's declared executable loads. Destructors, preinitializers, lazy binding,
-`DT_REL`, `DT_RELR`, text relocations, runpaths, weak symbols, symbol versions,
-and unknown dynamic tags remain rejected.
+object's declared executable loads. After initialization, the linker freezes a
+one-shot finalization plan containing each optional `DT_FINI`, at most 16
+`DT_FINI_ARRAY` entries per object, and no unvalidated target. It passes the
+plan's callback in x86-64 process-entry register `RDX`. The main image invokes
+that callback once; objects run in reverse dependency order, each finalization
+array runs in reverse index order, and `DT_FINI` follows its array.
+Preinitializers, lazy binding, `DT_REL`, `DT_RELR`, text relocations, runpaths,
+weak symbols, version inheritance, and unknown dynamic tags remain rejected.
 
 The measured fixture is the four-object diamond `libarach-probe.so` to
 `libarach-provider.so` and `libarach-observer.so`, with both middle objects
 depending on `libarach-core.so`. Breadth-first order is probe, provider,
 observer, core; the core is snapshotted once and relocation order is core,
-provider, observer, probe. The core contributes two relative relocations and
-one `R_X86_64_TPOFF64`; each other object contributes one relative initializer
-entry. The middle objects contribute one eager PLT edge each and the root
-contributes two. Exact evidence therefore requires five relative, one static
-TLS, and four external writes.
+provider, observer, probe. The core contributes three relative relocations and
+one `R_X86_64_TPOFF64`; each other object contributes one initializer and one
+finalizer-array relocation. The middle objects contribute two eager PLT edges
+each and the root contributes three. Exact evidence therefore requires nine
+relative, one static-TLS, seven external, and eight versioned writes.
 
 After relocation, the linker changes every complete VMA to its declared R,
 RW, or RX permission and executes core, provider, observer, and root
 initializers in that order. It then closes all four descriptors, removes all
 four temporary mappings, resolves `arach_shared_probe` through the root's SysV
-table, and calls it. Execution crosses both root PLT edges and both
-coalesced-core PLT edges before the core dereferences its relative-relocated
-pointer and FS-relative TLS word. Each dependent initializer records success
-only after observing its providers' state. The measured success markers
+table, and calls it. Execution crosses all three root PLT edges and both PLT
+edges in each middle object before the core dereferences its
+relative-relocated pointer and FS-relative TLS word. Each dependent initializer
+records success only after observing its providers' state. After transfer to
+the main image, the callback executes root, observer, provider, and core
+finalizers; each array precedes that object's `DT_FINI`, and an eight-state TLS
+transition makes any reordering observable. The measured success markers
 therefore cannot be emitted by merely parsing the graph or relocation tables.
 
 Idris 2 and Agda retain dependency discovery, bounded snapshot ownership,
@@ -303,10 +326,12 @@ closure, breadth-first discovery, duplicate-dependency coalescing, acyclic
 provider-first order, and deterministic global symbol scope.
 `RuntimeInitializationCertificate` adds the finite static TLS layout, checked
 TLS relocation, and initializer order while retaining the complete graph
-certificate. This is not yet a general system linker: dynamic TLS allocation,
-destructors, symbol versions, search paths, weak binding, lazy binding, ASLR,
-general VMA splitting, demand paging, and cryptographically qualified process
-entropy remain separate acceptance gates.
+certificate. `RuntimeFinalizationCertificate` then requires bounded GNU
+version tables, exact version-and-provider resolution, the process-entry
+finalizer handoff, and reverse finalizer execution. This is not yet a general
+system linker: dynamic TLS allocation, search paths, weak binding, lazy
+binding, ASLR, general VMA splitting, demand paging, and cryptographically
+qualified process entropy remain separate acceptance gates.
 
 The current tree passes external-Kbuild and static load-admission gates against
 real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux

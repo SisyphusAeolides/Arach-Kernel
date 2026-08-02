@@ -1,0 +1,8 @@
+ARACH_CORE_1.0 {
+    global:
+        arach_core_value;
+        arach_core_finalize_step;
+        arach_core_tls;
+    local:
+        *;
+};

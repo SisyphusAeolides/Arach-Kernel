@@ -136,12 +136,14 @@ from canonical SONAMEs, snapshots each SONAME once, rejects cycles, derives a
 provider-first order, and uses deterministic load-order SysV symbol scope for
 eager PLT binding. The measured diamond loads one consumer, two independent
 middle providers, and one coalesced core; it applies the core's real
-`R_X86_64_TPOFF64` plus five real `R_X86_64_RELATIVE` writes, resolves four
-real `R_X86_64_JUMP_SLOT` entries, seals all four objects R/RW/RX, executes
-four provider-first initializers, and calls through both branches into code
-that consumes relocated pointer and TLS state. The admitted slice remains
-single-threaded at exec and each Akashic file is bounded to 64 KiB. Dynamic TLS
-allocation, finalizers, symbol versions, general search paths, lazy binding,
+`R_X86_64_TPOFF64` plus nine real `R_X86_64_RELATIVE` writes, resolves seven
+real exact-version `R_X86_64_JUMP_SLOT` entries, seals all four objects
+R/RW/RX, executes four provider-first initializers, and calls through both
+branches into code that consumes relocated pointer and TLS state. The main
+image later invokes the one-shot x86-64 finalizer callback, which executes four
+`DT_FINI_ARRAY` and four `DT_FINI` functions in reverse dependency order. The
+admitted slice remains single-threaded at exec and each Akashic file is bounded
+to 64 KiB. Dynamic TLS allocation, general search paths, weak or lazy binding,
 general file mapping semantics, ASLR, and production entropy remain
 fail-closed.
 
