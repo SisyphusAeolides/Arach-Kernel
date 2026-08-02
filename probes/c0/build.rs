@@ -27,6 +27,13 @@ fn main() {
         "shared object provider probe",
     );
     emit_path("ARACH_SHARED_PROVIDER_IMAGE_PATH", &shared_provider);
+    let shared_observer = required_probe(
+        "ARACH_SHARED_OBSERVER_IMAGE",
+        "shared object observer probe",
+    );
+    emit_path("ARACH_SHARED_OBSERVER_IMAGE_PATH", &shared_observer);
+    let shared_core = required_probe("ARACH_SHARED_CORE_IMAGE", "shared object core probe");
+    emit_path("ARACH_SHARED_CORE_IMAGE_PATH", &shared_core);
 }
 
 fn required_probe(variable: &str, label: &str) -> PathBuf {

@@ -51,21 +51,24 @@ executes it. `ARACH_C2_FILE_MMAP_PASS` and `ARACH_C2_MPROTECT_PASS` distinguish
 those two live gates.
 
 The probe writes a PIE main ELF, a separately built freestanding C runtime
-linker, and an ET_DYN consumer/provider pair into Akashic VFS, then calls `execve` with
-bounded argv and environment vectors. The interpreter emits
+linker, and a four-object ET_DYN diamond into Akashic VFS, then calls `execve`
+with bounded argv and environment vectors. The interpreter emits
 `ARACH_C2_RUNTIME_LINKER_ENTER`, validates the Linux auxiliary vector,
-discovers the main image's and consumer's exact `DT_NEEDED` edges, snapshots
-both objects, relocates the provider, eagerly binds the consumer's external
-PLT symbol, emits `ARACH_C2_DT_NEEDED_PASS`,
-`ARACH_C2_DEPENDENCY_GRAPH_PASS`, `ARACH_C2_SHARED_RELOCATION_PASS`, and
-`ARACH_C2_EXTERNAL_SYMBOL_PASS`, emits `ARACH_C2_RUNTIME_LINKER_PASS`, and
-transfers to the main image's `AT_ENTRY`. That replacement emits
+discovers the closure breadth-first, coalesces both middle dependencies onto
+one core snapshot, rejects cycles, applies provider-first relocation, and
+eagerly binds four external PLT symbols through deterministic global scope. It
+emits `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
+`ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_SHARED_RELOCATION_PASS`,
+`ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, and `ARACH_C2_EXTERNAL_SYMBOL_PASS`, then
+emits `ARACH_C2_RUNTIME_LINKER_PASS` and transfers to the main image's
+`AT_ENTRY`. That replacement emits
 `ARACH_C1_EXECVE_PASS`,
 creates a live thread-group peer, and then emits the existing exit-group
 marker. This proves that the old image cannot resume, same-PID ownership
 reaches the two-image replacement, and deferred reclamation does not destroy
-the new hierarchy. It does not claim arbitrary recursive dependency loading,
-general symbol scopes, TLS relocation, constructors, or versioned lookup.
+the new hierarchy. The admitted graph remains bounded to eight objects and
+does not claim TLS relocation, constructors, versioned lookup, runpaths, or
+lazy binding.
 
 The kernel currently carries a legacy internal `crest` name for its second
 boot-process slot. `ARACH_BOOTSTRAP_IMAGE` deliberately replaces that artifact

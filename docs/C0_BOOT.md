@@ -76,15 +76,20 @@ containing all of the following evidence from the same bundle:
 - `ARACH_C2_DT_NEEDED_PASS` was emitted only after the interpreter derived the
   PIE load bias, bounded its dynamic table, and discovered the exact shared
   object name;
-- `ARACH_C2_DEPENDENCY_GRAPH_PASS` was emitted only after the consumer's nested
-  dependency produced the exact acyclic two-node closure and both immutable
-  objects passed bounded ELF and dynamic-table validation;
-- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after the provider's real
-  relative relocation was applied to a final-writable target and read back;
-- `ARACH_C2_EXTERNAL_SYMBOL_PASS` was emitted only after the consumer's sole
-  eager `R_X86_64_JUMP_SLOT` was resolved through the provider's bounded SysV
-  symbol table, both objects were sealed R/RW/RX, and the cross-object call
-  consumed the provider's relocated state;
+- `ARACH_C2_DEPENDENCY_GRAPH_PASS` was emitted only after bounded breadth-first
+  discovery reached a complete acyclic closure and every immutable object
+  passed ELF, SONAME, dynamic-table, and dependency validation;
+- `ARACH_C2_MULTI_OBJECT_GRAPH_PASS` was emitted only after the measured
+  four-object diamond coalesced both middle-object references to one core
+  snapshot and produced provider-first relocation order;
+- `ARACH_C2_SHARED_RELOCATION_PASS` was emitted only after the core's real
+  relative relocation and all four eager external relocations were written to
+  final-writable targets and read back;
+- `ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS` was emitted only after each undefined
+  function was resolved through deterministic breadth-first SysV symbol scope;
+- `ARACH_C2_EXTERNAL_SYMBOL_PASS` was emitted only after all four objects were
+  sealed R/RW/RX and the root call crossed both middle PLT edges, both shared
+  core PLT edges, and consumed the core's relocated state;
 - `ARACH_C2_RUNTIME_LINKER_PASS` was emitted after that complete transaction,
   and the later `ARACH_C1_EXECVE_PASS` proves control transferred to the Rust
   main image.

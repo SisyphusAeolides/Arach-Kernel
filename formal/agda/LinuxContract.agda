@@ -34,6 +34,8 @@ data Gate : Set where
   sharedObjectWxSeal sharedSymbolCall : Gate
   dependencyGraphClosure externalSymbolRelocation eagerPltBinding : Gate
   crossObjectCall : Gate
+  boundedObjectClosure breadthFirstDiscovery : Gate
+  duplicateDependencyCoalescing acyclicRelocationOrder globalSymbolScope : Gate
 
 -- firstPassingCase makes an empty test result unrepresentable.
 record Measurement (gate : Gate) : Set where
@@ -194,6 +196,16 @@ record DependencyGraphCertificate : Set where
     eagerPltBindingEvidence : Measurement eagerPltBinding
     crossObjectCallEvidence : Measurement crossObjectCall
 
+record MultiObjectGraphCertificate : Set where
+  constructor multiObjectGraphCertificate
+  field
+    dependencyGraph : DependencyGraphCertificate
+    boundedObjectClosureEvidence : Measurement boundedObjectClosure
+    breadthFirstDiscoveryEvidence : Measurement breadthFirstDiscovery
+    duplicateDependencyCoalescingEvidence : Measurement duplicateDependencyCoalescing
+    acyclicRelocationOrderEvidence : Measurement acyclicRelocationOrder
+    globalSymbolScopeEvidence : Measurement globalSymbolScope
+
 -- Runtime qualification can only be constructed with build qualification.
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
 runtimeRequiresBuild certificate = NvidiaRuntimeCertificate.build certificate
@@ -298,3 +310,10 @@ dependencyGraphRequiresSharedObject :
   DependencyGraphCertificate -> SharedObjectCertificate
 dependencyGraphRequiresSharedObject certificate =
   DependencyGraphCertificate.sharedObject certificate
+
+-- Multi-object closure structurally retains the first measured dependency
+-- graph, relocation, eager-binding, and cross-object call boundary.
+multiObjectGraphRequiresDependencyGraph :
+  MultiObjectGraphCertificate -> DependencyGraphCertificate
+multiObjectGraphRequiresDependencyGraph certificate =
+  MultiObjectGraphCertificate.dependencyGraph certificate

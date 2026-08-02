@@ -19,6 +19,8 @@ const EXEC_PATH: &[u8] = b"/exec-target\0";
 const RUNTIME_LINKER_PATH: &[u8] = b"/arach-ld.so\0";
 const SHARED_OBJECT_PATH: &[u8] = b"/libarach-probe.so\0";
 const SHARED_PROVIDER_PATH: &[u8] = b"/libarach-provider.so\0";
+const SHARED_OBSERVER_PATH: &[u8] = b"/libarach-observer.so\0";
+const SHARED_CORE_PATH: &[u8] = b"/libarach-core.so\0";
 const MMAP_PATH: &[u8] = b"/mmap-probe\0";
 const EXEC_ARG0: &[u8] = b"exec-target\0";
 const EXEC_ENV0: &[u8] = b"ARACH_EXEC_TRANSACTION=1\0";
@@ -26,6 +28,8 @@ const EXEC_TARGET: &[u8] = include_bytes!(env!("ARACH_EXEC_TARGET_IMAGE_PATH"));
 const RUNTIME_LINKER: &[u8] = include_bytes!(env!("ARACH_RUNTIME_LINKER_IMAGE_PATH"));
 const SHARED_OBJECT: &[u8] = include_bytes!(env!("ARACH_SHARED_OBJECT_IMAGE_PATH"));
 const SHARED_PROVIDER: &[u8] = include_bytes!(env!("ARACH_SHARED_PROVIDER_IMAGE_PATH"));
+const SHARED_OBSERVER: &[u8] = include_bytes!(env!("ARACH_SHARED_OBSERVER_IMAGE_PATH"));
+const SHARED_CORE: &[u8] = include_bytes!(env!("ARACH_SHARED_CORE_IMAGE_PATH"));
 const MAPPED_CODE: &[u8] = &[0xb8, 42, 0, 0, 0, 0xc3];
 
 const SYS_WRITE: usize = 1;
@@ -962,9 +966,7 @@ fn exercise_unix_socket_pair() -> bool {
     // descriptor has closed, but each VMA independently retains the backing.
     unsafe {
         core::ptr::write_volatile((first_shared as *mut u64).add(7), 0x4152_4143_4853_484d);
-        if core::ptr::read_volatile((second_shared as *const u64).add(7))
-            != 0x4152_4143_4853_484d
-        {
+        if core::ptr::read_volatile((second_shared as *const u64).add(7)) != 0x4152_4143_4853_484d {
             return false;
         }
     }
@@ -2118,6 +2120,34 @@ pub extern "C" fn _start() -> ! {
     if shared_provider < 3
         || !write_all(shared_provider as usize, SHARED_PROVIDER)
         || unsafe { linux_syscall1(SYS_CLOSE, shared_provider as usize) } != 0
+    {
+        fail();
+    }
+    let shared_observer = unsafe {
+        linux_syscall3(
+            SYS_OPEN,
+            SHARED_OBSERVER_PATH.as_ptr() as usize,
+            O_CREAT | O_EXCL | O_RDWR,
+            0,
+        )
+    };
+    if shared_observer < 3
+        || !write_all(shared_observer as usize, SHARED_OBSERVER)
+        || unsafe { linux_syscall1(SYS_CLOSE, shared_observer as usize) } != 0
+    {
+        fail();
+    }
+    let shared_core = unsafe {
+        linux_syscall3(
+            SYS_OPEN,
+            SHARED_CORE_PATH.as_ptr() as usize,
+            O_CREAT | O_EXCL | O_RDWR,
+            0,
+        )
+    };
+    if shared_core < 3
+        || !write_all(shared_core as usize, SHARED_CORE)
+        || unsafe { linux_syscall1(SYS_CLOSE, shared_core as usize) } != 0
     {
         fail();
     }

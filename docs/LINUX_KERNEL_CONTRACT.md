@@ -209,7 +209,8 @@ The measured QEMU chain requires the file-mapping markers above, followed by
 `ARACH_C1_LINUX_SYSCALL_PASS`,
 `ARACH_C2_RUNTIME_LINKER_ENTER`,
 `ARACH_C2_DT_NEEDED_PASS`, `ARACH_C2_DEPENDENCY_GRAPH_PASS`,
-`ARACH_C2_SHARED_RELOCATION_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,
+`ARACH_C2_MULTI_OBJECT_GRAPH_PASS`, `ARACH_C2_SHARED_RELOCATION_PASS`,
+`ARACH_C2_GLOBAL_SYMBOL_SCOPE_PASS`, `ARACH_C2_EXTERNAL_SYMBOL_PASS`,
 `ARACH_C2_RUNTIME_LINKER_PASS`, and then `ARACH_C1_EXECVE_PASS`. The
 freestanding C runtime-linker probe validates the kernel-generated auxiliary
 vector, completes the bounded shared-object transaction below, and jumps to
@@ -223,50 +224,66 @@ certificate.
 
 ### Bounded dependency and shared-object relocation
 
-The first dependency-graph profile admits exactly one `DT_NEEDED` entry in the
-main PIE and exactly one nested `DT_NEEDED` entry in its consumer. The main
-dynamic table may contain only `DT_NEEDED`, `DT_STRTAB`, `DT_STRSZ`, and
-`DT_NULL`. The runtime linker derives the main load bias from `AT_PHDR`,
-validates every dynamic pointer against a mapped main-image `PT_LOAD`, obtains
-each dependency name from its bounded string table, and constructs both paths
-from discovered names. The exact acyclic closure is `libarach-probe.so` then
-`libarach-provider.so`; the provider must have no dependency.
+The measured main PIE has exactly one `DT_NEEDED` root; the closure engine is
+bounded for up to eight roots and up to eight dependencies in each of eight
+shared objects. The main dynamic table may contain only `DT_NEEDED`,
+`DT_STRTAB`, `DT_STRSZ`, and `DT_NULL`. The runtime linker derives the main
+load bias from `AT_PHDR`, validates every dynamic pointer against a mapped
+main-image `PT_LOAD`, and accepts only canonical root-only SONAME components.
+It discovers the closure breadth-first, uses one object slot and immutable
+snapshot per SONAME, records every edge, and rejects duplicate edges within
+one object, capacity overflow, missing providers, SONAME mismatches,
+self-edges, and all other cycles. A bounded topological pass computes
+provider-first relocation order before any object is made executable.
 
 Each dependency must be a regular generation-owned Akashic file no larger than
 64 KiB. The linker opens it read-only, derives its exact size with `lseek`, and
 uses a temporary private file mapping to validate one x86-64 ET_DYN image with
-at most 16 program headers and eight page-aligned load segments. It maps the
-consumer at `0x30000000` and the provider at `0x31000000` as disjoint eager
-private RW snapshots, zeros bytes beyond `p_filesz`, and keeps every page
-non-executable while relocation is possible.
+at most 16 program headers and eight page-aligned load segments. Object slots
+begin at `0x30000000` and are separated by 16 MiB, while each object is bounded
+to 64 KiB. Every load is a disjoint eager private RW snapshot; bytes beyond
+`p_filesz` are zeroed and every page remains non-executable while relocation
+is possible.
 
-Both objects require exact SONAMEs, SysV hash tables, and bounded dynamic symbol
-and string tables. The provider admits exactly one symbol-zero
-`R_X86_64_RELATIVE` relocation whose target lies in a final-writable segment.
-The consumer admits exactly one eager `R_X86_64_JUMP_SLOT` for the undefined
-global function `arach_provider_value`; the linker resolves it only to the
-provider's validated global function and reads the written GOT slot back.
-Provider relocation precedes consumer binding. Constructors and destructors,
-lazy binding, additional graph nodes, cycles, `DT_REL`, `DT_RELR`, text
-relocations, runpaths, symbol versions, TLS, and unknown dynamic tags are
-rejected.
+Every object requires an exact SONAME, a SysV hash table, and bounded dynamic
+symbol and string tables. Each relocation table is bounded to 64 entries.
+Symbol-zero `R_X86_64_RELATIVE` entries are checked against final-writable
+targets and mapped addends. Eager `R_X86_64_JUMP_SLOT` entries must reference
+undefined default-visible global functions and final-writable GOT slots. With
+`DT_SYMBOLIC`, the requesting object is searched first; remaining definitions
+are searched in deterministic breadth-first object order. Each definition must
+be a bounded executable global function, and every written slot is read back.
+All relative relocations run in provider-first order before any external PLT
+binding. Constructors and destructors, lazy binding, `DT_REL`, `DT_RELR`, text
+relocations, runpaths, weak or TLS symbols, symbol versions, and unknown dynamic
+tags are rejected.
 
-After relocation, the linker changes every complete VMA in both objects to its
-declared R, RW, or RX permission, closes both descriptors, removes both
-temporary mappings, resolves `arach_shared_probe` through the consumer's SysV
-symbol table, and calls it. The consumer crosses the relocated PLT/GOT edge;
-the provider then dereferences its relative-relocated pointer. The measured
-success marker therefore cannot be emitted by merely parsing either relocation
-table.
+The measured fixture is the four-object diamond `libarach-probe.so` to
+`libarach-provider.so` and `libarach-observer.so`, with both middle objects
+depending on `libarach-core.so`. Breadth-first order is probe, provider,
+observer, core; the core is snapshotted once and relocation order is core,
+provider, observer, probe. The core contributes one relative relocation; the
+middle objects contribute one eager PLT edge each; and the root contributes
+two. Exact evidence therefore requires one relative and four external writes.
+
+After relocation, the linker changes every complete VMA to its declared R,
+RW, or RX permission, closes all four descriptors, removes all four temporary
+mappings, resolves `arach_shared_probe` through the root's SysV table, and
+calls it. Execution crosses both root PLT edges and both coalesced-core PLT
+edges before the core dereferences its relative-relocated pointer. The measured
+success marker therefore cannot be emitted by merely parsing the graph or its
+relocation tables.
 
 Idris 2 and Agda retain dependency discovery, bounded snapshot ownership,
 relative relocation, final W^X sealing, and observed symbol execution in the
 existing `SharedObjectCertificate`. A downstream `DependencyGraphCertificate`
-adds exact graph closure, external-symbol relocation, eager PLT binding, and an
-observed cross-object call. This is not a general system linker: larger graphs,
-general symbol scopes, TLS, constructors, symbol versions, search paths, lazy
-binding, ASLR, general VMA splitting, demand paging, and cryptographically
-qualified process entropy remain separate acceptance gates.
+adds graph closure, external-symbol relocation, eager PLT binding, and an
+observed cross-object call. `MultiObjectGraphCertificate` then requires bounded
+closure, breadth-first discovery, duplicate-dependency coalescing, acyclic
+provider-first order, and deterministic global symbol scope. This is not yet a
+general system linker: TLS, constructors, symbol versions, search paths, weak
+binding, lazy binding, ASLR, general VMA splitting, demand paging, and
+cryptographically qualified process entropy remain separate acceptance gates.
 
 The current tree passes external-Kbuild and static load-admission gates against
 real RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 module artifacts. Its Linux

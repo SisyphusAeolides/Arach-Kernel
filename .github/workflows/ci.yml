@@ -20,6 +20,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --all-targets
       - run: cargo test --workspace --all-targets
+      - run: scripts/test-runtime-linker-graph.sh
       - name: Reject generated build products
         run: test -z "$(git ls-files | grep -E '(^target/|\.(o|a|rlib|rmeta)$)' || true)"
 

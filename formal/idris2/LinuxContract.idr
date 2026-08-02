@@ -89,6 +89,11 @@ data Gate
   | ExternalSymbolRelocation
   | EagerPltBinding
   | CrossObjectCall
+  | BoundedObjectClosure
+  | BreadthFirstDiscovery
+  | DuplicateDependencyCoalescing
+  | AcyclicRelocationOrder
+  | GlobalSymbolScope
 
 ||| A measurement is tied to one named gate and contains at least one case.
 public export
@@ -298,6 +303,20 @@ record DependencyGraphCertificate where
   eagerPltBinding : Measurement EagerPltBinding
   crossObjectCall : Measurement CrossObjectCall
 
+||| The bounded multi-object certificate retains the first cross-object
+||| execution boundary and adds finite closure, deterministic breadth-first
+||| discovery, one snapshot per SONAME, cycle-free provider-first ordering,
+||| and deterministic process-global symbol scope.
+public export
+record MultiObjectGraphCertificate where
+  constructor MkMultiObjectGraphCertificate
+  dependencyGraph : DependencyGraphCertificate
+  boundedObjectClosure : Measurement BoundedObjectClosure
+  breadthFirstDiscovery : Measurement BreadthFirstDiscovery
+  duplicateDependencyCoalescing : Measurement DuplicateDependencyCoalescing
+  acyclicRelocationOrder : Measurement AcyclicRelocationOrder
+  globalSymbolScope : Measurement GlobalSymbolScope
+
 ||| Runtime qualification structurally contains build qualification.
 public export
 runtimeRequiresBuild : NvidiaRuntimeCertificate -> ExternalModuleCertificate
@@ -393,3 +412,10 @@ public export
 dependencyGraphRequiresSharedObject :
   DependencyGraphCertificate -> SharedObjectCertificate
 dependencyGraphRequiresSharedObject certificate = certificate.sharedObject
+
+||| General bounded closure cannot be projected without the earlier measured
+||| dependency, relocation, eager-binding, and cross-object call evidence.
+public export
+multiObjectGraphRequiresDependencyGraph :
+  MultiObjectGraphCertificate -> DependencyGraphCertificate
+multiObjectGraphRequiresDependencyGraph certificate = certificate.dependencyGraph
