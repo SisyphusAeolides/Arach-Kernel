@@ -105,7 +105,20 @@ test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_RELATIVE" {count++} END {pr
 test "$(readelf -dW "$output" | awk '$2 == "(RELR)" {count++} END {print count + 0}')" -eq 1
 test "$(readelf -dW "$output" | awk '$2 == "(RELRSZ)" {print $3}')" -eq 16
 test "$(readelf -dW "$output" | awk '$2 == "(RELRENT)" {print $3}')" -eq 8
-test "$(readelf -rW "$output" | awk '$3 ~ /[.]relr[.]dyn/ {entries = $8; locations = $12} END {print entries, locations}')" = '2 2'
+test "$(readelf -rW "$output" | awk '
+    $3 ~ /[.]relr[.]dyn/ {
+        entries = $8
+        if ($12 ~ /^[0-9]+$/) locations = $12
+        in_relr = 1
+        next
+    }
+    in_relr && $2 == "offsets" && $1 ~ /^[0-9]+$/ {
+        locations = $1
+        next
+    }
+    in_relr && $1 == "Relocation" && $2 == "section" {in_relr = 0}
+    END {print entries + 0, locations + 0}
+')" = '2 2'
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_GLOB_DAT" {count++} END {print count + 0}')" -eq 3
 test "$(readelf -rW "$output" | awk '$3 == "R_X86_64_64" {count++} END {print count + 0}')" -eq 4
 test -z "$(readelf -rW "$output" | awk '$3 ~ /^R_X86_64_/ && $3 != "R_X86_64_JUMP_SLOT" && $3 != "R_X86_64_GLOB_DAT" && $3 != "R_X86_64_64" {print}')"
