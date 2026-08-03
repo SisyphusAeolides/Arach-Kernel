@@ -3752,19 +3752,31 @@ fn linux_prlimit64(arguments: [u64; 6]) -> isize {
 /// fatal.  Most COSMIC services use `clone` with CLONE_VM instead.
 #[cfg(target_os = "none")]
 fn linux_fork_stub() -> isize {
-    crate::missing_coverage!(severity = "high", owner = "process-team", "fork and vfork unimplemented");
+    crate::missing_coverage!(
+        severity = "high",
+        owner = "process-team",
+        "fork and vfork unimplemented"
+    );
     ERROR_TRY_AGAIN
 }
 
 #[cfg(target_os = "none")]
 fn linux_module_stub() -> isize {
-    crate::missing_coverage!(severity = "high", owner = "linux-compat", "Module lifecycle unimplemented");
+    crate::missing_coverage!(
+        severity = "high",
+        owner = "linux-compat",
+        "Module lifecycle unimplemented"
+    );
     ERROR_OPERATION_NOT_PERMITTED
 }
 
 #[cfg(target_os = "none")]
 fn linux_syslog_stub() -> isize {
-    crate::missing_coverage!(severity = "low", owner = "linux-compat", "Syslog unimplemented");
+    crate::missing_coverage!(
+        severity = "low",
+        owner = "linux-compat",
+        "Syslog unimplemented"
+    );
     ERROR_OPERATION_NOT_PERMITTED
 }
 
@@ -3780,7 +3792,11 @@ fn linux_wait4(arguments: [u64; 6]) -> isize {
 
     // Only WNOHANG is honoured; blocking waits remain unimplemented.
     if options & !WNOHANG != 0 {
-        crate::missing_coverage!(severity = "medium", owner = "scheduler-team", "Blocking wait unimplemented");
+        crate::missing_coverage!(
+            severity = "medium",
+            owner = "scheduler-team",
+            "Blocking wait unimplemented"
+        );
         return ERROR_NOT_IMPLEMENTED;
     }
     // -1 or negative means wait for any child; 0 means same thread-group.
