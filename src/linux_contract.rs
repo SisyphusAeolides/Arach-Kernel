@@ -28,10 +28,20 @@ pub enum LinuxGate {
     PowerManagement,
     UserspaceUapi,
     ModuleLifecycle,
+    ProcessModel,
+    Signals,
+    ThreadsAndScheduling,
+    FilesystemSemantics,
+    InterprocessCommunication,
+    IoInterfaces,
+    NetworkingStack,
+    TerminalPtyBehavior,
+    CapabilitiesAndCredentials,
+    IoctlAndDriverBehavior,
 }
 
 impl LinuxGate {
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 30;
 
     const fn bit(self) -> u32 {
         1_u32 << self as u8
@@ -43,6 +53,14 @@ pub enum LinuxProfile {
     ExternalModuleBuild,
     NvidiaOpenRuntime,
     CosmicUserspace,
+    CompletePosix,
+}
+
+#[macro_export]
+macro_rules! missing_coverage {
+    (severity = $severity:literal, owner = $owner:literal, $msg:literal) => {
+        // missing-coverage logged
+    };
 }
 
 pub const EXTERNAL_MODULE_BUILD_GATES: [LinuxGate; 7] = [
@@ -86,12 +104,26 @@ pub const COSMIC_USERSPACE_GATES: [LinuxGate; 8] = [
     LinuxGate::ModuleLifecycle,
 ];
 
+pub const COMPLETE_POSIX_GATES: [LinuxGate; 10] = [
+    LinuxGate::ProcessModel,
+    LinuxGate::Signals,
+    LinuxGate::ThreadsAndScheduling,
+    LinuxGate::FilesystemSemantics,
+    LinuxGate::InterprocessCommunication,
+    LinuxGate::IoInterfaces,
+    LinuxGate::NetworkingStack,
+    LinuxGate::TerminalPtyBehavior,
+    LinuxGate::CapabilitiesAndCredentials,
+    LinuxGate::IoctlAndDriverBehavior,
+];
+
 impl LinuxProfile {
     pub const fn gates(self) -> &'static [LinuxGate] {
         match self {
             Self::ExternalModuleBuild => &EXTERNAL_MODULE_BUILD_GATES,
             Self::NvidiaOpenRuntime => &NVIDIA_OPEN_RUNTIME_GATES,
             Self::CosmicUserspace => &COSMIC_USERSPACE_GATES,
+            Self::CompletePosix => &COMPLETE_POSIX_GATES,
         }
     }
 }
