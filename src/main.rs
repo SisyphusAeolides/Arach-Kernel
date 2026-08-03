@@ -419,6 +419,11 @@ const CREST_EXECUTION_ABI: arach::process::abi::ExecutionAbi =
 
 #[global_allocator]
 static KERNEL_HEAP: BumpAllocator = BumpAllocator::empty();
+/// Static fallback heap backing the global allocator for early boot phases
+/// that precede the physical memory map scan (e.g. the COSMIC service Vec).
+/// 4 MiB matches MAXIMUM_HEAP_SIZE so the runtime path skips a second init.
+#[cfg(target_os = "none")]
+static mut EARLY_HEAP_STORAGE: [u8; 4 * 1024 * 1024] = [0; 4 * 1024 * 1024];
 static IRQ_TEST_HITS: AtomicUsize = AtomicUsize::new(0);
 
 struct BootDriverLogger<'a> {
@@ -983,6 +988,18 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     // COSMIC is an atomic service bundle. If the opt-in native profile is
     // enabled, accepting only a subset would leave Push with an apparently
     // valid but unusable desktop graph, so every service is required here.
+    //
+    // The physical memory map has not been scanned yet at this point, so the
+    // main KERNEL_HEAP initialization below is still pending. Pre-seed the
+    // allocator from a static BSS buffer so that Vec::push() succeeds here.
+    #[cfg(target_os = "none")]
+    if COSMIC_BOOT_ENABLED && KERNEL_HEAP.remaining() == 0 {
+        // SAFETY: bootstrap is single-threaded; EARLY_HEAP_STORAGE lives for
+        // the entire kernel lifetime and is exclusively owned by KERNEL_HEAP.
+        let start = unsafe { core::ptr::addr_of!(EARLY_HEAP_STORAGE) as usize };
+        let size = core::mem::size_of::<[u8; 4 * 1024 * 1024]>();
+        let _ = unsafe { KERNEL_HEAP.initialize(start, size) };
+    }
     #[cfg(target_os = "none")]
     let mut cosmic_modules = Vec::new();
     #[cfg(target_os = "none")]
@@ -1246,15 +1263,29 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     };
     // SAFETY: Abyss selected an identity-mapped usable region above the kernel
     // and boot data. It remains reserved for this allocator after selection.
-    if let Err(error) = unsafe { KERNEL_HEAP.initialize(heap_virtual_start, heap_size) } {
-        let _ = writeln!(serial, "Abyss: heap initialization failed: {error:?}");
-        halt();
+    match unsafe { KERNEL_HEAP.initialize(heap_virtual_start, heap_size) } {
+        Ok(()) => {
+            let _ = writeln!(
+                serial,
+                "Abyss: bootstrap heap {heap_start:#x}..{:#x}",
+                heap_start + heap_size
+            );
+        }
+        Err(abyss::allocator::InitializeError::AlreadyInitialized) => {
+            // The heap was pre-seeded from EARLY_HEAP_STORAGE before the
+            // COSMIC service Vec was populated. The static buffer is 4 MiB,
+            // matching MAXIMUM_HEAP_SIZE, so no second init is needed.
+            let _ = writeln!(
+                serial,
+                "Abyss: bootstrap heap retained (early static 0x{:x} bytes)",
+                KERNEL_HEAP.remaining()
+            );
+        }
+        Err(error) => {
+            let _ = writeln!(serial, "Abyss: heap initialization failed: {error:?}");
+            halt();
+        }
     }
-    let _ = writeln!(
-        serial,
-        "Abyss: bootstrap heap {heap_start:#x}..{:#x}",
-        heap_start + heap_size
-    );
 
     let storage_words = match BitmapFrameAllocator::storage_words(IDENTITY_MAP_END) {
         Ok(words) => words,
