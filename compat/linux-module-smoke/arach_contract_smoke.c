@@ -87,5 +87,5 @@ module_init(arach_contract_smoke_init);
 module_exit(arach_contract_smoke_exit);
 
 MODULE_DESCRIPTION("Arach external Kbuild contract smoke module");
-MODULE_AUTHOR("Arach OS");
+MODULE_AUTHOR("ArachOS");
 MODULE_LICENSE("MIT");

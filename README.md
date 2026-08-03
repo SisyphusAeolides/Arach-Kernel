@@ -8,7 +8,7 @@
 [![NVIDIA Linux contract](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/nvidia-build.yml/badge.svg?branch=main)](https://github.com/SisyphusAeolides/Arach-Kernel/actions/workflows/nvidia-build.yml)
 
 Arach Kernel is the Rust-first monolithic kernel at the foundation of
-[Arach OS](https://github.com/SisyphusAeolides/Arach-OS). It targets x86-64
+[ArachOS](https://github.com/SisyphusAeolides/ArachOS). It targets x86-64
 systems with a measured Linux-compatible userspace contract and an unmodified,
 reproducibly pinned COSMIC Epoch desktop as its first complete graphical
 environment.
@@ -20,7 +20,7 @@ applications into ring 0.
 
 ## Design goals
 
-- Boot a complete Arach OS system through the independently versioned Granite
+- Boot a complete ArachOS system through the independently versioned Granite
   bootloader and Push PID 1.
 - Run the complete COSMIC Epoch experience, including the greeter, compositor,
   portals, applications, audio, networking, suspend, and session lifecycle.
@@ -36,7 +36,7 @@ applications into ring 0.
 Arach Kernel is under active development. The pinned Granite/Arach/Push C0
 bundle now executes under QEMU/OVMF in CI, enters a measured ring-3 Linux
 personality, and emits serial evidence from the real syscall, lifecycle, and
-page-table paths. Arach OS and Arach-Packages retain the qualified source
+page-table paths. ArachOS and Arach-Packages retain the qualified source
 revisions in their integration and recipe locks.
 
 The Linux personality currently covers:
@@ -191,8 +191,8 @@ formal/agda/            safe proof models
 ```
 
 The `core/` and `libraries/` trees are integration snapshots. Granite, Push,
-Slope, Corinth, and the other Arach OS components remain independently
-versioned repositories. The Arach OS repository pins qualified component
+Slope, Corinth, and the other ArachOS components remain independently
+versioned repositories. The ArachOS repository pins qualified component
 releases and is the integration authority; this repository remains focused on
 the kernel.
 
@@ -219,7 +219,7 @@ ARACH_COSMIC_SERVICES_DIR=/path/to/cosmic-services \
 The custom target is `x86_64-arach.json`. The `cargo kernel` alias selects the
 `arach` package and binary, but a release kernel build also requires pinned
 formal attestation and measured external PID 1/session artifacts. Those inputs
-remain controlled by their own repositories and the Arach OS component lock.
+remain controlled by their own repositories and the ArachOS component lock.
 Both bundle builders load Granite's target configuration explicitly, compare
 two isolated production UEFI builds, and reject nondeterministic PE metadata.
 The C0 FAT constructor fixes its volume identity and timestamps; CI requires
