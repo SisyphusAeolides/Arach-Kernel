@@ -109,6 +109,10 @@ pub enum LinuxSyscall {
     ExitGroup,
     Tgkill,
     Rseq,
+    InitModule,
+    DeleteModule,
+    FinitModule,
+    Syslog,
 }
 
 impl LinuxSyscall {
@@ -200,6 +204,10 @@ impl LinuxSyscall {
             319 => Some(Self::MemfdCreate),
             334 => Some(Self::Rseq),
             186 => Some(Self::Gettid),
+            103 => Some(Self::Syslog),
+            175 => Some(Self::InitModule),
+            176 => Some(Self::DeleteModule),
+            313 => Some(Self::FinitModule),
             _ => None,
         }
     }

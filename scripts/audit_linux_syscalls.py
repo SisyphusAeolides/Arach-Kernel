@@ -16,9 +16,9 @@ VARIANT_RE = re.compile(r"^\s*([A-Z][A-Za-z0-9_]*)\s*,\s*$", re.MULTILINE)
 DECODE_RE = re.compile(r"(?m)^\s*(\d+)\s*=>\s*Some\(Self::([A-Za-z0-9_]+)\)")
 ROUTE_RE = re.compile(r"LinuxSyscall::([A-Za-z0-9_]+)")
 STUB_RE = re.compile(
-    r"Some\(crate::process::abi::LinuxSyscall::([A-Za-z0-9_]+)\)\s*=>\s*linux_fork_stub\(\)"
+    r"Some\(crate::process::abi::LinuxSyscall::([A-Za-z0-9_]+)\)\s*=>\s*linux_[a-z0-9_]*stub\(\)"
 )
-EXPECTED_STUBS = {"Fork", "Vfork"}
+EXPECTED_STUBS = {"Fork", "Vfork", "InitModule", "FinitModule", "DeleteModule", "Syslog"}
 SCHEDULED = {"Clone", "Execve", "Exit", "ExitGroup", "Futex", "RtSigreturn"}
 
 

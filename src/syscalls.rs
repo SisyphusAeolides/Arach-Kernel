@@ -1457,6 +1457,10 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Prlimit64) => linux_prlimit64(arguments),
         Some(crate::process::abi::LinuxSyscall::Fork) => linux_fork_stub(),
         Some(crate::process::abi::LinuxSyscall::Vfork) => linux_fork_stub(),
+        Some(crate::process::abi::LinuxSyscall::InitModule) => linux_module_stub(),
+        Some(crate::process::abi::LinuxSyscall::FinitModule) => linux_module_stub(),
+        Some(crate::process::abi::LinuxSyscall::DeleteModule) => linux_module_stub(),
+        Some(crate::process::abi::LinuxSyscall::Syslog) => linux_syslog_stub(),
         Some(crate::process::abi::LinuxSyscall::Wait4) => linux_wait4(arguments),
         Some(crate::process::abi::LinuxSyscall::Ioctl) => linux_ioctl(arguments),
         Some(crate::process::abi::LinuxSyscall::InotifyInit1) => linux_inotify_init1(arguments),
@@ -3749,6 +3753,16 @@ fn linux_prlimit64(arguments: [u64; 6]) -> isize {
 #[cfg(target_os = "none")]
 fn linux_fork_stub() -> isize {
     ERROR_TRY_AGAIN
+}
+
+#[cfg(target_os = "none")]
+fn linux_module_stub() -> isize {
+    ERROR_OPERATION_NOT_PERMITTED
+}
+
+#[cfg(target_os = "none")]
+fn linux_syslog_stub() -> isize {
+    ERROR_OPERATION_NOT_PERMITTED
 }
 
 /// `wait4(2)` — wait for a child process to change state.  Currently only
