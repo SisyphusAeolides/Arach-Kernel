@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit the Linux x86-64 syscall decoder and routing surface."""
+"""Audit the Linux x86-64 syscall decoder and production routing surface."""
 
 from __future__ import annotations
 
@@ -59,6 +59,25 @@ def parse_decoder(source: str) -> dict[str, int]:
     return result
 
 
+def extract_function(source: str, signature: str) -> str:
+    start = source.find(signature)
+    if start < 0:
+        raise AuditError(f"production syscall function is missing: {signature}")
+    opening = source.find("{", start + len(signature))
+    if opening < 0:
+        raise AuditError(f"production syscall function has no body: {signature}")
+    depth = 0
+    for index in range(opening, len(source)):
+        character = source[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AuditError(f"production syscall function is unterminated: {signature}")
+
+
 def audit(abi_source: str, syscall_source: str) -> list[Syscall]:
     variants = parse_enum(abi_source)
     decoder = parse_decoder(abi_source)
@@ -68,15 +87,27 @@ def audit(abi_source: str, syscall_source: str) -> list[Syscall]:
         extra = sorted(decoded - variants)
         raise AuditError(f"enum/decoder mismatch: missing={missing}, extra={extra}")
 
-    routed = set(ROUTE_RE.findall(syscall_source))
+    direct_body = extract_function(syscall_source, "fn dispatch_linux_syscall(")
+    scheduled_body = extract_function(syscall_source, 'extern "C" fn arach_syscall_dispatch(')
+    direct_routes = set(ROUTE_RE.findall(direct_body))
+    scheduled_routes = set(ROUTE_RE.findall(scheduled_body))
+    expected_scheduled = SCHEDULED & decoded
+    actual_scheduled = scheduled_routes & decoded
+    if actual_scheduled != expected_scheduled:
+        missing = sorted(expected_scheduled - actual_scheduled)
+        extra = sorted(actual_scheduled - expected_scheduled)
+        raise AuditError(f"scheduled route set changed: missing={missing}, extra={extra}")
+
+    routed = direct_routes | scheduled_routes
     missing_routes = sorted(decoded - routed)
     if missing_routes:
-        raise AuditError(f"decoded syscalls lack a route: {missing_routes}")
+        raise AuditError(f"decoded syscalls lack a production route: {missing_routes}")
 
-    stubs = set(STUB_RE.findall(syscall_source))
-    if stubs != EXPECTED_STUBS:
+    stubs = set(STUB_RE.findall(direct_body))
+    expected_stubs = EXPECTED_STUBS & decoded
+    if stubs != expected_stubs:
         raise AuditError(
-            f"stub set changed: expected={sorted(EXPECTED_STUBS)}, actual={sorted(stubs)}"
+            f"stub set changed: expected={sorted(expected_stubs)}, actual={sorted(stubs)}"
         )
 
     syscalls = []
@@ -130,7 +161,10 @@ def main() -> int:
         print(error, file=sys.stderr)
         return 1
 
-    counts = {route: sum(item.route == route for item in syscalls) for route in ("direct", "scheduled", "stub")}
+    counts = {
+        route: sum(item.route == route for item in syscalls)
+        for route in ("direct", "scheduled", "stub")
+    }
     print(
         f"validated {len(syscalls)} Linux x86-64 syscall routes: "
         f"{counts['direct']} direct, {counts['scheduled']} scheduled, {counts['stub']} stub"
