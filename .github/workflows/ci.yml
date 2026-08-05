@@ -18,8 +18,8 @@ jobs:
           toolchain: nightly-2026-07-20
           components: rustfmt,rust-src
       - run: cargo fmt --all -- --check
-      - run: cargo check --workspace --all-targets
-      - run: cargo test --workspace --all-targets
+      - run: cargo check --locked --workspace --all-targets
+      - run: cargo test --locked --workspace --all-targets
       - run: scripts/test-runtime-linker-graph.sh
       - name: Reject generated build products
         run: test -z "$(git ls-files | grep -E '(^target/|\.(o|a|rlib|rmeta)$)' || true)"
@@ -94,7 +94,7 @@ jobs:
           name: arach-c0-serial-${{ github.sha }}
           path: target/c0/c0.serial.log
           if-no-files-found: warn
-      - run: git diff --check
+      - run: git diff --check && git diff --exit-code
 
   nvidia-source-contract:
     runs-on: ubuntu-24.04
@@ -107,4 +107,4 @@ jobs:
           path: target/nvidia-open
           fetch-depth: 1
       - run: scripts/audit-nvidia-source.sh target/nvidia-open
-      - run: git diff --check
+      - run: git diff --check && git diff --exit-code
