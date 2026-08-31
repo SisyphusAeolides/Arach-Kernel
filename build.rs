@@ -179,11 +179,18 @@ fn main() {
         );
         println!("cargo:rustc-link-arg-bin=arach=--gc-sections");
 
+        println!("cargo:rerun-if-env-changed=ARACH_RUSTD_IMAGE");
         println!("cargo:rerun-if-env-changed=ARACH_PUSH_IMAGE");
-        let push_image = configured_file(
-            "ARACH_PUSH_IMAGE",
-            &workspace.join("target/x86_64-sisyphus-user/release/push"),
-        );
+        let (push_image, rustd_init) = match env::var_os("ARACH_RUSTD_IMAGE") {
+            Some(path) => (PathBuf::from(path), true),
+            None => (
+                configured_file(
+                    "ARACH_PUSH_IMAGE",
+                    &workspace.join("target/x86_64-sisyphus-user/release/push"),
+                ),
+                false,
+            ),
+        };
         println!("cargo:rerun-if-changed={}", push_image.display());
         let bytes = fs::read(&push_image).unwrap_or_else(|error| {
             panic!(
@@ -192,8 +199,8 @@ fn main() {
             )
         });
         assert!(
-            !bytes.is_empty() && bytes.len() <= 1024 * 1024,
-            "Push image must be between 1 byte and 1 MiB"
+            !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024,
+            "PID 1 image must be between 1 byte and 16 MiB"
         );
         let entry_file_offset = elf_entry_file_offset(&bytes);
         let digest = sha256(&bytes);
@@ -205,6 +212,10 @@ fn main() {
         println!("cargo:rustc-env=SISYPHUS_PUSH_SHA256={encoded}");
         println!("cargo:rustc-env=SISYPHUS_PUSH_BYTES={}", bytes.len());
         println!("cargo:rustc-env=SISYPHUS_PUSH_ENTRY_FILE_OFFSET={entry_file_offset}");
+        println!(
+            "cargo:rustc-env=ARACH_RUSTD_INIT={}",
+            usize::from(rustd_init)
+        );
 
         let bootstrap_package = selected_bootstrap_package(&workspace);
         let crest_bytes = bootstrap_package.bytes;

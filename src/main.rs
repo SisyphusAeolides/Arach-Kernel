@@ -384,6 +384,10 @@ const PUSH_ENTRY_FILE_OFFSET: usize = parse_decimal(env!("SISYPHUS_PUSH_ENTRY_FI
 #[cfg(not(target_os = "none"))]
 const PUSH_ENTRY_FILE_OFFSET: usize = 0;
 #[cfg(target_os = "none")]
+const RUSTD_INIT: bool = parse_decimal(env!("ARACH_RUSTD_INIT")) != 0;
+#[cfg(not(target_os = "none"))]
+const RUSTD_INIT: bool = false;
+#[cfg(target_os = "none")]
 const CREST_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_CREST_SHA256"));
 #[cfg(not(target_os = "none"))]
 const CREST_EXPECTED_SHA256: [u8; 32] = [0; 32];
@@ -926,21 +930,22 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     } else {
         let _ = writeln!(serial, "Arach: no supported firmware framebuffer");
     }
-    let push_module = match boot.module(b"push") {
+    let init_module_name: &[u8] = if RUSTD_INIT { b"rustd" } else { b"push" };
+    let push_module = match boot.module(init_module_name) {
         Ok(module) => module,
         Err(error) => {
-            let _ = writeln!(serial, "Arach: Push boot module error: {error:?}");
+            let _ = writeln!(serial, "Arach: PID 1 boot module error: {error:?}");
             halt();
         }
     };
     if push_module.length() as usize != PUSH_EXPECTED_BYTES
         || push_module.end.as_u64() > EARLY_MAPPED_PHYSICAL_LIMIT
     {
-        let _ = writeln!(serial, "Arach: Push boot module size or range mismatch");
+        let _ = writeln!(serial, "Arach: PID 1 boot module size or range mismatch");
         halt();
     }
     let Some(push_virtual) = direct_map_address(push_module.start.as_u64()) else {
-        let _ = writeln!(serial, "Arach: Push boot module is outside the direct map");
+        let _ = writeln!(serial, "Arach: PID 1 boot module is outside the direct map");
         halt();
     };
     // SAFETY: The validated module range is immutable bootloader-owned memory
@@ -950,7 +955,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     };
     let _ = writeln!(
         serial,
-        "Arach: measured Push module {} bytes at {:#x}..{:#x}",
+        "Arach: measured PID 1 module {} bytes at {:#x}..{:#x}",
         push_bytes.len(),
         push_module.start.as_u64(),
         push_module.end.as_u64(),
@@ -1848,11 +1853,15 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         }
     }
 
-    let pid1_stack = match process_backend.prepare_initial_stack(
-        &pid1,
-        &[b"push"],
-        &[b"SISYPHUS_PROCESS=push", b"SISYPHUS_ABI=1"],
-    ) {
+    let (pid1_argv, pid1_env): (&[&[u8]], &[&[u8]]) = if RUSTD_INIT {
+        (
+            &[b"/usr/lib/rustd/rustd"],
+            &[b"ARACH_PROCESS=rustd", b"ARACH_ABI=linux"],
+        )
+    } else {
+        (&[b"push"], &[b"SISYPHUS_PROCESS=push", b"SISYPHUS_ABI=1"])
+    };
+    let pid1_stack = match process_backend.prepare_initial_stack(&pid1, pid1_argv, pid1_env) {
         Ok(stack) => stack,
         Err(error) => {
             let _ = writeln!(
@@ -4081,7 +4090,11 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         capability_root,
         service_class: 1,
         priority: u8::MAX,
-        abi: arach::process::abi::ExecutionAbi::ArachNative,
+        abi: if RUSTD_INIT {
+            arach::process::abi::ExecutionAbi::LinuxX86_64
+        } else {
+            arach::process::abi::ExecutionAbi::ArachNative
+        },
     };
     let pid1_handle = match lifecycle::register_init(pid1_launch) {
         Ok(handle) => handle,
