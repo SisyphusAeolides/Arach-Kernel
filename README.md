@@ -9,21 +9,21 @@
 
 Arach Kernel is the Rust-first monolithic kernel at the foundation of
 [ArachOS](https://github.com/SisyphusAeolides/ArachOS). It targets x86-64
-systems with a measured Linux-compatible userspace contract and an unmodified,
-reproducibly pinned COSMIC Epoch desktop as its first complete graphical
-environment.
+systems with a measured Linux-compatible userspace contract. Its production
+target is ArachOS: CIQ RLC 10.2 userspace, GRUB, RustD as PID 1, and
+RustD-resolved as the native resolver. Desktop environments remain Anaconda
+software choices rather than kernel-bound components.
 
 Monolithic describes the kernel architecture: scheduling, memory, interrupts,
 devices, filesystems, and networking may execute in the kernel address space.
-It does **not** move PID 1, the COSMIC compositor, D-Bus, PipeWire, or ordinary
+It does **not** move PID 1, desktop compositors, D-Bus, PipeWire, or ordinary
 applications into ring 0.
 
 ## Design goals
 
-- Boot a complete ArachOS system through the independently versioned Granite
-  bootloader and Push PID 1.
-- Run the complete COSMIC Epoch experience, including the greeter, compositor,
-  portals, applications, audio, networking, suspend, and session lifecycle.
+- Boot ArachOS directly through GRUB's Multiboot2 path.
+- Run the RLC 10.2 userspace with RustD as PID 1 and RustD-resolved as the
+  resolver, without Granite, Push, or a kernel-selected desktop environment.
 - Provide a measured Linux compatibility contract without silently claiming
   support that has not passed a gate.
 - Support real hardware through native drivers and qualified Linux-compatible
@@ -33,11 +33,16 @@ applications into ring 0.
 
 ## Current status
 
-Arach Kernel is under active development. The pinned Granite/Arach/Push C0
-bundle now executes under QEMU/OVMF in CI, enters a measured ring-3 Linux
-personality, and emits serial evidence from the real syscall, lifecycle, and
-page-table paths. ArachOS and Arach-Packages retain the qualified source
-revisions in their integration and recipe locks.
+Arach Kernel is under active development. Its host test suite passes and the
+existing measured C0 bundle executes under QEMU/OVMF. The RLC conversion now
+has a direct GRUB Multiboot2 bundle contract and accepts a measured `rustd`
+module as Linux-ABI PID 1. ArachOS pins the exact qualified source revision.
+
+The RLC/GRUB path is not yet release-qualified. Persistent block-backed root
+storage, the complete RustD Linux ABI, cgroup v2, `/proc`, `/sys`, udev, D-Bus,
+RustD-resolved, networking, and graphical Anaconda must all pass in BIOS and
+UEFI QEMU before Arach Kernel can be the only installed boot path. The previous
+Granite/Push/COSMIC route is not part of the new ArachOS architecture.
 
 The Linux personality currently covers:
 
@@ -72,7 +77,7 @@ The Linux personality currently covers:
   coalesced pending state, self-targeted `kill`/`tgkill`, and measured x86-64
   `SA_SIGINFO` frame delivery and exact-frame `rt_sigreturn` restoration;
 - bounded exact-generation thread-group snapshots, per-thread exit cleanup,
-  atomic non-leader retirement, one waitable leader zombie, and measured Push
+  atomic non-leader retirement, one waitable leader zombie, and measured PID 1
   reaping after `exit_group` with a live blocked peer;
 - generation- and epoch-bound x86-64 FS-base TLS with Linux `arch_prctl`
   `ARCH_SET_FS`/`ARCH_GET_FS`, clone inheritance or `CLONE_SETTLS`, and hardware
@@ -135,11 +140,11 @@ restart remain future compatibility slices.
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
 | Linux userspace compatibility | Identity, anonymous and eager private file mappings, bounded memfd-backed shared mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll and Unix stream sockets with `SCM_RIGHTS`, bounded VFS file and directory calls, transactional static and measured `PT_INTERP` execution, an eight-object dependency engine measured with a deduplicated four-object diamond and canonical finite `DT_RUNPATH`, explicit and packed relative relocation, exact-size main-executable copy relocation and interposition, provider-first static/general-dynamic startup-TLS relocation, exact GNU symbol versions, deterministic eager external PLT binding with bounded weak-function semantics, dependency-first initialization, and reverse finalization, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed descriptor waits and filesystem socket nodes; add late-loaded TLS, TLSDESC, general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and broader relocations; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
-| System bootstrap | The pinned Granite/Arach/Push C0 bundle executes under QEMU/OVMF and emits measured ring-3 syscall evidence | Promote the measured bootstrap into a native Push service graph and qualified COSMIC login/session path |
+| System bootstrap | GRUB Multiboot2 entry exists and the source accepts measured RustD as Linux-ABI PID 1; the earlier C0 path remains regression evidence | Boot the packaged RLC root under RustD and pass the complete service graph in BIOS and UEFI |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
 | Formal specifications | Idris 2 total specifications and Agda safe proof models compile in CI | Keep each proof artifact bound to a generated table, manifest, or runtime boundary |
-| COSMIC Epoch | The complete desktop and session compatibility contract is documented and its required service images are measured during bundle construction | Boot the pinned greeter and complete login, desktop, suspend/resume, logout, and shutdown qualification |
+| RLC graphical stack | RLC 10.2 is the userspace target and desktop selection belongs to Anaconda | Qualify graphical Anaconda, the selected display manager, Wayland, login, suspend/resume, logout, and shutdown |
 
 The current critical path is:
 
@@ -149,8 +154,8 @@ The current critical path is:
    broader relocations.
 3. Add scheduler-backed descriptor waits, filesystem socket nodes, and
    persistent block-backed storage on the unified open-object boundary.
-4. Connect qualified modules and the native Push service graph to a complete
-   COSMIC session.
+4. Boot the RLC package graph under RustD/RustD-resolved and qualify graphical
+   Anaconda plus user-selected desktop environments.
 
 Every status statement is evidence-based. A source build or host unit test is
 useful progress, but it is not counted as runtime, desktop, persistence, or
@@ -190,11 +195,9 @@ formal/idris2/          total executable specifications
 formal/agda/            safe proof models
 ```
 
-The `core/` and `libraries/` trees are integration snapshots. Granite, Push,
-Slope, Corinth, and the other ArachOS components remain independently
-versioned repositories. The ArachOS repository pins qualified component
-releases and is the integration authority; this repository remains focused on
-the kernel.
+The `core/` and `libraries/` trees are integration snapshots. The ArachOS
+repository pins qualified component releases and is the RLC integration
+authority; this repository remains focused on the kernel.
 
 ## Validation
 
@@ -206,40 +209,30 @@ cargo test --workspace --all-targets
 scripts/materialize-linux-contract-sdk.sh /usr/src/kernels/$(uname -r)
 scripts/test-linux-kbuild-sdk.sh
 
-ARACH_PUSH_ROOT=/path/to/Push \
-ARACH_GRANITE_ROOT=/path/to/Granite \
-    scripts/build-c0-bundle.sh
-
-ARACH_PUSH_ROOT=/path/to/Push \
-ARACH_GRANITE_ROOT=/path/to/Granite \
-ARACH_COSMIC_SERVICES_DIR=/path/to/cosmic-services \
-    scripts/build-desktop-bundle.sh
+ARACH_KERNEL_IMAGE=/path/to/arach \
+ARACH_RUSTD_IMAGE=/path/to/rustd \
+ARACH_BOOTSTRAP_IMAGE=/path/to/bootstrap \
+ARACH_RESOLVED_IMAGE=/path/to/rustd-resolved \
+    scripts/build-rlc-grub-bundle.sh
 ```
 
 The custom target is `x86_64-arach.json`. The `cargo kernel` alias selects the
 `arach` package and binary, but a release kernel build also requires pinned
-formal attestation and measured external PID 1/session artifacts. Those inputs
-remain controlled by their own repositories and the ArachOS component lock.
-Both bundle builders load Granite's target configuration explicitly, compare
-two isolated production UEFI builds, and reject nondeterministic PE metadata.
-The C0 FAT constructor fixes its volume identity and timestamps; CI requires
-two independently assembled volumes to be byte-identical before QEMU boots one.
+formal attestation and measured external PID 1 artifacts. Those inputs remain
+controlled by their own repositories and the ArachOS component lock. The RLC
+bundle validates the Multiboot2 kernel and measured RustD/RustD-resolved
+artifacts before constructing GRUB media.
 
-## COSMIC target
+## RLC userspace target
 
-COSMIC compatibility is an observable contract, not a source-language claim.
-The required ABI and qualification stages are specified in
-[COSMIC compatibility](docs/COSMIC_COMPATIBILITY.md). The target includes the
-COSMIC greeter, authentication and session launch, compositor, panel/applets,
-settings, portals, applications, store, media, lock/suspend path, and clean
-logout—not just a compositor process.
+CIQ RLC 10.2 is the userspace, package, and installer base. RustD owns PID 1
+and service management, while RustD-resolved owns DNS, NSS, Varlink, and the
+resolver compatibility boundary. GRUB owns the BIOS and UEFI boot path.
 
-`scripts/build-desktop-bundle.sh` is fail-closed: it requires `seatd`,
-`pipewire`, `wireplumber`, `dbus-broker`, `cosmic-comp`, `cosmic-greeter`,
-`cosmic-session`, and `xdg-desktop-portal-cosmic` as target-compatible ELF
-images. It enables Push's `cosmic-boot` service graph, measures all eight
-native boot services in Arach and Granite, and never downloads or silently
-substitutes host COSMIC binaries.
+No desktop environment is compiled into or selected by Arach Kernel. ArachOS
+uses graphical Anaconda Software Selection, and each selected display-manager,
+Wayland, audio, portal, login, and suspend path must pass installed-system
+qualification on the same kernel and package set.
 
 The kernel and module boundaries are governed by the
 [Linux kernel compatibility contract](docs/LINUX_KERNEL_CONTRACT.md). External
