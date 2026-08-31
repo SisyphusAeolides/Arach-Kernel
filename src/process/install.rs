@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use blacklab::oureboros::ArtifactMeasurement;
 
 use crate::capability::{Capability, ProcessInstallControl, RuntimeImageControl};
@@ -123,6 +125,88 @@ pub trait UserAddressSpaceBackend {
     ) -> Result<(), Self::Error>;
 
     fn release_process(&mut self, process: &Self::Process) -> Result<(), Self::Error>;
+}
+
+impl<Backend: UserAddressSpaceBackend> UserAddressSpaceBackend for Box<Backend> {
+    type Error = Backend::Error;
+    type Space = Backend::Space;
+    type Mapping = Backend::Mapping;
+    type Process = Backend::Process;
+
+    fn begin(&mut self, image_start: u64, image_end: u64) -> Result<Self::Space, Self::Error> {
+        (**self).begin(image_start, image_end)
+    }
+
+    fn map_zeroed(
+        &mut self,
+        space: Self::Space,
+        virtual_address: u64,
+        memory_size: usize,
+    ) -> Result<Self::Mapping, Self::Error> {
+        (**self).map_zeroed(space, virtual_address, memory_size)
+    }
+
+    fn copy_into(
+        &mut self,
+        mapping: Self::Mapping,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), Self::Error> {
+        (**self).copy_into(mapping, offset, bytes)
+    }
+
+    fn verify_contents(
+        &mut self,
+        mapping: Self::Mapping,
+        offset: usize,
+        initialized: &[u8],
+        memory_size: usize,
+    ) -> Result<bool, Self::Error> {
+        (**self).verify_contents(mapping, offset, initialized, memory_size)
+    }
+
+    fn seal(
+        &mut self,
+        mapping: Self::Mapping,
+        permissions: MappingPermissions,
+    ) -> Result<(), Self::Error> {
+        (**self).seal(mapping, permissions)
+    }
+
+    fn commit(
+        &mut self,
+        space: Self::Space,
+        entry_point: u64,
+        segment_count: usize,
+    ) -> Result<Self::Process, Self::Error> {
+        (**self).commit(space, entry_point, segment_count)
+    }
+
+    fn abort(&mut self, space: Self::Space) -> Result<(), Self::Error> {
+        (**self).abort(space)
+    }
+
+    fn process_info(&self, process: &Self::Process) -> Option<ProcessImageInfo> {
+        (**self).process_info(process)
+    }
+
+    fn process_generation(&self, process: &Self::Process) -> Option<u32> {
+        (**self).process_generation(process)
+    }
+
+    unsafe fn validate_activation(
+        &mut self,
+        process: &Self::Process,
+        authority: &Capability<'_, ProcessInstallControl>,
+    ) -> Result<(), Self::Error> {
+        // SAFETY: This forwards the exact caller-provided activation authority
+        // to the concrete backend without changing the serialization boundary.
+        unsafe { (**self).validate_activation(process, authority) }
+    }
+
+    fn release_process(&mut self, process: &Self::Process) -> Result<(), Self::Error> {
+        (**self).release_process(process)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
