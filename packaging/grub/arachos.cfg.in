@@ -1,0 +1,14 @@
+set default=0
+set timeout=5
+
+menuentry 'ArachOS — Arach Kernel (qualification)' --class arachos --class gnu-linux {
+    insmod all_video
+    insmod video_bochs
+    insmod video_cirrus
+    set gfxpayload=keep
+    multiboot2 /boot/arach arachos=1 init=/usr/lib/rustd/rustd
+    module2 /boot/rustd rustd
+    module2 /boot/bootstrap arachos-bootstrap
+@RESOLVED_MODULE@
+    boot
+}

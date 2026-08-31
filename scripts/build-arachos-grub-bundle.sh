@@ -6,13 +6,11 @@ kernel=${ARACH_KERNEL_IMAGE:?set ARACH_KERNEL_IMAGE to the measured Arach ELF}
 rustd=${ARACH_RUSTD_IMAGE:?set ARACH_RUSTD_IMAGE to the measured RustD PID 1 ELF}
 bootstrap=${ARACH_BOOTSTRAP_IMAGE:?set ARACH_BOOTSTRAP_IMAGE to the measured bootstrap ELF}
 resolved=${ARACH_RESOLVED_IMAGE:-}
-output=${ARACH_GRUB_ISO:-$root/target/rlc-grub/Arach-Kernel-RLC.iso}
+output=${ARACH_GRUB_ISO:-$root/target/arachos-grub/Arach-Kernel-ArachOS.iso}
 
-fail() { printf 'Arach RLC GRUB bundle: %s\n' "$*" >&2; exit 1; }
+fail() { printf 'ArachOS GRUB bundle: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
-need xorriso
-need readelf
-need sha256sum
+for command in xorriso readelf sha256sum install sed; do need "$command"; done
 if command -v grub-file >/dev/null 2>&1; then
     grub_file=grub-file
 elif command -v grub2-file >/dev/null 2>&1; then
@@ -40,7 +38,7 @@ for artifact in "$rustd" "$bootstrap"; do
         || fail "artifact is not ELF64: $artifact"
 done
 
-stage=$(mktemp -d "${TMPDIR:-/tmp}/arach-rlc-grub.XXXXXX")
+stage=$(mktemp -d "${TMPDIR:-/tmp}/arachos-grub.XXXXXX")
 cleanup() { rm -rf -- "$stage"; }
 trap cleanup EXIT
 mkdir -p "$stage/boot/grub"
@@ -57,7 +55,7 @@ if [[ -n $resolved ]]; then
 fi
 sed \
     -e "s|@RESOLVED_MODULE@|$resolved_entry|" \
-    "$root/packaging/grub/arach-rlc.cfg.in" > "$stage/boot/grub/grub.cfg"
+    "$root/packaging/grub/arachos.cfg.in" > "$stage/boot/grub/grub.cfg"
 
 mkdir -p "$(dirname "$output")"
 "$grub_mkrescue" -o "$output" "$stage" >/dev/null
@@ -65,4 +63,4 @@ mkdir -p "$(dirname "$output")"
     || fail 'staged kernel lost its Multiboot2 contract'
 sha256sum "$output" "$kernel" "$rustd" "$bootstrap"
 if [[ -n $resolved ]]; then sha256sum "$resolved"; fi
-printf 'Arach RLC GRUB bundle written to %s\n' "$output"
+printf 'ArachOS GRUB bundle written to %s\n' "$output"
