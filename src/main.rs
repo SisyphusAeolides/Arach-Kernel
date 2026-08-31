@@ -108,7 +108,11 @@ const CREST_INITIAL_STACK_PAGES: usize = 384;
 const IDENTITY_MAP_END: u64 = 1024 * 1024 * 1024;
 const KERNEL_PHYSICAL_LOAD_BASE: u64 = 1024 * 1024;
 const MINIMUM_HEAP_SIZE: u64 = 64 * 1024;
-const MAXIMUM_HEAP_SIZE: u64 = 4 * 1024 * 1024;
+// The heap carries the frame bitmap, measured boot allocations, and the
+// heap-backed process address-space metadata pool. Keep this reservation
+// explicit so a larger process contract cannot fail through an incidental
+// small-heap allocation.
+const MAXIMUM_HEAP_SIZE: u64 = 32 * 1024 * 1024;
 const E1000_DRIVER_ID: u64 = 0x4531_3030_305f_4e45;
 const MAXIMUM_E1000_CONTROLLERS: usize = 1;
 
@@ -436,9 +440,11 @@ const RUSTD_RESOLVED_EXPECTED_BYTES: usize = 0;
 static KERNEL_HEAP: BumpAllocator = BumpAllocator::empty();
 /// Static fallback heap backing the global allocator for early boot phases
 /// that precede the physical memory map scan (e.g. the COSMIC service Vec).
-/// 4 MiB matches MAXIMUM_HEAP_SIZE so the runtime path skips a second init.
+/// This matches MAXIMUM_HEAP_SIZE for profiles that need allocations before
+/// the physical memory map is scanned; the runtime path then skips a second
+/// initialization just as it does for the ordinary heap region.
 #[cfg(target_os = "none")]
-static mut EARLY_HEAP_STORAGE: [u8; 4 * 1024 * 1024] = [0; 4 * 1024 * 1024];
+static mut EARLY_HEAP_STORAGE: [u8; 32 * 1024 * 1024] = [0; 32 * 1024 * 1024];
 static IRQ_TEST_HITS: AtomicUsize = AtomicUsize::new(0);
 
 struct BootDriverLogger<'a> {
@@ -1091,7 +1097,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         // SAFETY: bootstrap is single-threaded; EARLY_HEAP_STORAGE lives for
         // the entire kernel lifetime and is exclusively owned by KERNEL_HEAP.
         let start = unsafe { core::ptr::addr_of!(EARLY_HEAP_STORAGE) as usize };
-        let size = core::mem::size_of::<[u8; 4 * 1024 * 1024]>();
+        let size = MAXIMUM_HEAP_SIZE as usize;
         let _ = unsafe { KERNEL_HEAP.initialize(start, size) };
     }
     #[cfg(target_os = "none")]
@@ -1371,8 +1377,8 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         }
         Err(abyss::allocator::InitializeError::AlreadyInitialized) => {
             // The heap was pre-seeded from EARLY_HEAP_STORAGE before the
-            // COSMIC service Vec was populated. The static buffer is 4 MiB,
-            // matching MAXIMUM_HEAP_SIZE, so no second init is needed.
+            // COSMIC service Vec was populated. The static buffer matches
+            // MAXIMUM_HEAP_SIZE, so no second init is needed.
             let _ = writeln!(
                 serial,
                 "Abyss: bootstrap heap retained (early static 0x{:x} bytes)",
