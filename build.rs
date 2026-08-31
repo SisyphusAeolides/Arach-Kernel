@@ -216,6 +216,7 @@ fn main() {
             "cargo:rustc-env=ARACH_RUSTD_INIT={}",
             usize::from(rustd_init)
         );
+        emit_rustd_resolved_artifact();
 
         let bootstrap_package = selected_bootstrap_package(&workspace);
         let crest_bytes = bootstrap_package.bytes;
@@ -410,6 +411,53 @@ fn emit_cosmic_defaults(label: &str) {
     println!("cargo:rustc-env=ARACH_COSMIC_{label}_VERSION=0");
     println!("cargo:rustc-env=ARACH_COSMIC_{label}_SERVICE_CLASS=0");
     println!("cargo:rustc-env=ARACH_COSMIC_{label}_PROVENANCE_ROOT=0");
+}
+
+/// Bind the optional RustD-Resolved boot module to the kernel artifact.
+///
+/// RustD-Resolved is normally started from the installed RLC filesystem by
+/// RustD. When a GRUB bundle also carries an early resolver module, the kernel
+/// must know its exact size and digest so the module cannot overlap allocator
+/// memory or become an unauthenticated boot input. Leaving the variable unset
+/// keeps the module absent from the bundle contract.
+fn emit_rustd_resolved_artifact() {
+    println!("cargo:rerun-if-env-changed=ARACH_RESOLVED_IMAGE");
+    let Some(candidate) = env::var_os("ARACH_RESOLVED_IMAGE") else {
+        println!("cargo:rustc-env=ARACH_RUSTD_RESOLVED_BYTES=0");
+        println!(
+            "cargo:rustc-env=ARACH_RUSTD_RESOLVED_SHA256={}",
+            encode_sha256([0; 32])
+        );
+        return;
+    };
+    let artifact = fs::canonicalize(PathBuf::from(candidate)).unwrap_or_else(|error| {
+        panic!("failed to resolve ARACH_RESOLVED_IMAGE: {error}");
+    });
+    assert!(
+        artifact.is_file(),
+        "ARACH_RESOLVED_IMAGE must name a regular file"
+    );
+    println!("cargo:rerun-if-changed={}", artifact.display());
+    let bytes = fs::read(&artifact).unwrap_or_else(|error| {
+        panic!("failed to read {}: {error}", artifact.display());
+    });
+    assert!(
+        !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024,
+        "RustD-Resolved boot image must be between 1 byte and 16 MiB"
+    );
+    assert!(
+        bytes.len() >= 20
+            && &bytes[..4] == b"\x7fELF"
+            && bytes[4] == 2
+            && bytes[5] == 1
+            && u16::from_le_bytes([bytes[18], bytes[19]]) == 62,
+        "RustD-Resolved boot image must be an x86-64 ELF64 artifact"
+    );
+    println!("cargo:rustc-env=ARACH_RUSTD_RESOLVED_BYTES={}", bytes.len());
+    println!(
+        "cargo:rustc-env=ARACH_RUSTD_RESOLVED_SHA256={}",
+        encode_sha256(sha256(&bytes))
+    );
 }
 
 fn add_position_flags(command: &mut Command) {

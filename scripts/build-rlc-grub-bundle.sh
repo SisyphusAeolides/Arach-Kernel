@@ -10,14 +10,30 @@ output=${ARACH_GRUB_ISO:-$root/target/rlc-grub/Arach-Kernel-RLC.iso}
 
 fail() { printf 'Arach RLC GRUB bundle: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
-for command in grub-file grub-mkrescue xorriso readelf sha256sum; do need "$command"; done
+need xorriso
+need readelf
+need sha256sum
+if command -v grub-file >/dev/null 2>&1; then
+    grub_file=grub-file
+elif command -v grub2-file >/dev/null 2>&1; then
+    grub_file=grub2-file
+else
+    fail 'missing command: grub-file or grub2-file'
+fi
+if command -v grub-mkrescue >/dev/null 2>&1; then
+    grub_mkrescue=grub-mkrescue
+elif command -v grub2-mkrescue >/dev/null 2>&1; then
+    grub_mkrescue=grub2-mkrescue
+else
+    fail 'missing command: grub-mkrescue or grub2-mkrescue'
+fi
 
 for artifact in "$kernel" "$rustd" "$bootstrap"; do
     [[ -s $artifact ]] || fail "artifact is missing or empty: $artifact"
 done
 [[ -z $resolved || -s $resolved ]] || fail "resolver artifact is missing or empty: $resolved"
 
-grub-file --is-x86-multiboot2 "$kernel" \
+"$grub_file" --is-x86-multiboot2 "$kernel" \
     || fail 'kernel does not expose a valid x86 Multiboot2 header'
 for artifact in "$rustd" "$bootstrap"; do
     readelf -hW "$artifact" | grep -Fq 'Class:                             ELF64' \
@@ -44,8 +60,8 @@ sed \
     "$root/packaging/grub/arach-rlc.cfg.in" > "$stage/boot/grub/grub.cfg"
 
 mkdir -p "$(dirname "$output")"
-grub-mkrescue -o "$output" "$stage" >/dev/null
-grub-file --is-x86-multiboot2 "$stage/boot/arach" \
+"$grub_mkrescue" -o "$output" "$stage" >/dev/null
+"$grub_file" --is-x86-multiboot2 "$stage/boot/arach" \
     || fail 'staged kernel lost its Multiboot2 contract'
 sha256sum "$output" "$kernel" "$rustd" "$bootstrap"
 if [[ -n $resolved ]]; then sha256sum "$resolved"; fi

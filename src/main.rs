@@ -3,7 +3,9 @@
 
 extern crate alloc;
 
-use ::blacklab::oureboros::{ArtifactManifest, FractalClass, TargetArchitecture, verify_artifact};
+use ::blacklab::oureboros::{
+    ArtifactManifest, FractalClass, TargetArchitecture, sha256, verify_artifact,
+};
 use abyss::allocator::BumpAllocator;
 use abyss::frame::BitmapFrameAllocator;
 use abyss::memory::MemoryRegionKind;
@@ -421,6 +423,15 @@ const CREST_EXECUTION_ABI: arach::process::abi::ExecutionAbi =
 const CREST_EXECUTION_ABI: arach::process::abi::ExecutionAbi =
     arach::process::abi::ExecutionAbi::ArachNative;
 
+#[cfg(target_os = "none")]
+const RUSTD_RESOLVED_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("ARACH_RUSTD_RESOLVED_SHA256"));
+#[cfg(not(target_os = "none"))]
+const RUSTD_RESOLVED_EXPECTED_SHA256: [u8; 32] = [0; 32];
+#[cfg(target_os = "none")]
+const RUSTD_RESOLVED_EXPECTED_BYTES: usize = parse_decimal(env!("ARACH_RUSTD_RESOLVED_BYTES"));
+#[cfg(not(target_os = "none"))]
+const RUSTD_RESOLVED_EXPECTED_BYTES: usize = 0;
+
 #[global_allocator]
 static KERNEL_HEAP: BumpAllocator = BumpAllocator::empty();
 /// Static fallback heap backing the global allocator for early boot phases
@@ -547,6 +558,81 @@ fn cosmic_module_bytes<'a>(serial: &mut SerialPort, artifact: CosmicBootArtifact
     // SAFETY: load_cosmic_boot_artifact checked this complete immutable range
     // against the retained direct map and the build-bound byte count.
     unsafe { core::slice::from_raw_parts(virtual_address as *const u8, artifact.expected_bytes) }
+}
+
+/// Validate an optional early RustD-Resolved module and return its physical
+/// range for reservation. The resolver is not launched from this slot: RustD
+/// starts the installed `/usr/lib/rustd/rustd-resolved` service after the
+/// persistent RLC root is available. Carrying the module here is therefore a
+/// measured early-boot input only, never a second resolver authority.
+#[cfg(target_os = "none")]
+fn load_rustd_resolved_artifact(
+    serial: &mut SerialPort,
+    boot: BootInformation,
+) -> Option<BootModule> {
+    let module = match boot.module(b"rustd-resolved") {
+        Ok(module) => module,
+        Err(arach::boot::multiboot2::BootError::MissingModule) => {
+            if RUSTD_RESOLVED_EXPECTED_BYTES != 0 {
+                let _ = writeln!(
+                    serial,
+                    "Arach: measured RustD-Resolved artifact is missing from the GRUB bundle"
+                );
+                halt();
+            }
+            return None;
+        }
+        Err(error) => {
+            let _ = writeln!(
+                serial,
+                "Arach: RustD-Resolved module tag rejected: {error:?}"
+            );
+            halt();
+        }
+    };
+    if RUSTD_RESOLVED_EXPECTED_BYTES == 0
+        || module.length() as usize != RUSTD_RESOLVED_EXPECTED_BYTES
+        || module.end.as_u64() > EARLY_MAPPED_PHYSICAL_LIMIT
+    {
+        let _ = writeln!(
+            serial,
+            "Arach: RustD-Resolved module size or range mismatch"
+        );
+        halt();
+    }
+    let Some(virtual_address) = direct_map_address(module.start.as_u64()) else {
+        let _ = writeln!(
+            serial,
+            "Arach: RustD-Resolved module is outside the direct map"
+        );
+        halt();
+    };
+    // SAFETY: the bounded module range is immutable bootloader-owned memory
+    // covered by the retained direct map.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(virtual_address as *const u8, module.length() as usize)
+    };
+    if bytes.len() < 20
+        || &bytes[..4] != b"\x7fELF"
+        || bytes[4] != 2
+        || bytes[5] != 1
+        || u16::from_le_bytes([bytes[18], bytes[19]]) != 62
+        || sha256(bytes) != RUSTD_RESOLVED_EXPECTED_SHA256
+    {
+        let _ = writeln!(
+            serial,
+            "Arach: RustD-Resolved measurement or ELF identity failed"
+        );
+        halt();
+    }
+    let _ = writeln!(
+        serial,
+        "Arach: measured RustD-Resolved module {} bytes at {:#x}..{:#x}; launch delegated to RustD",
+        bytes.len(),
+        module.start.as_u64(),
+        module.end.as_u64(),
+    );
+    Some(module)
 }
 
 /// Installs one immutable, build-bound service image. This is intentionally a
@@ -990,6 +1076,9 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         crest_module.end.as_u64(),
     );
 
+    #[cfg(target_os = "none")]
+    let rustd_resolved_module = load_rustd_resolved_artifact(&mut serial, boot);
+
     // COSMIC is an atomic service bundle. If the opt-in native profile is
     // enabled, accepting only a subset would leave Push with an apparently
     // valid but unusable desktop graph, so every service is required here.
@@ -1251,6 +1340,10 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         .max(push_module.end.as_u64())
         .max(crest_module.end.as_u64());
     #[cfg(target_os = "none")]
+    if let Some(module) = rustd_resolved_module {
+        protected_end = protected_end.max(module.end.as_u64());
+    }
+    #[cfg(target_os = "none")]
     for artifact in &cosmic_modules {
         protected_end = protected_end.max(artifact.module.end.as_u64());
     }
@@ -1324,7 +1417,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     let storage: &'static mut [u64] =
         unsafe { core::slice::from_raw_parts_mut(storage_pointer.cast::<u64>(), storage_words) };
 
-    let mut reservations = ReservationTable::<16>::new();
+    let mut reservations = ReservationTable::<32>::new();
     let required_reservations = [
         Reservation::new(
             PhysicalAddress::new(0),
@@ -1365,6 +1458,21 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     for reservation in required_reservations {
         if let Err(error) = reservations.push(reservation) {
             let _ = writeln!(serial, "Abyss: reservation table failed: {error:?}");
+            halt();
+        }
+    }
+
+    #[cfg(target_os = "none")]
+    if let Some(module) = rustd_resolved_module {
+        if let Err(error) = reservations.push(Reservation::new(
+            module.start,
+            module.end,
+            ReservationKind::BootModule,
+        )) {
+            let _ = writeln!(
+                serial,
+                "Abyss: RustD-Resolved reservation failed: {error:?}"
+            );
             halt();
         }
     }

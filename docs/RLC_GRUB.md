@@ -5,7 +5,12 @@ It does not use Granite, Push, or a COSMIC service bundle. RLC 10.2 is the
 userspace and package source; RustD is PID 1 and RustD-resolved is the resolver.
 
 The kernel build must set `ARACH_RUSTD_IMAGE` so the measured PID 1 identity is
-bound into the kernel. The GRUB bundle must receive the same binary. Until the
+bound into the kernel. If `ARACH_RESOLVED_IMAGE` is supplied while building the
+kernel, the bundle must receive that same RustD-Resolved binary under the
+`rustd-resolved` module name; Arach validates its ELF identity, digest, size,
+and reserved physical range before allocating memory. The resolver module is
+an early measured input only and is started from the installed RLC filesystem
+by RustD. Until the
 RLC filesystem and complete Linux ABI gates pass, this profile is experimental
 and must remain alongside a known-good Linux recovery kernel.
 
