@@ -66,7 +66,7 @@ arach_enter_user_process:
     cpuid
     movq %cr4, %rax
     orq $(CR4_OSFXSR | CR4_OSXMMEXCPT), %rax
-    testl $(CPUID_XSAVE | CPUID_OSXSAVE | CPUID_AVX), %ecx
+    testl $((CPUID_XSAVE | CPUID_OSXSAVE | CPUID_AVX)), %ecx
     jz 1f
     orq $CR4_OSXSAVE, %rax
     movq %rax, %cr4
