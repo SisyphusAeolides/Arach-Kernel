@@ -1,5 +1,7 @@
 pub const MAXIMUM_FRACTAL_INODES: usize = 1024;
-pub const MAXIMUM_ARTIFACT_BYTES: usize = 1024 * 1024;
+// Keep the measured-artifact ceiling aligned with Arach's early module gate;
+// the native RustD ELF is larger than the synthetic one-MiB test envelope.
+pub const MAXIMUM_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 pub const MINIMAL_X86_64_ELF_BYTES: usize = 181;
 
 #[repr(u8)]
