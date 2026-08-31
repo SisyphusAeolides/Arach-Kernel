@@ -11,6 +11,10 @@ multiboot_header:
     .long 1024
     .long 768
     .long 32
+    // Multiboot2 header tags are 8-byte aligned. The framebuffer payload is
+    // 20 bytes, so its slot includes one 4-byte padding word before the end
+    // tag.
+    .long 0
     .short 0
     .short 0
     .long 8
