@@ -1888,8 +1888,15 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
             &physical_memory,
         )
     };
-    let mut process_backend =
-        FrameBackedAddressSpace::new(frame_memory, kernel_page_table_root, &process_install);
+    // The retained per-process page metadata is intentionally large enough
+    // for the full bounded Linux image and mapping contract. Keep it off the
+    // fixed bootstrap stack so the process backend cannot consume the
+    // interrupt-safe kernel stack budget.
+    let mut process_backend = Box::new(FrameBackedAddressSpace::new(
+        frame_memory,
+        kernel_page_table_root,
+        &process_install,
+    ));
     let controls = arach::blacklab::Controls {
         resonance: &resonance_control,
         learning: &learning_control,

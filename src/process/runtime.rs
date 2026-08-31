@@ -4,6 +4,8 @@
 //! this runtime before Ring 3 is entered. A retiring image is released only
 //! after the return path has switched CR3 away from that image's root.
 
+use alloc::boxed::Box;
+
 use blacklab::oureboros::{ArtifactMeasurement, sha256};
 
 use crate::capability::RuntimeImageControl;
@@ -22,7 +24,8 @@ use crate::process::x86_64::{
 };
 use crate::sync::SpinLock;
 
-pub type KernelProcessBackend = FrameBackedAddressSpace<DirectMapFrameMemory<'static, 'static>>;
+pub type KernelProcessBackend =
+    Box<FrameBackedAddressSpace<DirectMapFrameMemory<'static, 'static>>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessRuntimeError {

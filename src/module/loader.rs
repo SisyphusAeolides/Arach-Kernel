@@ -214,12 +214,11 @@ impl LoadPlan {
                 writable: flags & SEGMENT_WRITABLE != 0,
                 executable: flags & SEGMENT_EXECUTABLE != 0,
             };
-            if plan.segments[..plan.segment_count]
-                .iter()
-                .any(|existing| ranges_overlap(*existing, segment))
-            {
-                return Err(LoaderError::OverlappingSegments);
-            }
+            // PT_LOAD ranges may overlap at the byte or page level in ELF
+            // files produced with RELRO and separate-code layouts. The
+            // transactional installer stages the page union, copies every
+            // segment, verifies overlapping bytes, and resolves one final
+            // page permission set before publication.
             let slot = plan
                 .segments
                 .get_mut(plan.segment_count)
@@ -411,16 +410,6 @@ fn validate_header(bytes: &[u8]) -> Result<(), LoaderError> {
         return Err(LoaderError::InvalidHeader);
     }
     Ok(())
-}
-
-fn ranges_overlap(left: LoadSegment, right: LoadSegment) -> bool {
-    let Some(left_end) = left.end() else {
-        return true;
-    };
-    let Some(right_end) = right.end() else {
-        return true;
-    };
-    left.virtual_address < right_end && right.virtual_address < left_end
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {

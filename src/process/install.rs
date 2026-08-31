@@ -8,12 +8,49 @@ use crate::process::image::PreparedUserImage;
 /// needed by the Linux personality for anonymous `mmap`; keeping the array
 /// fixed preserves the kernel's allocation-free process control path.
 pub const MAXIMUM_PROCESS_SEGMENTS: usize = 64;
+const PAGE_SIZE: u64 = 4096;
+const PAGE_MASK: u64 = PAGE_SIZE - 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MappingPermissions {
     pub readable: bool,
     pub writable: bool,
     pub executable: bool,
+}
+
+impl MappingPermissions {
+    const NONE: Self = Self {
+        readable: false,
+        writable: false,
+        executable: false,
+    };
+
+    const fn union(self, other: Self) -> Self {
+        Self {
+            readable: self.readable || other.readable,
+            writable: self.writable || other.writable,
+            executable: self.executable || other.executable,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StagedSegmentGroup {
+    virtual_address: u64,
+    memory_size: usize,
+    permissions: MappingPermissions,
+}
+
+impl StagedSegmentGroup {
+    const EMPTY: Self = Self {
+        virtual_address: 0,
+        memory_size: 0,
+        permissions: MappingPermissions::NONE,
+    };
+
+    fn end(self) -> Option<u64> {
+        self.virtual_address.checked_add(self.memory_size as u64)
+    }
 }
 
 /// Backend contract for a transactional user-image installation.
@@ -47,6 +84,7 @@ pub trait UserAddressSpaceBackend {
     fn verify_contents(
         &mut self,
         mapping: Self::Mapping,
+        offset: usize,
         initialized: &[u8],
         memory_size: usize,
     ) -> Result<bool, Self::Error>;
@@ -61,6 +99,7 @@ pub trait UserAddressSpaceBackend {
         &mut self,
         space: Self::Space,
         entry_point: u64,
+        segment_count: usize,
     ) -> Result<Self::Process, Self::Error>;
 
     fn abort(&mut self, space: Self::Space) -> Result<(), Self::Error>;
@@ -148,6 +187,8 @@ pub fn install_runtime_linked_user_image<Backend: UserAddressSpaceBackend>(
         .ok_or(InstallError::ProgramHeadersUnavailable)?;
     let image_start = executable_plan.image_start.min(linker_plan.image_start);
     let image_end = executable_plan.image_end.max(linker_plan.image_end);
+    let image_start = page_align_down(image_start);
+    let image_end = page_align_up(image_end).ok_or(InstallError::InvalidSegmentSize)?;
     let space = backend
         .begin(image_start, image_end)
         .map_err(InstallError::Backend)?;
@@ -160,7 +201,11 @@ pub fn install_runtime_linked_user_image<Backend: UserAddressSpaceBackend>(
         Ok(count) => count,
         Err(error) => return fail_after_abort(backend, space, error),
     };
-    let process = match backend.commit(space, linker_plan.entry_point) {
+    let process = match backend.commit(
+        space,
+        linker_plan.entry_point,
+        executable_segments + linker_segments,
+    ) {
         Ok(process) => process,
         Err(error) => {
             return fail_after_abort(backend, space, InstallError::Backend(error));
@@ -185,8 +230,10 @@ fn install_user_image_inner<Backend: UserAddressSpaceBackend>(
 ) -> Result<InstalledUserImage<Backend::Process>, InstallError<Backend::Error>> {
     let plan = *image.plan();
     let measurement = image.measurement();
+    let image_start = page_align_down(plan.image_start);
+    let image_end = page_align_up(plan.image_end).ok_or(InstallError::InvalidSegmentSize)?;
     let space = backend
-        .begin(plan.image_start, plan.image_end)
+        .begin(image_start, image_end)
         .map_err(InstallError::Backend)?;
 
     let segment_count = match map_image_segments(image, backend, space) {
@@ -194,7 +241,7 @@ fn install_user_image_inner<Backend: UserAddressSpaceBackend>(
         Err(error) => return fail_after_abort(backend, space, error),
     };
 
-    let process = match backend.commit(space, plan.entry_point) {
+    let process = match backend.commit(space, plan.entry_point, segment_count) {
         Ok(process) => process,
         Err(error) => {
             return fail_after_abort(backend, space, InstallError::Backend(error));
@@ -214,40 +261,159 @@ fn map_image_segments<Backend: UserAddressSpaceBackend>(
     space: Backend::Space,
 ) -> Result<usize, InstallError<Backend::Error>> {
     let plan = *image.plan();
-    for segment in plan.segments() {
-        let memory_size = match usize::try_from(segment.memory_size) {
-            Ok(size) => size,
-            Err(_) => return Err(InstallError::InvalidSegmentSize),
-        };
-        let mapping = match backend.map_zeroed(space, segment.virtual_address, memory_size) {
-            Ok(mapping) => mapping,
-            Err(error) => return Err(InstallError::Backend(error)),
-        };
-        let data = match plan.segment_data(image.bytes(), *segment) {
-            Ok(data) => data,
-            Err(error) => return Err(InstallError::Loader(error)),
-        };
-        if let Err(error) = backend.copy_into(mapping, 0, data) {
-            return Err(InstallError::Backend(error));
-        }
-        match backend.verify_contents(mapping, data, memory_size) {
-            Ok(true) => {}
-            Ok(false) => return Err(InstallError::VerificationFailed),
-            Err(error) => return Err(InstallError::Backend(error)),
+    let segments = plan.segments();
+    let mut groups = [StagedSegmentGroup::EMPTY; MAXIMUM_PROCESS_SEGMENTS];
+    let mut group_count = 0usize;
+
+    // ELF p_vaddr is allowed to be unaligned. Stage whole pages and merge
+    // ranges that touch the same hardware page before any bytes are copied;
+    // this also handles PT_LOAD layouts with a shared boundary page.
+    for segment in segments {
+        let _memory_size =
+            usize::try_from(segment.memory_size).map_err(|_| InstallError::InvalidSegmentSize)?;
+        let segment_end = segment
+            .virtual_address
+            .checked_add(segment.memory_size)
+            .ok_or(InstallError::InvalidSegmentSize)?;
+        let range_start = page_align_down(segment.virtual_address);
+        let range_end = page_align_up(segment_end).ok_or(InstallError::InvalidSegmentSize)?;
+        if range_start >= range_end {
+            return Err(InstallError::InvalidSegmentSize);
         }
         let permissions = MappingPermissions {
             readable: segment.readable,
             writable: segment.writable,
             executable: segment.executable,
         };
+
+        let mut start = range_start;
+        let mut end = range_end;
+        let mut merged_permissions = permissions;
+        let mut group_index = 0usize;
+        while group_index < group_count {
+            let group = groups[group_index];
+            let group_end = group.end().ok_or(InstallError::InvalidSegmentSize)?;
+            if ranges_overlap(start, end, group.virtual_address, group_end) {
+                start = start.min(group.virtual_address);
+                end = end.max(group_end);
+                merged_permissions = merged_permissions.union(group.permissions);
+                groups[group_index] = StagedSegmentGroup {
+                    virtual_address: start,
+                    memory_size: usize::try_from(end - start)
+                        .map_err(|_| InstallError::InvalidSegmentSize)?,
+                    permissions: merged_permissions,
+                };
+
+                // A merge can make the enlarged interval touch another group.
+                // Fold all such groups into this one so every page is staged
+                // exactly once.
+                let mut other = group_index + 1;
+                while other < group_count {
+                    let candidate = groups[other];
+                    let candidate_end = candidate.end().ok_or(InstallError::InvalidSegmentSize)?;
+                    if ranges_overlap(start, end, candidate.virtual_address, candidate_end) {
+                        start = start.min(candidate.virtual_address);
+                        end = end.max(candidate_end);
+                        merged_permissions = merged_permissions.union(candidate.permissions);
+                        groups[group_index] = StagedSegmentGroup {
+                            virtual_address: start,
+                            memory_size: usize::try_from(end - start)
+                                .map_err(|_| InstallError::InvalidSegmentSize)?,
+                            permissions: merged_permissions,
+                        };
+                        groups[other] = groups[group_count - 1];
+                        group_count -= 1;
+                    } else {
+                        other += 1;
+                    }
+                }
+                break;
+            }
+            group_index += 1;
+        }
+        if group_index == group_count {
+            if group_count >= groups.len() {
+                return Err(InstallError::InvalidSegmentSize);
+            }
+            groups[group_count] = StagedSegmentGroup {
+                virtual_address: start,
+                memory_size: usize::try_from(end - start)
+                    .map_err(|_| InstallError::InvalidSegmentSize)?,
+                permissions: merged_permissions,
+            };
+            group_count += 1;
+        }
+    }
+
+    let mut mappings: [Option<Backend::Mapping>; MAXIMUM_PROCESS_SEGMENTS] =
+        [None; MAXIMUM_PROCESS_SEGMENTS];
+    for group_index in 0..group_count {
+        let group = groups[group_index];
+        mappings[group_index] = Some(
+            backend
+                .map_zeroed(space, group.virtual_address, group.memory_size)
+                .map_err(InstallError::Backend)?,
+        );
+    }
+
+    for segment in segments {
+        let memory_size =
+            usize::try_from(segment.memory_size).map_err(|_| InstallError::InvalidSegmentSize)?;
+        let segment_end = segment
+            .virtual_address
+            .checked_add(segment.memory_size)
+            .ok_or(InstallError::InvalidSegmentSize)?;
+        let range_start = page_align_down(segment.virtual_address);
+        let range_end = page_align_up(segment_end).ok_or(InstallError::InvalidSegmentSize)?;
+        let group_index = (0..group_count)
+            .find(|index| {
+                let group = groups[*index];
+                group.virtual_address <= range_start
+                    && group.end().is_some_and(|end| end >= range_end)
+            })
+            .ok_or(InstallError::InvalidSegmentSize)?;
+        let mapping = mappings[group_index].ok_or(InstallError::InvalidSegmentSize)?;
+        let group = groups[group_index];
+        let offset = usize::try_from(segment.virtual_address - group.virtual_address)
+            .map_err(|_| InstallError::InvalidSegmentSize)?;
+        let data = plan
+            .segment_data(image.bytes(), *segment)
+            .map_err(InstallError::Loader)?;
+        backend
+            .copy_into(mapping, offset, data)
+            .map_err(InstallError::Backend)?;
+        match backend.verify_contents(mapping, offset, data, memory_size) {
+            Ok(true) => {}
+            Ok(false) => return Err(InstallError::VerificationFailed),
+            Err(error) => return Err(InstallError::Backend(error)),
+        }
+    }
+
+    for group_index in 0..group_count {
+        let mapping = mappings[group_index].ok_or(InstallError::InvalidSegmentSize)?;
+        let permissions = groups[group_index].permissions;
         if permissions.writable && permissions.executable {
             return Err(InstallError::WriteExecuteMapping);
         }
-        if let Err(error) = backend.seal(mapping, permissions) {
-            return Err(InstallError::Backend(error));
-        }
+        backend
+            .seal(mapping, permissions)
+            .map_err(InstallError::Backend)?;
     }
-    Ok(plan.segments().len())
+    Ok(segments.len())
+}
+
+fn page_align_down(address: u64) -> u64 {
+    address & !PAGE_MASK
+}
+
+fn page_align_up(address: u64) -> Option<u64> {
+    address
+        .checked_add(PAGE_MASK)
+        .map(|value| value & !PAGE_MASK)
+}
+
+fn ranges_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
+    left_start < right_end && right_start < left_end
 }
 
 fn fail_after_abort<Backend: UserAddressSpaceBackend, T>(
@@ -485,15 +651,23 @@ impl<const BYTES_PER_SEGMENT: usize> UserAddressSpaceBackend
     fn verify_contents(
         &mut self,
         mapping: Self::Mapping,
+        offset: usize,
         initialized: &[u8],
         memory_size: usize,
     ) -> Result<bool, Self::Error> {
         let slot = self.mapping_mut(mapping)?;
-        if memory_size != slot.memory_size || initialized.len() > memory_size {
+        let end = offset
+            .checked_add(memory_size)
+            .ok_or(DryRunError::BusyOrInvalid)?;
+        if end > slot.memory_size || initialized.len() > memory_size {
             return Err(DryRunError::BusyOrInvalid);
         }
-        Ok(slot.bytes[..initialized.len()] == *initialized
-            && slot.bytes[initialized.len()..memory_size]
+        Ok(slot.bytes[..offset].iter().all(|byte| *byte == 0)
+            && slot.bytes[offset..offset + initialized.len()] == *initialized
+            && slot.bytes[offset + initialized.len()..end]
+                .iter()
+                .all(|byte| *byte == 0)
+            && slot.bytes[end..slot.memory_size]
                 .iter()
                 .all(|byte| *byte == 0))
     }
@@ -519,10 +693,13 @@ impl<const BYTES_PER_SEGMENT: usize> UserAddressSpaceBackend
         &mut self,
         space: Self::Space,
         entry_point: u64,
+        segment_count: usize,
     ) -> Result<Self::Process, Self::Error> {
         if !self.active
             || space.generation != self.generation
             || self.slot_count == 0
+            || segment_count == 0
+            || segment_count > MAXIMUM_PROCESS_SEGMENTS
             || self.slots[..self.slot_count]
                 .iter()
                 .any(|slot| !slot.sealed)
@@ -539,7 +716,7 @@ impl<const BYTES_PER_SEGMENT: usize> UserAddressSpaceBackend
         self.process_live = true;
         self.process_info = ProcessImageInfo {
             entry_point,
-            segment_count: self.slot_count,
+            segment_count,
             address_space_root: None,
             owned_frames: 0,
             initial_stack_pointer: None,
@@ -699,7 +876,7 @@ mod tests {
         let image_control = authority.grant::<UserlandImageControl>();
         let install_control = authority.grant::<ProcessInstallControl>();
         let image = prepared(&catalog, &mut bytes, &image_control);
-        let mut backend = DryRunAddressSpace::<256>::new();
+        let mut backend = DryRunAddressSpace::<4096>::new();
         let installed = install_user_image(image, &mut backend, &install_control).unwrap();
         assert_eq!(installed.entry_point, POSITION_INDEPENDENT_LOAD_BASE);
         assert_eq!(installed.segment_count, 1);

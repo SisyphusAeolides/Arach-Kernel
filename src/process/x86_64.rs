@@ -26,11 +26,18 @@ const ENTRY_NO_EXECUTE: u64 = 1 << 63;
 const USER_PML4_ENTRIES: usize = 256;
 const TABLE_ENTRIES: usize = 512;
 
-// Crest retains a bounded 640×400 desktop base plus a live cursor surface.
-// These finite per-process bounds cover the fixed image, page tables, and
-// measured stack; they are boot policy, never user-controlled.
-pub const MAXIMUM_PROCESS_PAGES: usize = 1024;
-pub const MAXIMUM_OWNED_FRAMES: usize = 1088;
+// The process backend retains a fixed, allocation-free metadata pool. The
+// page budget covers the validated 64 MiB image span, both 16 MiB Linux heap
+// and mmap arenas, measured stacks, and the bounded shared mappings. The
+// separate frame budget leaves room for page-table hierarchy frames for every
+// admitted mapping without turning an ordinary process into an allocator
+// policy decision.
+pub const MAXIMUM_PROCESS_PAGES: usize = if cfg!(test) { 1024 } else { 32 * 1024 };
+pub const MAXIMUM_OWNED_FRAMES: usize = if cfg!(test) {
+    1088
+} else {
+    MAXIMUM_PROCESS_PAGES + 512
+};
 /// One retained address-space slot per measured service class. Class zero is
 /// unusable, so the spare slot remains available while every admitted class
 /// is live and provides the inactive hierarchy required by transactional
@@ -2561,33 +2568,79 @@ impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressS
     fn verify_contents(
         &mut self,
         mapping: Self::Mapping,
+        segment_offset: usize,
         initialized: &[u8],
         memory_size: usize,
     ) -> Result<bool, Self::Error> {
         let record = self.mapping(mapping)?;
-        if record.sealed || memory_size != record.memory_size || initialized.len() > memory_size {
+        let segment_end = segment_offset
+            .checked_add(memory_size)
+            .ok_or(FrameBackedError::InvalidRange)?;
+        if record.sealed || segment_end > record.memory_size || initialized.len() > memory_size {
             return Err(FrameBackedError::InvalidRange);
         }
+
         let mut offset = 0;
-        while offset < initialized.len() {
+        while offset < segment_offset {
             let page = offset / PAGE_SIZE;
             let within_page = offset % PAGE_SIZE;
-            let length = (PAGE_SIZE - within_page).min(initialized.len() - offset);
+            let length = (PAGE_SIZE - within_page).min(segment_offset - offset);
             let frame =
                 self.frame_for_mapping_page(usize::from(mapping.space_slot), record, page)?;
             if !self
                 .memory
-                .bytes_equal(frame, within_page, &initialized[offset..offset + length])
+                .bytes_zero(frame, within_page, length)
                 .map_err(FrameBackedError::Memory)?
             {
                 return Ok(false);
             }
             offset += length;
         }
-        while offset < memory_size {
+
+        let initialized_end = segment_offset + initialized.len();
+        offset = segment_offset;
+        while offset < initialized_end {
             let page = offset / PAGE_SIZE;
             let within_page = offset % PAGE_SIZE;
-            let length = (PAGE_SIZE - within_page).min(memory_size - offset);
+            let length = (PAGE_SIZE - within_page).min(initialized_end - offset);
+            let frame =
+                self.frame_for_mapping_page(usize::from(mapping.space_slot), record, page)?;
+            if !self
+                .memory
+                .bytes_equal(
+                    frame,
+                    within_page,
+                    &initialized[offset - segment_offset..offset - segment_offset + length],
+                )
+                .map_err(FrameBackedError::Memory)?
+            {
+                return Ok(false);
+            }
+            offset += length;
+        }
+
+        offset = initialized_end;
+        while offset < segment_end {
+            let page = offset / PAGE_SIZE;
+            let within_page = offset % PAGE_SIZE;
+            let length = (PAGE_SIZE - within_page).min(segment_end - offset);
+            let frame =
+                self.frame_for_mapping_page(usize::from(mapping.space_slot), record, page)?;
+            if !self
+                .memory
+                .bytes_zero(frame, within_page, length)
+                .map_err(FrameBackedError::Memory)?
+            {
+                return Ok(false);
+            }
+            offset += length;
+        }
+
+        offset = record.memory_size.min(segment_end);
+        while offset < record.memory_size {
+            let page = offset / PAGE_SIZE;
+            let within_page = offset % PAGE_SIZE;
+            let length = (PAGE_SIZE - within_page).min(record.memory_size - offset);
             let frame =
                 self.frame_for_mapping_page(usize::from(mapping.space_slot), record, page)?;
             if !self
@@ -2638,6 +2691,7 @@ impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressS
         &mut self,
         space: Self::Space,
         entry_point: u64,
+        segment_count: usize,
     ) -> Result<Self::Process, Self::Error> {
         let slot_index = usize::from(space.slot);
         let Some(slot) = self.slots.get(slot_index) else {
@@ -2647,6 +2701,8 @@ impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressS
             || slot.phase != SpacePhase::Staging
             || space.generation != slot.generation
             || slot.mapping_count == 0
+            || segment_count == 0
+            || segment_count > super::install::MAXIMUM_PROCESS_SEGMENTS
             || slot.mappings[..slot.mapping_count]
                 .iter()
                 .any(|mapping| !mapping.sealed)
@@ -2663,7 +2719,7 @@ impl<Memory: ProcessFrameMemory> UserAddressSpaceBackend for FrameBackedAddressS
         self.slots[slot_index].phase = SpacePhase::Committed;
         self.slots[slot_index].process_info = ProcessImageInfo {
             entry_point,
-            segment_count: self.slots[slot_index].mapping_count,
+            segment_count,
             address_space_root: Some(root.as_u64()),
             owned_frames: self.slots[slot_index].owned_frame_count,
             initial_stack_pointer: None,
