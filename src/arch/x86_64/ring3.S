@@ -50,6 +50,11 @@ arach_ring3_probe_return:
 arach_enter_user_process:
     cli
     movq %rdx, %cr3
+    # A statically linked Linux image has no dynamic-linker finalizer. The
+    # SysV entry contract leaves the runtime-linker hook in RDX, so publish a
+    # null hook after the page-table root has been consumed instead of
+    # leaking the kernel's setup value into Ring 3.
+    xorq %rdx, %rdx
     pushq $USER_DATA_SELECTOR
     pushq %rsi
     pushq $0x202
