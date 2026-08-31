@@ -68,9 +68,9 @@ const MAXIMUM_SHARED_PAGES: usize = crate::linux_memfd::MAXIMUM_MEMFD_BYTES / PA
 pub const LINUX_BRK_BASE: u64 = 0x0000_2000_0000;
 pub const LINUX_BRK_MAXIMUM_BYTES: usize = 16 * 1024 * 1024;
 
-/// Kernel-owned values required by an x86-64 ELF runtime linker at process
-/// entry. Pointer-valued entries are materialized only after the final stack
-/// address is known.
+/// Kernel-owned values required by an x86-64 ELF image at process entry.
+/// `runtime_linker_base` is zero for a statically linked image and non-zero
+/// when the image was paired with a separately measured runtime linker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinuxAuxiliaryVector<'path> {
     pub program_header_address: u64,
@@ -1760,8 +1760,9 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
     }
 
     /// Materializes the System V x86-64 process-entry stack consumed by an
-    /// ELF runtime linker: argv, envp, a bounded auxiliary vector, executable
-    /// path, and 16 bytes backing `AT_RANDOM`.
+    /// ELF startup object: argv, envp, a bounded auxiliary vector, executable
+    /// path, and 16 bytes backing `AT_RANDOM`. Static images use an `AT_BASE`
+    /// value of zero; dynamic images provide the measured linker base.
     pub fn prepare_linux_dynamic_stack(
         &mut self,
         process: &ProcessImageHandle,
@@ -1794,7 +1795,6 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
                 .is_none()
             || auxiliary.program_header_address == 0
             || auxiliary.program_header_count == 0
-            || auxiliary.runtime_linker_base == 0
             || auxiliary.executable_entry_point == 0
             || auxiliary.executable_path.is_empty()
             || auxiliary.executable_path.contains(&0)

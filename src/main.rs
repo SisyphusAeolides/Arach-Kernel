@@ -80,7 +80,7 @@ use arach::process::package_manifest::{
 use arach::process::runtime;
 use arach::process::service_registry::{self, CREST_SERVICE_CLASS};
 use arach::process::x86_64::{
-    DirectMapFrameMemory, FrameBackedAddressSpace, INITIAL_USER_STACK_PAGES,
+    DirectMapFrameMemory, FrameBackedAddressSpace, INITIAL_USER_STACK_PAGES, LinuxAuxiliaryVector,
 };
 use arach::ring_authority::{
     DomainDescriptor, DomainRegistry, DomainRole, HardwareAuthority, TransitionFrontier,
@@ -1979,14 +1979,50 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     } else {
         (&[b"push"], &[b"SISYPHUS_PROCESS=push", b"SISYPHUS_ABI=1"])
     };
-    let pid1_stack = match process_backend.prepare_initial_stack(&pid1, pid1_argv, pid1_env) {
-        Ok(stack) => stack,
-        Err(error) => {
-            let _ = writeln!(
-                serial,
-                "Arach: PID1 argv/envp preparation failed: {error:?}"
-            );
+    let pid1_stack = if RUSTD_INIT {
+        let pid1_plan = match arach::module::loader::LoadPlan::parse(push_bytes) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let _ = writeln!(serial, "Arach: RustD ELF plan unavailable: {error:?}");
+                halt();
+            }
+        };
+        let Some(program_header_address) = pid1_plan.program_header_address() else {
+            let _ = writeln!(serial, "Arach: RustD ELF program headers are not mapped");
             halt();
+        };
+        match process_backend.prepare_linux_dynamic_stack(
+            &pid1,
+            pid1_argv,
+            pid1_env,
+            LinuxAuxiliaryVector {
+                program_header_address,
+                program_header_count: pid1_plan.program_header_count(),
+                runtime_linker_base: 0,
+                executable_entry_point: pid1_plan.entry_point,
+                executable_path: b"/usr/lib/rustd/rustd",
+                random: PUSH_EXPECTED_SHA256[..16].try_into().unwrap(),
+            },
+        ) {
+            Ok(stack) => stack,
+            Err(error) => {
+                let _ = writeln!(
+                    serial,
+                    "Arach: RustD Linux stack preparation failed: {error:?}"
+                );
+                halt();
+            }
+        }
+    } else {
+        match process_backend.prepare_initial_stack(&pid1, pid1_argv, pid1_env) {
+            Ok(stack) => stack,
+            Err(error) => {
+                let _ = writeln!(
+                    serial,
+                    "Arach: PID1 argv/envp preparation failed: {error:?}"
+                );
+                halt();
+            }
         }
     };
     let Some(pid1_info) = process_backend.process_info(&pid1) else {
