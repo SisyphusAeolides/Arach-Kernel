@@ -1,4 +1,6 @@
-use core::{mem::size_of, ptr};
+use alloc::alloc::{alloc, handle_alloc_error};
+use alloc::boxed::Box;
+use core::{alloc::Layout, mem::size_of, ptr};
 
 use abyss::frame::FrameAllocatorError;
 use abyss::paging::{PAGE_SIZE, PhysicalAddress};
@@ -484,6 +486,44 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             active_slot: None,
             slots: [const { FrameBackedSlot::EMPTY }; MAXIMUM_RETAINED_PROCESSES],
             shared: [const { SharedBacking::EMPTY }; MAXIMUM_SHARED_BACKINGS],
+        }
+    }
+
+    /// Allocates and initializes the production metadata pool directly in
+    /// its final heap allocation.  Constructing the fixed-capacity value as
+    /// a temporary before putting it in a `Box` would copy every retained
+    /// page record through the bootstrap stack and exceed the 8 MiB early
+    /// stack even though the ownership ultimately belongs to the heap.
+    #[inline(never)]
+    pub fn boxed_new(
+        memory: Memory,
+        kernel_root: PhysicalAddress,
+        _authority: &Capability<'_, ProcessInstallControl>,
+    ) -> Box<Self> {
+        let layout = Layout::new::<Self>();
+        // SAFETY: `layout` is the exact layout of `Self`; ownership of the
+        // allocation is transferred to the returned `Box` after every field
+        // has been initialized below.
+        let raw = unsafe { alloc(layout).cast::<Self>() };
+        if raw.is_null() {
+            handle_alloc_error(layout);
+        }
+
+        // SAFETY: `raw` points to an allocation with the layout of `Self` and
+        // each field is written exactly once before `Box::from_raw` exposes
+        // the value to safe code. The array elements are initialized in place
+        // so no full metadata pool is ever materialized on the stack.
+        unsafe {
+            ptr::addr_of_mut!((*raw).memory).write(memory);
+            ptr::addr_of_mut!((*raw).kernel_root).write(kernel_root);
+            ptr::addr_of_mut!((*raw).active_slot).write(None);
+            for index in 0..MAXIMUM_RETAINED_PROCESSES {
+                ptr::addr_of_mut!((*raw).slots[index]).write(FrameBackedSlot::EMPTY);
+            }
+            for index in 0..MAXIMUM_SHARED_BACKINGS {
+                ptr::addr_of_mut!((*raw).shared[index]).write(SharedBacking::EMPTY);
+            }
+            Box::from_raw(raw)
         }
     }
 
