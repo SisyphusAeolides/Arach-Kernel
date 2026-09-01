@@ -1052,7 +1052,12 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         push_module.start.as_u64(),
         push_module.end.as_u64(),
     );
-    let crest_module = match boot.module(b"crest") {
+    let bootstrap_module_name: &[u8] = if RUSTD_INIT {
+        b"arachos-bootstrap"
+    } else {
+        b"crest"
+    };
+    let crest_module = match boot.module(bootstrap_module_name) {
         Ok(module) => module,
         Err(error) => {
             let _ = writeln!(serial, "Arach: Crest boot module error: {error:?}");

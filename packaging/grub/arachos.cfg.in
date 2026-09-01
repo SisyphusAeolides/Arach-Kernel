@@ -8,7 +8,7 @@ menuentry 'ArachOS — Arach Kernel (qualification)' --class arachos --class gnu
     set gfxpayload=keep
     multiboot2 /boot/arach arachos=1 init=/usr/lib/rustd/rustd
     module2 /boot/rustd rustd
-    module2 /boot/bootstrap crest
+    module2 /boot/bootstrap arachos-bootstrap
 @RESOLVED_MODULE@
     boot
 }
