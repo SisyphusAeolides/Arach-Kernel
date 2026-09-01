@@ -694,6 +694,7 @@ fn schedule_exit_return(exit_code: isize) -> crate::process::lifecycle::Schedule
         Some(handle) => handle,
         None => crate::arch::x86_64::halt(),
     };
+    report_pid1_exit(exiting, exit_code);
     let group = crate::process::lifecycle::current_thread_group_handle();
     let clear_group = crate::process::lifecycle::current_is_thread_group_leader()
         .then_some(group)
@@ -750,6 +751,7 @@ fn schedule_linux_exit_group_return(
         Ok(group) => group,
         Err(_) => crate::arch::x86_64::halt(),
     };
+    report_pid1_exit(leader, exit_code);
     for owner in handles[..count].iter().flatten().copied() {
         cleanup_linux_thread_exit(owner, (owner == leader).then_some(leader));
     }
@@ -770,6 +772,21 @@ fn schedule_linux_exit_group_return(
         Err(_) => crate::arch::x86_64::halt(),
     }
     complete_schedule_decision(decision)
+}
+
+#[cfg(target_os = "none")]
+fn report_pid1_exit(
+    exiting: crate::process::lifecycle::ProcessHandle,
+    exit_code: isize,
+) {
+    if exiting.pid != crate::process::lifecycle::INIT_PID {
+        return;
+    }
+    let mut serial = unsafe { SerialPort::initialize(COM1) };
+    let _ = core::fmt::Write::write_fmt(
+        &mut serial,
+        format_args!("Arach: RustD PID1 exit requested code={exit_code}\n"),
+    );
 }
 
 #[cfg(target_os = "none")]
