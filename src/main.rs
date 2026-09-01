@@ -1992,31 +1992,39 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                 halt();
             }
         };
-        let Some(program_header_address) = pid1_plan.program_header_address() else {
-            let _ = writeln!(serial, "Arach: RustD ELF program headers are not mapped");
-            halt();
-        };
-        match process_backend.prepare_linux_dynamic_stack(
-            &pid1,
-            pid1_argv,
-            pid1_env,
-            LinuxAuxiliaryVector {
-                program_header_address,
-                program_header_count: pid1_plan.program_header_count(),
-                runtime_linker_base: 0,
-                executable_entry_point: pid1_plan.entry_point,
-                executable_path: b"/usr/lib/rustd/rustd",
-                random: PUSH_EXPECTED_SHA256[..16].try_into().unwrap(),
+        match pid1_plan.program_header_address() {
+            Some(program_header_address) => match process_backend.prepare_linux_dynamic_stack(
+                &pid1,
+                pid1_argv,
+                pid1_env,
+                LinuxAuxiliaryVector {
+                    program_header_address,
+                    program_header_count: pid1_plan.program_header_count(),
+                    runtime_linker_base: 0,
+                    executable_entry_point: pid1_plan.entry_point,
+                    executable_path: b"/usr/lib/rustd/rustd",
+                    random: PUSH_EXPECTED_SHA256[..16].try_into().unwrap(),
+                },
+            ) {
+                Ok(stack) => stack,
+                Err(error) => {
+                    let _ = writeln!(
+                        serial,
+                        "Arach: RustD Linux stack preparation failed: {error:?}"
+                    );
+                    halt();
+                }
             },
-        ) {
-            Ok(stack) => stack,
-            Err(error) => {
-                let _ = writeln!(
-                    serial,
-                    "Arach: RustD Linux stack preparation failed: {error:?}"
-                );
-                halt();
-            }
+            None => match process_backend.prepare_initial_stack(&pid1, pid1_argv, pid1_env) {
+                Ok(stack) => stack,
+                Err(error) => {
+                    let _ = writeln!(
+                        serial,
+                        "Arach: static Linux PID1 stack preparation failed: {error:?}"
+                    );
+                    halt();
+                }
+            },
         }
     } else {
         match process_backend.prepare_initial_stack(&pid1, pid1_argv, pid1_env) {
