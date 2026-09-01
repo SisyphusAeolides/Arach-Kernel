@@ -7,7 +7,6 @@
 .equ CR4_OSXMMEXCPT, (1 << 10)
 .equ CR4_OSXSAVE, (1 << 18)
 .equ CPUID_XSAVE, (1 << 26)
-.equ CPUID_OSXSAVE, (1 << 27)
 .equ CPUID_AVX, (1 << 28)
 
 .global arach_enter_ring3_probe
@@ -58,15 +57,16 @@ arach_enter_user_process:
     movq %rdx, %cr3
     # x86-64 user code may use the mandatory SSE2 baseline. Advertise the
     # architectural XMM state before iret, and expose AVX only when the
-    # processor reports XSAVE, OSXSAVE, and AVX together. Without this, a
-    # normal optimized libc startup can receive #UD even though the ISA is
-    # present in CPUID because CR4.OSXSAVE/XCR0 were never published.
+    # processor reports XSAVE and AVX together. CPUID.OSXSAVE describes the
+    # current CR4 state, so it is necessarily clear until this entry path
+    # enables CR4.OSXSAVE. Checking it before the write would leave a normal
+    # optimized libc startup with #UD even though the ISA is present.
     movl $1, %eax
     xorl %ecx, %ecx
     cpuid
     movq %cr4, %rax
     orq $(CR4_OSFXSR | CR4_OSXMMEXCPT), %rax
-    testl $((CPUID_XSAVE | CPUID_OSXSAVE | CPUID_AVX)), %ecx
+    testl $((CPUID_XSAVE | CPUID_AVX)), %ecx
     jz 1f
     orq $CR4_OSXSAVE, %rax
     movq %rax, %cr4
