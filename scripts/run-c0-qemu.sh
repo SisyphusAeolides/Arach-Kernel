@@ -8,9 +8,20 @@ fi
 
 image=$1
 log=${2:-${image}.serial.log}
-qemu=${QEMU:-qemu-system-x86_64}
+qemu=${QEMU:-}
+if [[ -z "$qemu" ]]; then
+    for candidate in qemu-system-x86_64 /usr/libexec/qemu-kvm; do
+        if command -v "$candidate" >/dev/null 2>&1 || [[ -x "$candidate" ]]; then
+            qemu=$candidate
+            break
+        fi
+    done
+fi
 [[ -f "$image" && ! -L "$image" ]] || { echo "C0 image is not a regular file" >&2; exit 1; }
-command -v "$qemu" >/dev/null || { echo "QEMU is required for C0 execution" >&2; exit 69; }
+if [[ -z "$qemu" ]] || ! (command -v "$qemu" >/dev/null 2>&1 || [[ -x "$qemu" ]]); then
+    echo "QEMU is required for C0 execution" >&2
+    exit 69
+fi
 
 first_existing() {
     local candidate
