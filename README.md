@@ -226,7 +226,7 @@ artifacts before constructing GRUB media.
 ## ArachOS userspace target
 
 ArachOS owns the release, package repository, and installer composition. The
-generic EL10 RPM ABI is used as a bootstrap package ecosystem, while RustD
+generic RPM/DNF package ABI is used as a bootstrap package ecosystem, while RustD
 owns PID 1 and service management, RustD-resolved owns DNS, NSS, Varlink, and
 the resolver compatibility boundary, and GRUB owns the BIOS and UEFI boot path.
 
