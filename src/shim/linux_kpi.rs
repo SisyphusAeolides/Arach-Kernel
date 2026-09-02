@@ -742,7 +742,7 @@ unsafe extern "C" fn test_allocate(
         return sisyphus_driver_abi::STATUS_INVALID_ARGUMENT;
     }
     if TEST_ALLOCATE_FAILURES
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
             remaining.checked_sub(1)
         })
         .is_ok()
@@ -770,7 +770,7 @@ unsafe extern "C" fn test_deallocate(
     alignment: usize,
 ) -> sisyphus_driver_abi::Status {
     if TEST_DEALLOCATE_FAILURES
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
             remaining.checked_sub(1)
         })
         .is_ok()

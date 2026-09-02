@@ -75,11 +75,11 @@ pub enum TransactionError {
 }
 
 pub fn rtm_available() -> bool {
-    // SAFETY: CPUID leaf zero is always available in x86_64 mode.
-    let maximum_leaf = unsafe { core::arch::x86_64::__cpuid(0) }.eax;
+    // CPUID leaf zero is always available in x86_64 mode.
+    let maximum_leaf = core::arch::x86_64::__cpuid(0).eax;
     maximum_leaf >= 7
-        // SAFETY: Leaf seven is queried only when leaf zero reports it.
-        && unsafe { core::arch::x86_64::__cpuid_count(7, 0) }.ebx & (1 << 11) != 0
+        // Leaf seven is queried only when leaf zero reports it.
+        && core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 11) != 0
 }
 
 /// Executes a no-argument foreign call inside an Intel RTM transaction.

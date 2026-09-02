@@ -118,8 +118,8 @@ pub fn user_probe_hits() -> usize {
 }
 
 pub fn apic_capabilities() -> (bool, bool) {
-    // SAFETY: CPUID leaf one is mandatory in x86_64 mode.
-    let features = unsafe { core::arch::x86_64::__cpuid(1) };
+    // CPUID leaf one is mandatory in x86_64 mode.
+    let features = core::arch::x86_64::__cpuid(1);
     let local_apic = features.edx & (1 << 9) != 0;
     let x2apic = features.ecx & (1 << 21) != 0;
     (local_apic, x2apic)
