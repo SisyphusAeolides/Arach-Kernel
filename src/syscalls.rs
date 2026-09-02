@@ -775,10 +775,7 @@ fn schedule_linux_exit_group_return(
 }
 
 #[cfg(target_os = "none")]
-fn report_pid1_exit(
-    exiting: crate::process::lifecycle::ProcessHandle,
-    exit_code: isize,
-) {
+fn report_pid1_exit(exiting: crate::process::lifecycle::ProcessHandle, exit_code: isize) {
     if exiting.pid != crate::process::lifecycle::INIT_PID {
         return;
     }
