@@ -39,7 +39,7 @@ for artifact in "$rustd" "$bootstrap"; do
 done
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/arachos-grub.XXXXXX")
-cleanup() { rm -rf -- "$stage"; }
+cleanup() { find "$stage" -depth -delete 2>/dev/null || :; }
 trap cleanup EXIT
 mkdir -p "$stage/boot/grub"
 install -m 0644 "$kernel" "$stage/boot/arach"
