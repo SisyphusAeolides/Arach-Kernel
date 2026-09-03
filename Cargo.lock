@@ -20,15 +20,11 @@ dependencies = [
  "kairos",
  "libm",
  "sisyphus-driver-abi",
- "slope",
 ]
 
 [[package]]
 name = "blacklab"
 version = "0.1.0"
-dependencies = [
- "slope",
-]
 
 [[package]]
 name = "kairos"
@@ -43,11 +39,3 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "sisyphus-driver-abi"
 version = "0.1.0"
-
-[[package]]
-name = "slope"
-version = "0.1.0"
-dependencies = [
- "aether",
- "kairos",
-]

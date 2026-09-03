@@ -5138,7 +5138,7 @@ mod tests {
     use crate::process::lifecycle::ProcessHandle;
 
     #[test]
-    fn akashic_wire_layout_matches_slope() {
+    fn akashic_wire_layout_matches_arach() {
         assert_eq!(core::mem::size_of::<AkashicRawStat>(), 32);
         assert_eq!(
             core::mem::size_of::<AkashicRawDirent>(),

@@ -485,18 +485,21 @@ mod tests {
         let mut bytes = ModuleBootInformation([0; 40]);
         bytes.0[0..4].copy_from_slice(&(40_u32).to_le_bytes());
         bytes.0[8..12].copy_from_slice(&TAG_MODULE.to_le_bytes());
-        bytes.0[12..16].copy_from_slice(&(21_u32).to_le_bytes());
+        bytes.0[12..16].copy_from_slice(&(22_u32).to_le_bytes());
         bytes.0[16..20].copy_from_slice(&(0x40_0000_u32).to_le_bytes());
         bytes.0[20..24].copy_from_slice(&(0x40_2000_u32).to_le_bytes());
-        bytes.0[24..29].copy_from_slice(b"push\0");
+        bytes.0[24..29].copy_from_slice(b"rustd");
         bytes.0[32..36].copy_from_slice(&TAG_END.to_le_bytes());
         bytes.0[36..40].copy_from_slice(&(8_u32).to_le_bytes());
 
         let boot = unsafe { BootInformation::load(bytes.0.as_ptr() as usize) }.unwrap();
-        let module = boot.module(b"push").unwrap();
+        let module = boot.module(b"rustd").unwrap();
         assert_eq!(module.start.as_u64(), 0x40_0000);
         assert_eq!(module.end.as_u64(), 0x40_2000);
         assert_eq!(module.length(), 0x2000);
-        assert_eq!(boot.module(b"crest"), Err(BootError::MissingModule));
+        assert_eq!(
+            boot.module(b"arachos-bootstrap"),
+            Err(BootError::MissingModule)
+        );
     }
 }

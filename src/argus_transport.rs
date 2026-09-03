@@ -3,14 +3,14 @@
 //! The e1000 driver remains the sole owner of NIC/DMA authority. This module
 //! owns only connection-local protocol state and copied payload bytes. It has
 //! no user-space entry point: a later Arach broker must bind it to a live
-//! e1000 path and an authenticated Push/Argus IPC mapping.
+//! e1000 path and an authenticated RustD/Argus IPC mapping.
 
-use crate::predictive_control::hash::Sha256;
-use slope::hypermedia::{
+use crate::arach_hypermedia::{
     ArgusEndpointSession, EndpointError, HttpIpcRequest, HttpLease, HttpsRequest, HypermediaError,
     MAX_HTTP_REQUEST_BYTES, MAX_HTTP_RESPONSE_BYTES, TlsPeerIdentity, TlsTrustAnchor,
     TlsTrustError,
 };
+use crate::predictive_control::hash::Sha256;
 
 pub const MAX_REASSEMBLY_SEGMENTS: usize = 16;
 pub const MAX_REASSEMBLY_BYTES: usize = 8 * 1024;
@@ -783,7 +783,7 @@ pub enum TlsError {
 /// arbitrary certificate as trusted.
 pub fn verify_pinned_certificate(
     anchor: TlsTrustAnchor,
-    origin: slope::hypermedia::HttpsOrigin,
+    origin: crate::arach_hypermedia::HttpsOrigin,
     certificate_der: &[u8],
     generation: u32,
 ) -> Result<TlsPeerIdentity, TlsError> {
@@ -1097,7 +1097,7 @@ impl<'payload> Tls13Plaintext<'payload> {
 /// Bounded TLS 1.3 ChaCha20-Poly1305 record protection. This is deliberately
 /// only the post-handshake record layer: a broker must still authenticate the
 /// peer, derive the traffic secret, and transfer that secret through the
-/// measured Hermes/Push capability before constructing this type.
+/// measured Hermes/RustD capability before constructing this type.
 pub struct Tls13RecordProtector {
     traffic: Tls13TrafficKey,
     sequence: u64,
@@ -2321,16 +2321,22 @@ mod tests {
 
     #[test]
     fn broker_session_drives_handshake_request_and_bounded_response() {
-        let request = slope::hypermedia::HttpsRequest::parse_location(
+        let request = crate::arach_hypermedia::HttpsRequest::parse_location(
             b"https://example.com/",
-            slope::hypermedia::HttpBudget::DEFAULT,
+            crate::arach_hypermedia::HttpBudget::DEFAULT,
         )
         .expect("request");
-        // SAFETY: this test models the authenticated Push reply with a
+        // SAFETY: this test models the authenticated RustD reply with a
         // nonzero capability and an exact origin/budget binding.
         let lease = unsafe {
-            slope::hypermedia::HttpLease::from_broker(7, 3, request.origin(), request.budget(), 20)
-                .expect("lease")
+            crate::arach_hypermedia::HttpLease::from_broker(
+                7,
+                3,
+                request.origin(),
+                request.budget(),
+                20,
+            )
+            .expect("lease")
         };
         let local_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
         let remote_mac = [0x52, 0x54, 0x00, 0xab, 0xcd, 0xef];
@@ -2395,21 +2401,27 @@ mod tests {
 
     #[test]
     fn broker_endpoint_admission_binds_one_mapping_generation() {
-        let request = slope::hypermedia::HttpsRequest::parse_location(
+        let request = crate::arach_hypermedia::HttpsRequest::parse_location(
             b"https://example.com/",
-            slope::hypermedia::HttpBudget::DEFAULT,
+            crate::arach_hypermedia::HttpBudget::DEFAULT,
         )
         .expect("request");
-        // SAFETY: synthetic values model authenticated Push/Hermes replies.
+        // SAFETY: synthetic values model authenticated RustD/Hermes replies.
         let lease = unsafe {
-            slope::hypermedia::HttpLease::from_broker(31, 7, request.origin(), request.budget(), 20)
-                .expect("HTTP lease")
+            crate::arach_hypermedia::HttpLease::from_broker(
+                31,
+                7,
+                request.origin(),
+                request.budget(),
+                20,
+            )
+            .expect("HTTP lease")
         };
         let endpoint_lease = unsafe {
-            slope::hypermedia::ArgusEndpointLease::from_broker(41, 42, 8, 9, 20)
+            crate::arach_hypermedia::ArgusEndpointLease::from_broker(41, 42, 8, 9, 20)
                 .expect("endpoint lease")
         };
-        let mut endpoint = slope::hypermedia::ArgusEndpointSession::new(endpoint_lease);
+        let mut endpoint = crate::arach_hypermedia::ArgusEndpointSession::new(endpoint_lease);
         let wire = lease.to_ipc_request(request, 1, 1).expect("IPC request");
         let session = ArgusBrokerSession::begin_endpoint_ipc(
             lease,
@@ -2424,7 +2436,7 @@ mod tests {
         assert_eq!(session.phase(), BrokerPhase::SynSent);
         assert_eq!(
             endpoint.prepare(wire, 1),
-            Err(slope::hypermedia::EndpointError::Busy)
+            Err(crate::arach_hypermedia::EndpointError::Busy)
         );
         assert_eq!(
             session.complete_endpoint(&mut endpoint),
@@ -2483,9 +2495,9 @@ mod tests {
 
     #[test]
     fn https_get_encoder_binds_the_canonical_origin_and_budget() {
-        let request = slope::hypermedia::HttpsRequest::parse_location(
+        let request = crate::arach_hypermedia::HttpsRequest::parse_location(
             b"https://Example.COM/docs/start",
-            slope::hypermedia::HttpBudget::DEFAULT,
+            crate::arach_hypermedia::HttpBudget::DEFAULT,
         )
         .expect("request");
         let mut output = [0_u8; 256];
@@ -2523,7 +2535,7 @@ mod tests {
 
     #[test]
     fn pinned_certificate_check_hashes_der_and_binds_origin_generation() {
-        let origin = slope::hypermedia::HttpsOrigin::new(b"example.com").expect("origin");
+        let origin = crate::arach_hypermedia::HttpsOrigin::new(b"example.com").expect("origin");
         let certificate_der = b"bounded-certificate-der";
         let fingerprint = ::blacklab::oureboros::sha256(certificate_der);
         // SAFETY: synthetic values model the authenticated broker anchor.
@@ -2552,7 +2564,7 @@ mod tests {
 
     #[test]
     fn tls_handshake_transcript_requires_order_and_pinned_peer_before_finished() {
-        let origin = slope::hypermedia::HttpsOrigin::new(b"example.com").expect("origin");
+        let origin = crate::arach_hypermedia::HttpsOrigin::new(b"example.com").expect("origin");
         let certificate_der = b"certificate";
         let fingerprint = ::blacklab::oureboros::sha256(certificate_der);
         // SAFETY: synthetic values model the authenticated broker anchor.

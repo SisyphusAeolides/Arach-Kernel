@@ -499,8 +499,8 @@ impl Sha256 {
 ///
 /// Callers that need admission must bind the returned digest to independently
 /// rooted expected material; this primitive deliberately only performs the
-/// measurement. Granite uses it before firmware exit, while Boulder uses the
-/// same implementation for its measured user-image path.
+/// measurement. Arach uses it before firmware exit and for its measured
+/// user-image path.
 pub fn sha256(input: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(input);

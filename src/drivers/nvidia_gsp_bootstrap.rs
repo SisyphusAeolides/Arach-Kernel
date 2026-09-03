@@ -60,7 +60,7 @@ pub struct TuringGspBootstrapPlan<'a> {
     pub booter_unload: NvfwImage<'a>,
 }
 
-/// The complete, measured TU117 boot input set as received from Granite's
+/// The complete, measured TU117 boot input set as received from Arach's
 /// immutable boot modules.  This is deliberately not a generic GSP loader:
 /// it names the exact 610.43.03 TU10x GSP-RM image and the four source-pinned
 /// SEC2/GSP auxiliary artifacts required for its documented bootstrap.

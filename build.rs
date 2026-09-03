@@ -20,12 +20,12 @@ fn main() {
     let crucible = workspace.join("formal/idris2/Crucible.idr");
     let aegis_lifecycle = workspace.join("formal/idris2/AegisLifecycle.idr");
     let argus_markup = workspace.join("formal/idris2/ArgusMarkup.idr");
-    let granite_boot = workspace.join("formal/idris2/GraniteBoot.idr");
+    let arach_boot = workspace.join("formal/idris2/ArachBoot.idr");
     let hermes_authority = workspace.join("formal/idris2/HermesAuthority.idr");
     let crest_shell = workspace.join("formal/idris2/CrestShell.idr");
     let privilege_rings = workspace.join("formal/agda/PrivilegeRings.agda");
     let argus_layout = workspace.join("formal/agda/ArgusLayout.agda");
-    let granite_layout = workspace.join("formal/agda/GraniteLayout.agda");
+    let arach_layout = workspace.join("formal/agda/ArachLayout.agda");
     let hermes_wire = workspace.join("formal/agda/HermesWire.agda");
     let crest_overlay = workspace.join("formal/agda/CrestOverlay.agda");
     let cosmic_compatibility = workspace.join("formal/idris2/CosmicCompatibility.idr");
@@ -37,12 +37,12 @@ fn main() {
     let crucible_digest = measured_source(&crucible);
     let aegis_digest = measured_source(&aegis_lifecycle);
     let argus_markup_digest = measured_source(&argus_markup);
-    let granite_boot_digest = measured_source(&granite_boot);
+    let arach_boot_digest = measured_source(&arach_boot);
     let hermes_authority_digest = measured_source(&hermes_authority);
     let crest_shell_digest = measured_source(&crest_shell);
     let privilege_digest = measured_source(&privilege_rings);
     let argus_layout_digest = measured_source(&argus_layout);
-    let granite_layout_digest = measured_source(&granite_layout);
+    let arach_layout_digest = measured_source(&arach_layout);
     let hermes_wire_digest = measured_source(&hermes_wire);
     let crest_overlay_digest = measured_source(&crest_overlay);
     let cosmic_compatibility_digest = measured_source(&cosmic_compatibility);
@@ -54,12 +54,12 @@ fn main() {
     println!("cargo:rerun-if-changed={}", crucible.display());
     println!("cargo:rerun-if-changed={}", aegis_lifecycle.display());
     println!("cargo:rerun-if-changed={}", argus_markup.display());
-    println!("cargo:rerun-if-changed={}", granite_boot.display());
+    println!("cargo:rerun-if-changed={}", arach_boot.display());
     println!("cargo:rerun-if-changed={}", hermes_authority.display());
     println!("cargo:rerun-if-changed={}", crest_shell.display());
     println!("cargo:rerun-if-changed={}", privilege_rings.display());
     println!("cargo:rerun-if-changed={}", argus_layout.display());
-    println!("cargo:rerun-if-changed={}", granite_layout.display());
+    println!("cargo:rerun-if-changed={}", arach_layout.display());
     println!("cargo:rerun-if-changed={}", hermes_wire.display());
     println!("cargo:rerun-if-changed={}", crest_overlay.display());
     println!("cargo:rerun-if-changed={}", cosmic_compatibility.display());
@@ -87,8 +87,8 @@ fn main() {
         encode_sha256(argus_markup_digest)
     );
     println!(
-        "cargo:rustc-env=SISYPHUS_GRANITE_BOOT_PROOF_SHA256={}",
-        encode_sha256(granite_boot_digest)
+        "cargo:rustc-env=SISYPHUS_ARACH_BOOT_PROOF_SHA256={}",
+        encode_sha256(arach_boot_digest)
     );
     println!(
         "cargo:rustc-env=SISYPHUS_HERMES_AUTHORITY_PROOF_SHA256={}",
@@ -107,8 +107,8 @@ fn main() {
         encode_sha256(argus_layout_digest)
     );
     println!(
-        "cargo:rustc-env=SISYPHUS_GRANITE_LAYOUT_PROOF_SHA256={}",
-        encode_sha256(granite_layout_digest)
+        "cargo:rustc-env=SISYPHUS_ARACH_LAYOUT_PROOF_SHA256={}",
+        encode_sha256(arach_layout_digest)
     );
     println!(
         "cargo:rustc-env=SISYPHUS_HERMES_WIRE_PROOF_SHA256={}",
@@ -155,12 +155,12 @@ fn main() {
                 crucible_digest,
                 aegis_digest,
                 argus_markup_digest,
-                granite_boot_digest,
+                arach_boot_digest,
                 hermes_authority_digest,
                 crest_shell_digest,
                 privilege_digest,
                 argus_layout_digest,
-                granite_layout_digest,
+                arach_layout_digest,
                 hermes_wire_digest,
                 crest_overlay_digest,
                 cosmic_compatibility_digest,
@@ -180,22 +180,15 @@ fn main() {
         println!("cargo:rustc-link-arg-bin=arach=--gc-sections");
 
         println!("cargo:rerun-if-env-changed=ARACH_RUSTD_IMAGE");
-        println!("cargo:rerun-if-env-changed=ARACH_PUSH_IMAGE");
-        let (push_image, rustd_init) = match env::var_os("ARACH_RUSTD_IMAGE") {
-            Some(path) => (PathBuf::from(path), true),
-            None => (
-                configured_file(
-                    "ARACH_PUSH_IMAGE",
-                    &workspace.join("target/x86_64-sisyphus-user/release/push"),
-                ),
-                false,
-            ),
-        };
-        println!("cargo:rerun-if-changed={}", push_image.display());
-        let bytes = fs::read(&push_image).unwrap_or_else(|error| {
+        let rustd_image = configured_file(
+            "ARACH_RUSTD_IMAGE",
+            &workspace.join("target/x86_64-static-linux/release/rustd"),
+        );
+        println!("cargo:rerun-if-changed={}", rustd_image.display());
+        let bytes = fs::read(&rustd_image).unwrap_or_else(|error| {
             panic!(
-                "failed to read {}: {error}; set ARACH_PUSH_IMAGE to the measured Push ELF",
-                push_image.display()
+                "failed to read {}: {error}; set ARACH_RUSTD_IMAGE to the measured RustD ELF",
+                rustd_image.display()
             )
         });
         assert!(
@@ -209,45 +202,46 @@ fn main() {
             use std::fmt::Write as _;
             write!(encoded, "{byte:02x}").expect("writing to String cannot fail");
         }
-        println!("cargo:rustc-env=SISYPHUS_PUSH_SHA256={encoded}");
-        println!("cargo:rustc-env=SISYPHUS_PUSH_BYTES={}", bytes.len());
-        println!("cargo:rustc-env=SISYPHUS_PUSH_ENTRY_FILE_OFFSET={entry_file_offset}");
-        println!(
-            "cargo:rustc-env=ARACH_RUSTD_INIT={}",
-            usize::from(rustd_init)
-        );
+        println!("cargo:rustc-env=SISYPHUS_RUSTD_SHA256={encoded}");
+        println!("cargo:rustc-env=SISYPHUS_RUSTD_BYTES={}", bytes.len());
+        println!("cargo:rustc-env=SISYPHUS_RUSTD_ENTRY_FILE_OFFSET={entry_file_offset}");
         emit_rustd_resolved_artifact();
 
         let bootstrap_package = selected_bootstrap_package(&workspace);
-        let crest_bytes = bootstrap_package.bytes;
+        let bootstrap_bytes = bootstrap_package.bytes;
         assert!(
-            !crest_bytes.is_empty() && crest_bytes.len() <= 1024 * 1024,
+            !bootstrap_bytes.is_empty() && bootstrap_bytes.len() <= 1024 * 1024,
             "bootstrap image must be between 1 byte and 1 MiB"
         );
-        let crest_entry_file_offset = elf_entry_file_offset(&crest_bytes);
-        let crest_digest = sha256(&crest_bytes);
-        let mut crest_encoded = String::with_capacity(64);
-        for byte in crest_digest {
+        let bootstrap_entry_file_offset = elf_entry_file_offset(&bootstrap_bytes);
+        let bootstrap_digest = sha256(&bootstrap_bytes);
+        let mut bootstrap_encoded = String::with_capacity(64);
+        for byte in bootstrap_digest {
             use std::fmt::Write as _;
-            write!(crest_encoded, "{byte:02x}").expect("writing to String cannot fail");
+            write!(bootstrap_encoded, "{byte:02x}").expect("writing to String cannot fail");
         }
-        println!("cargo:rustc-env=SISYPHUS_CREST_SHA256={crest_encoded}");
-        println!("cargo:rustc-env=SISYPHUS_CREST_BYTES={}", crest_bytes.len());
-        println!("cargo:rustc-env=SISYPHUS_CREST_ENTRY_FILE_OFFSET={crest_entry_file_offset}");
+        println!("cargo:rustc-env=SISYPHUS_BOOTSTRAP_SHA256={bootstrap_encoded}");
         println!(
-            "cargo:rustc-env=SISYPHUS_CREST_PACKAGE_VERSION={}",
+            "cargo:rustc-env=SISYPHUS_BOOTSTRAP_BYTES={}",
+            bootstrap_bytes.len()
+        );
+        println!(
+            "cargo:rustc-env=SISYPHUS_BOOTSTRAP_ENTRY_FILE_OFFSET={bootstrap_entry_file_offset}"
+        );
+        println!(
+            "cargo:rustc-env=SISYPHUS_BOOTSTRAP_PACKAGE_VERSION={}",
             bootstrap_package.version_index
         );
         println!(
-            "cargo:rustc-env=SISYPHUS_CREST_SERVICE_CLASS={}",
+            "cargo:rustc-env=SISYPHUS_BOOTSTRAP_SERVICE_CLASS={}",
             bootstrap_package.service_class
         );
         println!(
-            "cargo:rustc-env=SISYPHUS_CREST_PROVENANCE_ROOT={}",
+            "cargo:rustc-env=SISYPHUS_BOOTSTRAP_PROVENANCE_ROOT={}",
             bootstrap_package.provenance_root
         );
         println!(
-            "cargo:rustc-env=SISYPHUS_CREST_EXECUTION_ABI={}",
+            "cargo:rustc-env=SISYPHUS_BOOTSTRAP_EXECUTION_ABI={}",
             bootstrap_package.execution_abi
         );
 
@@ -330,7 +324,7 @@ fn main() {
 /// Emit build-bound metadata for the optional native COSMIC service bundle.
 ///
 /// The ordinary C0 build does not set `ARACH_COSMIC_SERVICES_DIR`, so every
-/// service remains absent and the kernel keeps its existing Push/Crest boot
+/// service remains absent and the kernel keeps its RustD/bootstrap boot
 /// contract. A production native COSMIC build points this variable at eight
 /// target-compatible ELF images; all eight are measured as one atomic set and
 /// are required by the kernel if the bundle is enabled.
@@ -498,12 +492,12 @@ struct FormalAttestation {
     crucible_digest: [u8; 32],
     aegis_digest: [u8; 32],
     argus_markup_digest: [u8; 32],
-    granite_boot_digest: [u8; 32],
+    arach_boot_digest: [u8; 32],
     hermes_authority_digest: [u8; 32],
     crest_shell_digest: [u8; 32],
     privilege_digest: [u8; 32],
     argus_layout_digest: [u8; 32],
-    granite_layout_digest: [u8; 32],
+    arach_layout_digest: [u8; 32],
     hermes_wire_digest: [u8; 32],
     crest_overlay_digest: [u8; 32],
     cosmic_compatibility_digest: [u8; 32],
@@ -519,12 +513,12 @@ fn verify_formal_attestation(workspace: &Path, attestation: FormalAttestation) {
         crucible_digest,
         aegis_digest,
         argus_markup_digest,
-        granite_boot_digest,
+        arach_boot_digest,
         hermes_authority_digest,
         crest_shell_digest,
         privilege_digest,
         argus_layout_digest,
-        granite_layout_digest,
+        arach_layout_digest,
         hermes_wire_digest,
         crest_overlay_digest,
         cosmic_compatibility_digest,
@@ -543,9 +537,9 @@ fn verify_formal_attestation(workspace: &Path, attestation: FormalAttestation) {
     let expected = format!(
         "format=1\nidris2_version=0.8.0\nagda_version=2.8.0\n\
 driver_lifecycle_sha256={}\npackage_transaction_sha256={}\n\
-crucible_sha256={}\naegis_lifecycle_sha256={}\nargus_markup_sha256={}\ngranite_boot_sha256={}\n\
+crucible_sha256={}\naegis_lifecycle_sha256={}\nargus_markup_sha256={}\narach_boot_sha256={}\n\
 hermes_authority_sha256={}\ncrest_shell_sha256={}\nprivilege_rings_sha256={}\nargus_layout_sha256={}\n\
-granite_layout_sha256={}\nhermes_wire_sha256={}\ncrest_overlay_sha256={}\n\
+arach_layout_sha256={}\nhermes_wire_sha256={}\ncrest_overlay_sha256={}\n\
 cosmic_compatibility_sha256={}\ncosmic_stack_sha256={}\n\
 linux_contract_idris_sha256={}\nlinux_contract_agda_sha256={}\n",
         encode_sha256(driver_digest),
@@ -553,12 +547,12 @@ linux_contract_idris_sha256={}\nlinux_contract_agda_sha256={}\n",
         encode_sha256(crucible_digest),
         encode_sha256(aegis_digest),
         encode_sha256(argus_markup_digest),
-        encode_sha256(granite_boot_digest),
+        encode_sha256(arach_boot_digest),
         encode_sha256(hermes_authority_digest),
         encode_sha256(crest_shell_digest),
         encode_sha256(privilege_digest),
         encode_sha256(argus_layout_digest),
-        encode_sha256(granite_layout_digest),
+        encode_sha256(arach_layout_digest),
         encode_sha256(hermes_wire_digest),
         encode_sha256(crest_overlay_digest),
         encode_sha256(cosmic_compatibility_digest),
@@ -607,13 +601,13 @@ fn selected_bootstrap_package(workspace: &Path) -> BootProcessPackage {
             execution_abi,
         };
     }
-    println!("cargo:rerun-if-env-changed=SISYPHUS_CREST_PACKAGE");
-    let Some(candidate) = env::var_os("SISYPHUS_CREST_PACKAGE") else {
-        let image = workspace.join("target/x86_64-sisyphus-user/release/crest");
+    println!("cargo:rerun-if-env-changed=ARACH_BOOTSTRAP_PACKAGE");
+    let Some(candidate) = env::var_os("ARACH_BOOTSTRAP_PACKAGE") else {
+        let image = workspace.join("target/x86_64-sisyphus-user/release/bootstrap");
         println!("cargo:rerun-if-changed={}", image.display());
         let bytes = fs::read(&image).unwrap_or_else(|error| {
             panic!(
-                "failed to read {}: {error}; run `cargo user-crest` before building Arach",
+                "failed to read {}: {error}; provide ARACH_BOOTSTRAP_IMAGE or ARACH_BOOTSTRAP_PACKAGE",
                 image.display()
             )
         });
@@ -634,11 +628,11 @@ fn selected_bootstrap_package(workspace: &Path) -> BootProcessPackage {
     };
 
     let root = fs::canonicalize(PathBuf::from(candidate)).unwrap_or_else(|error| {
-        panic!("failed to resolve SISYPHUS_CREST_PACKAGE: {error}");
+        panic!("failed to resolve ARACH_BOOTSTRAP_PACKAGE: {error}");
     });
     assert!(
         root.is_dir(),
-        "SISYPHUS_CREST_PACKAGE must name a directory"
+        "ARACH_BOOTSTRAP_PACKAGE must name a directory"
     );
     let manifest = rooted_file(&root, "package.toml");
     let manifest_text = fs::read_to_string(&manifest).unwrap_or_else(|error| {
@@ -658,7 +652,7 @@ fn selected_bootstrap_package(workspace: &Path) -> BootProcessPackage {
     assert!(valid_atom(record.binary), "invalid candidate binary name");
     assert_eq!(
         record.service_class, 2,
-        "only Crest's service class is boot-admitted"
+        "only the bootstrap service class is boot-admitted"
     );
     assert!(
         record.package_version_index != 0,
@@ -861,13 +855,16 @@ fn decode_sha256(encoded: &str) -> [u8; 32] {
 fn elf_entry_file_offset(bytes: &[u8]) -> usize {
     assert!(
         bytes.get(..4) == Some(b"\x7fELF") && bytes.get(4) == Some(&2) && bytes.get(5) == Some(&1),
-        "Push image must be a little-endian ELF64 artifact"
+        "RustD image must be a little-endian ELF64 artifact"
     );
     let entry = read_u64(bytes, 24);
     let program_offset = usize::try_from(read_u64(bytes, 32)).expect("program table offset");
     let program_entry_size = usize::from(read_u16(bytes, 54));
     let program_count = usize::from(read_u16(bytes, 56));
-    assert!(program_entry_size >= 56, "invalid Push program header size");
+    assert!(
+        program_entry_size >= 56,
+        "invalid RustD program header size"
+    );
     for index in 0..program_count {
         let offset = program_offset
             .checked_add(
@@ -878,7 +875,7 @@ fn elf_entry_file_offset(bytes: &[u8]) -> usize {
             .expect("program table offset");
         let header = bytes
             .get(offset..offset + 56)
-            .expect("Push program header outside artifact");
+            .expect("RustD program header outside artifact");
         let kind = u32::from_le_bytes(header[0..4].try_into().expect("program type"));
         let flags = u32::from_le_bytes(header[4..8].try_into().expect("program flags"));
         let file_offset = u64::from_le_bytes(header[8..16].try_into().expect("file offset"));
@@ -895,23 +892,23 @@ fn elf_entry_file_offset(bytes: &[u8]) -> usize {
         let within_segment = entry - virtual_address;
         assert!(
             within_segment < file_size,
-            "Push entry is not backed by executable file bytes"
+            "RustD entry is not backed by executable file bytes"
         );
         return usize::try_from(
             file_offset
                 .checked_add(within_segment)
-                .expect("Push entry file offset overflow"),
+                .expect("RustD entry file offset overflow"),
         )
-        .expect("Push entry file offset does not fit usize");
+        .expect("RustD entry file offset does not fit usize");
     }
-    panic!("Push entry is outside an executable load segment");
+    panic!("RustD entry is outside an executable load segment");
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(
         bytes[offset..offset + 2]
             .try_into()
-            .expect("truncated Push ELF field"),
+            .expect("truncated RustD ELF field"),
     )
 }
 
@@ -919,7 +916,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(
         bytes[offset..offset + 8]
             .try_into()
-            .expect("truncated Push ELF field"),
+            .expect("truncated RustD ELF field"),
     )
 }
 

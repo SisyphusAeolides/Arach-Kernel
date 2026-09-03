@@ -23,7 +23,7 @@ applications into ring 0.
 
 - Boot ArachOS directly through GRUB's Multiboot2 path.
 - Run the ArachOS RPM/DNF userspace with RustD as PID 1 and RustD-resolved as the
-  resolver, without Granite, Push, or a kernel-selected desktop environment.
+  resolver, without a kernel-selected desktop environment.
 - Provide a measured Linux compatibility contract without silently claiming
   support that has not passed a gate.
 - Support real hardware through native drivers and qualified Linux-compatible
@@ -34,15 +34,16 @@ applications into ring 0.
 ## Current status
 
 Arach Kernel is under active development. Its host test suite passes and the
-existing measured C0 bundle executes under QEMU/OVMF. The ArachOS integration
-has a direct GRUB Multiboot2 bundle contract and accepts a measured `rustd`
-module as Linux-ABI PID 1. ArachOS pins the exact qualified source revision.
+custom Multiboot2 kernel contract builds with measured RustD, bootstrap, and
+RustD-resolved inputs. The ArachOS integration has a direct GRUB Multiboot2
+bundle contract and accepts a measured `rustd` module as Linux-ABI PID 1.
+ArachOS pins the exact qualified source revision.
 
 The ArachOS/GRUB path is not yet release-qualified. Persistent block-backed root
 storage, the complete RustD Linux ABI, cgroup v2, `/proc`, `/sys`, udev, D-Bus,
 RustD-resolved, networking, and graphical Anaconda must all pass in BIOS and
-UEFI QEMU before Arach Kernel can be the only installed boot path. The previous
-Granite/Push/COSMIC route is not part of the new ArachOS architecture.
+UEFI QEMU before Arach Kernel can be the only installed boot path. Retired
+legacy boot repositories are not part of the ArachOS architecture.
 
 The Linux personality currently covers:
 
@@ -138,9 +139,9 @@ restart remain future compatibility slices.
 
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
-| Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the QEMU/OVMF C0 probe exercises real generation-bound lifecycle and page-table paths | Keep the C0 gate green while extending the measured Linux surface without weakening fail-closed behavior |
+| Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the custom Multiboot2 image contract is warning-free with measured runtime inputs | Boot the complete ArachOS graph in BIOS and UEFI while extending the measured Linux surface without weakening its gates |
 | Linux userspace compatibility | Identity, anonymous and eager private file mappings, bounded memfd-backed shared mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll and Unix stream sockets with `SCM_RIGHTS`, bounded VFS file and directory calls, transactional static and measured `PT_INTERP` execution, an eight-object dependency engine measured with a deduplicated four-object diamond and canonical finite `DT_RUNPATH`, explicit and packed relative relocation, exact-size main-executable copy relocation and interposition, provider-first static/general-dynamic startup-TLS relocation, exact GNU symbol versions, deterministic eager external PLT binding with bounded weak-function semantics, dependency-first initialization, and reverse finalization, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed descriptor waits and filesystem socket nodes; add late-loaded TLS, TLSDESC, general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and broader relocations; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
-| System bootstrap | GRUB Multiboot2 entry exists and the source accepts measured RustD as Linux-ABI PID 1; the earlier C0 path remains regression evidence | Boot the packaged ArachOS root under RustD and pass the complete service graph in BIOS and UEFI |
+| System bootstrap | GRUB Multiboot2 entry exists and the source accepts measured RustD as Linux-ABI PID 1 | Boot the packaged ArachOS root under RustD and pass the complete service graph in BIOS and UEFI |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
 | Formal specifications | Idris 2 total specifications and Agda safe proof models compile in CI | Keep each proof artifact bound to a generated table, manifest, or runtime boundary |
@@ -148,7 +149,7 @@ restart remain future compatibility slices.
 
 The current critical path is:
 
-1. Keep the measured C0 QEMU/OVMF path green.
+1. Boot the direct ArachOS GRUB bundle in BIOS and UEFI and retain serial evidence.
 2. Extend the measured bounded graph linker with late-loaded TLS and TLSDESC,
    general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and
    broader relocations.
@@ -189,7 +190,7 @@ src/linux_socket.rs     bounded Unix-domain stream-socket backend
 src/linux_thread.rs     generation-bound thread-exit identity
 core/                   bounded kernel primitives
 libraries/driver-abi/   stable foreign-driver boundary
-libraries/slope/        typed kernel/userspace ABI definitions
+src/arach_*.rs          typed Arach kernel service contracts
 drivers/reference/      reference C driver used by ABI tests
 formal/idris2/          total executable specifications
 formal/agda/            safe proof models

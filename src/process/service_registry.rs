@@ -6,8 +6,8 @@
 //! is deliberately fixed-capacity: every service class must be installed by
 //! the bootstrap path before Ring 3 can request it.
 //!
-//! The original implementation had one hard-coded Crest slot. That made the
-//! COSMIC supervisor's service graph look complete while the kernel could
+//! The original implementation had one hard-coded bootstrap slot. That made
+//! the COSMIC supervisor's service graph look complete while the kernel could
 //! only ever launch one compatibility probe. The table below admits all
 //! measured classes (including the COSMIC dbus/compositor/greetd/session/
 //! portal chain) without allowing user space to invent a launch image.
@@ -18,10 +18,13 @@ use super::install::ProcessImageHandle;
 use super::lifecycle::{self, INIT_PID, ProcessHandle, ProcessLaunch, ProcessPhase};
 
 /// Service class zero is reserved. Classes 1..15 are the bounded measured
-/// service namespace shared with Push's `ServiceId` values.
+/// service namespace shared by the Arach process ABI.
 pub const MAXIMUM_SERVICE_CLASSES: usize = 16;
 pub const PID1_SERVICE_CLASS: u16 = 1;
-pub const CREST_SERVICE_CLASS: u16 = 2;
+pub const BOOTSTRAP_SERVICE_CLASS: u16 = 2;
+/// The display syscall surface still uses the historical name internally;
+/// its class is the measured bootstrap slot and no separate image is created.
+pub const CREST_SERVICE_CLASS: u16 = BOOTSTRAP_SERVICE_CLASS;
 pub const ARGUS_SERVICE_CLASS: u16 = 3;
 pub const DBUS_BROKER_SERVICE_CLASS: u16 = 4;
 pub const COSMIC_COMPOSITOR_SERVICE_CLASS: u16 = 5;
@@ -259,17 +262,24 @@ pub fn exchange_running_image(
         .exchange_authenticated_image(caller, snapshot.launch.service_class, replacement)
 }
 
-// Compatibility wrappers retained for the C0 probe while callers migrate to
-// the service-class API. They do not create a second registry or a second
-// ownership path.
+/// Installs the measured bootstrap service in the fixed class-two slot.
+pub fn install_bootstrap(
+    launch: ProcessLaunch,
+    image: ProcessImageHandle,
+) -> Result<(), ServiceRegistryError> {
+    if launch.service_class != BOOTSTRAP_SERVICE_CLASS {
+        return Err(ServiceRegistryError::InvalidLaunch);
+    }
+    install_service(launch, image)
+}
+
+// Compatibility wrappers for the display syscall surface. They share the
+// bootstrap slot and do not create a second registry or ownership path.
 pub fn install_crest(
     launch: ProcessLaunch,
     image: ProcessImageHandle,
 ) -> Result<(), ServiceRegistryError> {
-    if launch.service_class != CREST_SERVICE_CLASS {
-        return Err(ServiceRegistryError::InvalidLaunch);
-    }
-    install_service(launch, image)
+    install_bootstrap(launch, image)
 }
 
 pub fn authenticated_crest_status(caller: ProcessHandle) -> Result<u64, ServiceRegistryError> {

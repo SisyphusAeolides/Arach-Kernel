@@ -5,7 +5,7 @@ use crate::quantum_crest_gateway::{
 };
 use crate::sync::SpinLock;
 
-use slope::quantum_crest::{
+use crate::arach_quantum_crest::{
     STATUS_BACKEND, STATUS_DENIED, STATUS_INVALID, STATUS_OK, STATUS_STALE,
 };
 

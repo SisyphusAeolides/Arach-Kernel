@@ -1304,7 +1304,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Identity calls must all resolve to this exact running process. The
-    // parent is PID 1 (Push) in the measured C0 launch graph.
+    // parent is PID 1 (RustD) in the measured C0 launch graph.
     // SAFETY: These calls carry no pointers.
     let pid = unsafe { linux_syscall1(SYS_GETPID, 0) };
     let tid = unsafe { linux_syscall1(SYS_GETTID, 0) };

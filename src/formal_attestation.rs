@@ -3,7 +3,7 @@
 //! The bare-metal build accepts these roots only after the formal gate has
 //! emitted a matching attestation. They are then folded into PID1's capability
 //! root, binding user authority to the exact driver, package, privilege,
-//! Hermes, and Crest shell models checked for this kernel image.
+//! Hermes and desktop shell models checked for this kernel image.
 
 pub const FORMAL_SCHEMA_VERSION: u16 = 1;
 
@@ -12,13 +12,13 @@ const PACKAGE_TRANSACTION_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_PACKAGE
 const CRUCIBLE_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_CRUCIBLE_PROOF_SHA256"));
 const AEGIS_LIFECYCLE_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_AEGIS_PROOF_SHA256"));
 const ARGUS_MARKUP_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_ARGUS_MARKUP_PROOF_SHA256"));
-const GRANITE_BOOT_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_BOOT_PROOF_SHA256"));
+const ARACH_BOOT_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_ARACH_BOOT_PROOF_SHA256"));
 const HERMES_AUTHORITY_SHA256: [u8; 32] =
     parse_sha256(env!("SISYPHUS_HERMES_AUTHORITY_PROOF_SHA256"));
 const CREST_SHELL_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_CREST_SHELL_PROOF_SHA256"));
 const PRIVILEGE_RINGS_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_PRIVILEGE_PROOF_SHA256"));
 const ARGUS_LAYOUT_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_ARGUS_LAYOUT_PROOF_SHA256"));
-const GRANITE_LAYOUT_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_GRANITE_LAYOUT_PROOF_SHA256"));
+const ARACH_LAYOUT_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_ARACH_LAYOUT_PROOF_SHA256"));
 const HERMES_WIRE_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_HERMES_WIRE_PROOF_SHA256"));
 const CREST_OVERLAY_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_CREST_OVERLAY_PROOF_SHA256"));
 const COSMIC_COMPATIBILITY_SHA256: [u8; 32] =
@@ -33,12 +33,12 @@ pub struct FormalAttestation {
     pub crucible_sha256: [u8; 32],
     pub aegis_lifecycle_sha256: [u8; 32],
     pub argus_markup_sha256: [u8; 32],
-    pub granite_boot_sha256: [u8; 32],
+    pub arach_boot_sha256: [u8; 32],
     pub hermes_authority_sha256: [u8; 32],
     pub crest_shell_sha256: [u8; 32],
     pub privilege_rings_sha256: [u8; 32],
     pub argus_layout_sha256: [u8; 32],
-    pub granite_layout_sha256: [u8; 32],
+    pub arach_layout_sha256: [u8; 32],
     pub hermes_wire_sha256: [u8; 32],
     pub crest_overlay_sha256: [u8; 32],
     pub cosmic_compatibility_sha256: [u8; 32],
@@ -54,12 +54,12 @@ impl FormalAttestation {
             CRUCIBLE_SHA256,
             AEGIS_LIFECYCLE_SHA256,
             ARGUS_MARKUP_SHA256,
-            GRANITE_BOOT_SHA256,
+            ARACH_BOOT_SHA256,
             HERMES_AUTHORITY_SHA256,
             CREST_SHELL_SHA256,
             PRIVILEGE_RINGS_SHA256,
             ARGUS_LAYOUT_SHA256,
-            GRANITE_LAYOUT_SHA256,
+            ARACH_LAYOUT_SHA256,
             HERMES_WIRE_SHA256,
             CREST_OVERLAY_SHA256,
             COSMIC_COMPATIBILITY_SHA256,
@@ -72,12 +72,12 @@ impl FormalAttestation {
             crucible_sha256: CRUCIBLE_SHA256,
             aegis_lifecycle_sha256: AEGIS_LIFECYCLE_SHA256,
             argus_markup_sha256: ARGUS_MARKUP_SHA256,
-            granite_boot_sha256: GRANITE_BOOT_SHA256,
+            arach_boot_sha256: ARACH_BOOT_SHA256,
             hermes_authority_sha256: HERMES_AUTHORITY_SHA256,
             crest_shell_sha256: CREST_SHELL_SHA256,
             privilege_rings_sha256: PRIVILEGE_RINGS_SHA256,
             argus_layout_sha256: ARGUS_LAYOUT_SHA256,
-            granite_layout_sha256: GRANITE_LAYOUT_SHA256,
+            arach_layout_sha256: ARACH_LAYOUT_SHA256,
             hermes_wire_sha256: HERMES_WIRE_SHA256,
             crest_overlay_sha256: CREST_OVERLAY_SHA256,
             cosmic_compatibility_sha256: COSMIC_COMPATIBILITY_SHA256,
@@ -93,12 +93,12 @@ impl FormalAttestation {
             && !all_zero(self.crucible_sha256)
             && !all_zero(self.aegis_lifecycle_sha256)
             && !all_zero(self.argus_markup_sha256)
-            && !all_zero(self.granite_boot_sha256)
+            && !all_zero(self.arach_boot_sha256)
             && !all_zero(self.hermes_authority_sha256)
             && !all_zero(self.crest_shell_sha256)
             && !all_zero(self.privilege_rings_sha256)
             && !all_zero(self.argus_layout_sha256)
-            && !all_zero(self.granite_layout_sha256)
+            && !all_zero(self.arach_layout_sha256)
             && !all_zero(self.hermes_wire_sha256)
             && !all_zero(self.crest_overlay_sha256)
             && !all_zero(self.cosmic_compatibility_sha256)
@@ -109,12 +109,12 @@ impl FormalAttestation {
                 self.crucible_sha256,
                 self.aegis_lifecycle_sha256,
                 self.argus_markup_sha256,
-                self.granite_boot_sha256,
+                self.arach_boot_sha256,
                 self.hermes_authority_sha256,
                 self.crest_shell_sha256,
                 self.privilege_rings_sha256,
                 self.argus_layout_sha256,
-                self.granite_layout_sha256,
+                self.arach_layout_sha256,
                 self.hermes_wire_sha256,
                 self.crest_overlay_sha256,
                 self.cosmic_compatibility_sha256,
@@ -127,12 +127,12 @@ impl FormalAttestation {
                     self.crucible_sha256,
                     self.aegis_lifecycle_sha256,
                     self.argus_markup_sha256,
-                    self.granite_boot_sha256,
+                    self.arach_boot_sha256,
                     self.hermes_authority_sha256,
                     self.crest_shell_sha256,
                     self.privilege_rings_sha256,
                     self.argus_layout_sha256,
-                    self.granite_layout_sha256,
+                    self.arach_layout_sha256,
                     self.hermes_wire_sha256,
                     self.crest_overlay_sha256,
                     self.cosmic_compatibility_sha256,

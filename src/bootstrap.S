@@ -24,14 +24,14 @@ multiboot_header_end:
 .equ KERNEL_VIRTUAL_BASE, 0xffffffff80000000
 .equ HIGHER_HALF_DIRECT_MAP_BASE, 0xffff800000000000
 
-// Granite enters here after it has loaded the measured Arach image, built
+// GRUB enters here after it has loaded the measured Arach image, built
 // the bounded Multiboot2-shaped handoff record, and exited UEFI boot services.
 // Unlike `_start`, firmware is already in 64-bit mode; this entry creates the
 // same initial page-table topology before joining the common higher-half path.
 .code64
-.global granite_entry
-.type granite_entry, @function
-granite_entry:
+.global arach_entry
+.type arach_entry, @function
+arach_entry:
     cli
     cld
     movq %rdi, %rbx
@@ -44,12 +44,12 @@ granite_entry:
     xorw %ax, %ax
     movw %ax, %fs
     movw %ax, %gs
-    leaq granite_gdt_ready(%rip), %rax
+    leaq arach_gdt_ready(%rip), %rax
     pushq $0x08
     pushq %rax
     lretq
 
-granite_gdt_ready:
+arach_gdt_ready:
     movabsq $p3_table, %rax
     orq $3, %rax
     movq %rax, p4_table
@@ -83,14 +83,14 @@ granite_gdt_ready:
     movq %rax, kernel_p3_table+4080
 
     xorl %ecx, %ecx
-granite_map_p2:
+arach_map_p2:
     movl %ecx, %eax
     shll $21, %eax
     orl $0x83, %eax
     movq %rax, p2_table(,%rcx,8)
     incl %ecx
     cmpl $512, %ecx
-    jne granite_map_p2
+    jne arach_map_p2
 
     movq %cr4, %rax
     orq $0x20, %rax
@@ -100,7 +100,7 @@ granite_map_p2:
     movq %rax, %cr3
 
     // The UEFI image can occupy part of the linked high-kernel BSS range
-    // until ExitBootServices. Granite deliberately leaves that zero-only
+    // until ExitBootServices. GRUB deliberately leaves that zero-only
     // segment unclaimed; clear it from Arach's fresh identity map before
     // any high-half Rust state is observed.
     movabsq $__kernel_bss_physical_start, %rdi
@@ -110,10 +110,10 @@ granite_map_p2:
     rep stosb
     movq %rbx, %rdi
 
-    movabsq $granite_high_half_start, %rax
+    movabsq $arach_high_half_start, %rax
     jmp *%rax
 
-.size granite_entry, . - granite_entry
+.size arach_entry, . - arach_entry
 
 .code32
 .global _start
@@ -211,7 +211,7 @@ long_mode_start:
 
 .section .text.entry,"ax"
 .code64
-granite_high_half_start:
+arach_high_half_start:
     movabsq $HIGHER_HALF_DIRECT_MAP_BASE, %rax
     addq %rax, %r12
     movq %r12, %rsp

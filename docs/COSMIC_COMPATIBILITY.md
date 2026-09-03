@@ -26,7 +26,7 @@ compatibility the critical path:
 | C4 | evdev plus the libinput ioctl surface | libinput-rs running upstream libinput behavioral tests with uinput fixtures |
 | C5 | DRM/KMS atomic modesetting, render nodes, GEM, dma-buf, sync objects and fences | Mesa/GBM/EGL probes and kmscube |
 | C6 | ALSA, PipeWire prerequisites, networking, DNS, credentials and D-Bus transport | audio, portal, and session-service probes |
-| C7 | Push PID 1 plus tuned-rs supply the observable service/session and power contracts needed by COSMIC | login, seat activation, profile changes, service restart and clean shutdown tests |
+| C7 | RustD PID 1 plus tuned-rs supply the observable service/session and power contracts needed by COSMIC | login, seat activation, profile changes, service restart and clean shutdown tests |
 | C8 | COSMIC greeter plus authentication and session launch | boot-to-greeter, PAM authentication, failed-login isolation, user-session start and logout-to-greeter |
 | C9 | Pinned COSMIC compositor and complete desktop session | nested compositor first, then direct DRM session |
 | C10 | Complete desktop smoke and endurance suite | applications, suspend/resume, hotplug, multi-monitor, input and 24-hour run |
@@ -70,13 +70,13 @@ records.
 ## Kernel ABI strategy
 
 The shortest defensible path is a Linux-compatible x86-64 syscall and device
-ABI implemented by Arach. Recompiling COSMIC against a bespoke Slope-only ABI
+ABI implemented by Arach. Recompiling COSMIC against a bespoke internal-only ABI
 would also require porting libc, Mesa, libinput, libseat, udev, D-Bus,
 PipeWire, GStreamer, and many transitive dependencies; that would no longer be
 an unmodified COSMIC compatibility target.
 
-Slope remains useful as Arach's typed internal ABI and as the source for
-generated Linux-compatibility adapters. A process launch now carries an
+The kernel's typed service contracts remain internal and are not a substitute
+for the Linux ABI. A process launch now carries an
 immutable execution personality, so Linux syscall numbers cannot be confused
 with Aether numbers. Linux compatibility must preserve
 observable errno values, structure layouts, ioctl encodings, readiness rules,
@@ -195,12 +195,12 @@ gate. Whole-process termination now snapshots at most 64 exact thread generation
 consumes every member's futex, robust-list, child-TID, and signal exit state,
 retires every non-leader generation atomically, and publishes only the leader
 as a waitable zombie. The measured probe leaves a cloned peer blocked before
-calling `exit_group`; Push's subsequent status-0 reap is the external witness
+ calling `exit_group`; RustD's subsequent status-0 reap is the external witness
 that no group peer remained runnable.
 
-## Push PID 1 boundary
+## RustD PID 1 boundary
 
-Push stays in userspace. It can replace systemd as PID 1 only if it provides or
+RustD stays in userspace. It can replace systemd as PID 1 only if it provides or
 hosts the contracts COSMIC actually observes: service supervision, user-session
 activation, environment import, D-Bus activation, seat/session ownership,
 PipeWire/WirePlumber audio policy, power transitions, logging, and deterministic

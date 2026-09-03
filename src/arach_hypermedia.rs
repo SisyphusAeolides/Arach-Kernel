@@ -1,5 +1,4 @@
-//! Bounded HTTPS lease types shared by Argus, Push, and Boulder's future
-//! transport broker.
+//! Bounded HTTPS lease types shared by Argus and the Arach transport broker.
 //!
 //! These values are intentionally data-only. They do not expose a socket,
 //! packet buffer, NIC register, or cryptographic key to a client. A broker
@@ -42,7 +41,7 @@ pub struct TlsTrustAnchor {
 }
 
 impl TlsTrustAnchor {
-    /// Imports a trust decision made by the authenticated Boulder/Hermes
+    /// Imports a trust decision made by the authenticated Hermes
     /// broker. A zero fingerprint or generation is never a valid authority.
     ///
     /// # Safety
@@ -273,7 +272,7 @@ impl HttpsRequest {
     }
 }
 
-/// Opaque HTTPS authority imported from Push/Boulder. The raw capability is
+/// Opaque HTTPS authority imported from the authenticated transport broker. The raw capability is
 /// private, so Argus cannot reinterpret it as a generic network capability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HttpLease {
@@ -289,7 +288,7 @@ impl HttpLease {
     ///
     /// # Safety
     ///
-    /// Every field must come from Push's authenticated reply after Boulder has
+    /// Every field must come from the authenticated broker reply after Hermes has
     /// retained the corresponding transport/TLS state.
     pub const unsafe fn from_broker(
         capability: u64,

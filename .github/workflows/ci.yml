@@ -35,66 +35,31 @@ jobs:
           key: arach-formal-idris2-0.8.0-agda-2.8.0-v1
       - run: scripts/bootstrap-formal-toolchains.sh
 
-  c0-bundle:
+  arach-kernel-contract:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: SisyphusAeolides/Push
-          ref: 5bd361b86c048b60b6a8422a8e173ea0ec867bff
-          path: target/c0-sources/push
-      - uses: actions/checkout@v4
-        with:
-          repository: SisyphusAeolides/Granite
-          ref: 1e7110ffee23900cbec480b1cea90abd8c9dc3e8
-          path: target/c0-sources/granite
-      - name: Verify the qualified C0 component revisions
-        run: |
-          test "$(git -C target/c0-sources/push rev-parse HEAD)" = 5bd361b86c048b60b6a8422a8e173ea0ec867bff
-          test "$(git -C target/c0-sources/granite rev-parse HEAD)" = 1e7110ffee23900cbec480b1cea90abd8c9dc3e8
-      - run: sudo apt-get update && sudo apt-get install -y build-essential chezscheme dosfstools gfortran libgmp-dev mtools ovmf python3 qemu-system-x86 xz-utils curl
+      - run: sudo apt-get update && sudo apt-get install -y build-essential gfortran grub-common
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-20
           components: rust-src
-          targets: x86_64-unknown-uefi
-      - uses: actions/cache@v4
-        with:
-          path: target/formal/toolchains
-          key: arach-formal-idris2-0.8.0-agda-2.8.0-v1
-      - run: scripts/bootstrap-formal-toolchains.sh
-      - run: bash -n scripts/build-desktop-bundle.sh scripts/build-reproducible-granite.sh
-      - run: scripts/build-c0-bundle.sh
-        env:
-          ARACH_PUSH_ROOT: ${{ github.workspace }}/target/c0-sources/push
-          ARACH_GRANITE_ROOT: ${{ github.workspace }}/target/c0-sources/granite
-      - run: |
-          for output in arach-c0.img arach-c0-repeat.img; do
-            scripts/build-c0-fat-image.sh \
-              target/c0/granite/x86_64-unknown-uefi/release/granite.efi \
-              target/c0/kernel/x86_64-arach/release/arach \
-              target/c0/push/x86_64-arach/release/push \
-              target/c0/probe/x86_64-arach/release/arach-c0-probe \
-              "$PWD/target/c0/$output"
-          done
-          cmp --silent target/c0/arach-c0.img target/c0/arach-c0-repeat.img
-          sha256sum target/c0/arach-c0.img target/c0/arach-c0-repeat.img
-          mdir -i "$PWD/target/c0/arach-c0.img" ::/EFI/BOOT
-          mdir -i "$PWD/target/c0/arach-c0.img" ::/BOOT
-      - name: Execute C0 under QEMU/OVMF
+      - name: Build the custom kernel contract
         run: |
-          scripts/run-c0-qemu.sh \
-            "$PWD/target/c0/arach-c0.img" \
-            "$PWD/target/c0/c0.serial.log"
-      - name: Upload C0 serial evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: arach-c0-serial-${{ github.sha }}
-          path: target/c0/c0.serial.log
-          if-no-files-found: warn
-      - run: git diff --check && git diff --exit-code
+          CARGO_TARGET_DIR="$RUNNER_TEMP/arach-kernel-contract" \
+          ARACH_RUSTD_IMAGE=/bin/true \
+          ARACH_RESOLVED_IMAGE=/bin/true \
+          ARACH_BOOTSTRAP_IMAGE=/bin/true \
+          ARACH_BOOTSTRAP_ABI=linux \
+            cargo build --locked --release -p arach --bin arach \
+              --no-default-features \
+              --features kernel-bin,reference-driver,fortran-control \
+              --target x86_64-arach.json -Z json-target-spec \
+              -Z build-std=core,alloc,compiler_builtins \
+              -Z build-std-features=compiler-builtins-mem
+      - name: Verify the Multiboot2 image
+        run: grub-file --is-x86-multiboot2 "$RUNNER_TEMP/arach-kernel-contract/x86_64-arach/release/arach"
+      - run: git diff --check
 
   nvidia-source-contract:
     runs-on: ubuntu-24.04

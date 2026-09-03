@@ -10,7 +10,7 @@ use sisyphus_driver_abi::hermes::{
     HermesNormalizedEvent, HermesPciIdentity, HermesProbeEvidence, HermesTransportProfile,
 };
 
-use slope::hermes_manifold::{HermesManifold, HermesPhase};
+use crate::arach_hermes_manifold::{HermesManifold, HermesPhase};
 
 use super::hermes_service::{
     HermesAdmissionCertificate, HermesAdmissionFault, HermesServiceController, HermesServiceCurve,

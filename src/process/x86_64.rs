@@ -3214,7 +3214,7 @@ mod tests {
             Some(INITIAL_USER_STACK_POINTER)
         );
         let stack_pointer = backend
-            .prepare_initial_stack(&installed.process, &[b"push"], &[b"SISYPHUS_PROCESS=push"])
+            .prepare_initial_stack(&installed.process, &[b"rustd"], &[b"ARACH_PROCESS=rustd"])
             .unwrap();
         assert_eq!(stack_pointer & 0xf, 0);
         assert!(stack_pointer < INITIAL_USER_STACK_POINTER);
@@ -3864,12 +3864,12 @@ mod tests {
         let image = prepare_user_image(artifact, &image_control).unwrap();
         let installed = install_user_image(image, &mut backend, &install_control).unwrap();
 
-        const CREST_STACK_PAGES: usize = 160;
+        const BOOTSTRAP_STACK_PAGES: usize = 160;
         let expected_initial_pointer = INITIAL_USER_STACK_POINTER;
         assert_eq!(
             backend.install_initial_stack_pages(
                 &installed.process,
-                CREST_STACK_PAGES,
+                BOOTSTRAP_STACK_PAGES,
                 &install_control,
             ),
             Ok(expected_initial_pointer),
@@ -3879,9 +3879,9 @@ mod tests {
             installed_info.initial_stack_pointer,
             Some(expected_initial_pointer)
         );
-        assert_eq!(installed_info.owned_frames, 5 + CREST_STACK_PAGES + 2);
+        assert_eq!(installed_info.owned_frames, 5 + BOOTSTRAP_STACK_PAGES + 2);
         let stack_pointer = backend
-            .prepare_initial_stack(&installed.process, &[b"crest"], &[])
+            .prepare_initial_stack(&installed.process, &[b"bootstrap"], &[])
             .unwrap();
         assert_eq!(stack_pointer & 0xf, 0);
         assert!(stack_pointer < INITIAL_USER_STACK_POINTER);

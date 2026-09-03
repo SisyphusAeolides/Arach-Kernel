@@ -17,11 +17,11 @@ fail() {
 
 idris_sources=(
     DriverLifecycle.idr PackageTransaction.idr Crucible.idr
-    AegisLifecycle.idr ArgusMarkup.idr GraniteBoot.idr
+    AegisLifecycle.idr ArgusMarkup.idr ArachBoot.idr
     HermesAuthority.idr CrestShell.idr CosmicCompatibility.idr LinuxContract.idr
 )
 agda_sources=(
-    PrivilegeRings.agda ArgusLayout.agda GraniteLayout.agda
+    PrivilegeRings.agda ArgusLayout.agda ArachLayout.agda
     HermesWire.agda CrestOverlay.agda CosmicStack.agda LinuxContract.agda
 )
 
@@ -47,7 +47,8 @@ if grep -En '^[[:space:]]*postulate\b|\{![^!]*!\}|TERMINATING|NON_TERMINATING|NO
 fi
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/arach-formal.XXXXXXXX")"
-trap 'rm -rf -- "$scratch"' EXIT
+cleanup() { find "$scratch" -depth -delete 2>/dev/null || :; }
+trap cleanup EXIT
 mkdir -p "$scratch/idris2" "$scratch/agda" "$scratch/agda-data" "$scratch/agda-config"
 
 for name in "${idris_sources[@]}"; do
@@ -83,12 +84,12 @@ package_transaction_sha256=$(digest "$root/formal/idris2/PackageTransaction.idr"
 crucible_sha256=$(digest "$root/formal/idris2/Crucible.idr")
 aegis_lifecycle_sha256=$(digest "$root/formal/idris2/AegisLifecycle.idr")
 argus_markup_sha256=$(digest "$root/formal/idris2/ArgusMarkup.idr")
-granite_boot_sha256=$(digest "$root/formal/idris2/GraniteBoot.idr")
+arach_boot_sha256=$(digest "$root/formal/idris2/ArachBoot.idr")
 hermes_authority_sha256=$(digest "$root/formal/idris2/HermesAuthority.idr")
 crest_shell_sha256=$(digest "$root/formal/idris2/CrestShell.idr")
 privilege_rings_sha256=$(digest "$root/formal/agda/PrivilegeRings.agda")
 argus_layout_sha256=$(digest "$root/formal/agda/ArgusLayout.agda")
-granite_layout_sha256=$(digest "$root/formal/agda/GraniteLayout.agda")
+arach_layout_sha256=$(digest "$root/formal/agda/ArachLayout.agda")
 hermes_wire_sha256=$(digest "$root/formal/agda/HermesWire.agda")
 crest_overlay_sha256=$(digest "$root/formal/agda/CrestOverlay.agda")
 cosmic_compatibility_sha256=$(digest "$root/formal/idris2/CosmicCompatibility.idr")

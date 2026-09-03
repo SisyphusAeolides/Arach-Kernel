@@ -2,7 +2,7 @@
 //!
 //! The output replaces repeated literal keys with distinct values bound to:
 //!
-//! - the measured Push image digest;
+//! - the measured RustD image digest;
 //! - an architecture counter sample;
 //! - the enumerated PCI functions;
 //! - Drivernet fingerprints, decisions, and committed resolutions.

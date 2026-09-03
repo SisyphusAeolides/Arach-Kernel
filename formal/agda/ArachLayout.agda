@@ -1,6 +1,6 @@
 {-# OPTIONS --safe --without-K #-}
 
-module GraniteLayout where
+module ArachLayout where
 
 data Empty : Set where
 
@@ -12,9 +12,9 @@ data Nat : Set where
   suc : Nat -> Nat
 
 data Region : Nat -> Set where
-  boulder : {n : Nat} -> Region (suc n)
-  push : {n : Nat} -> Region (suc n)
-  crest : {n : Nat} -> Region (suc n)
+  kernel : {n : Nat} -> Region (suc n)
+  rustd : {n : Nat} -> Region (suc n)
+  bootstrap : {n : Nat} -> Region (suc n)
 
 data BootLayout : Nat -> Set where
   sealed : {n : Nat} -> Region (suc n) -> Region (suc n) -> Region (suc n) -> BootLayout (suc n)

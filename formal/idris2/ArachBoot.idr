@@ -1,4 +1,4 @@
-module GraniteBoot
+module ArachBoot
 
 %default total
 
@@ -20,16 +20,16 @@ data ArtifactState
 public export
 record BootBundle where
   constructor MkBootBundle
-  boulder : ArtifactState
-  push : ArtifactState
-  crest : ArtifactState
+  kernel : ArtifactState
+  rustd : ArtifactState
+  bootstrap : ArtifactState
   ||| Optional measured Hermes GSP module. Missing is legal; a present but
-  ||| unready Hermes image rejects preflight so Granite never transports a
-  ||| corrupt offload candidate into Boulder.
+  ||| unready Hermes image rejects preflight before the kernel grants
+  ||| hardware authority.
   hermes : ArtifactState
 
 public export
-data GranitePhase
+data ArachPhase
   = Firmware
   | Preflighted
   | Measured
@@ -43,18 +43,18 @@ hermesOptionalReady Ready = True
 hermesOptionalReady _ = False
 
 public export
-preflight : BootBundle -> GranitePhase
+preflight : BootBundle -> ArachPhase
 preflight (MkBootBundle Ready Ready Ready hermes) =
   if hermesOptionalReady hermes then Preflighted else Rejected
 preflight _ = Rejected
 
 public export
-measure : GranitePhase -> GranitePhase
+measure : ArachPhase -> ArachPhase
 measure Preflighted = Measured
 measure phase = phase
 
 public export
-transfer : GranitePhase -> GranitePhase
+transfer : ArachPhase -> ArachPhase
 transfer Measured = Transferred
 transfer phase = phase
 

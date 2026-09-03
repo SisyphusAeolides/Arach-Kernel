@@ -18,7 +18,6 @@ abyss = { path = "core/abyss" }
 blacklab = { path = "core/blacklab" }
 kairos = { path = "core/kairos" }
 sisyphus-driver-abi = { path = "libraries/driver-abi" }
-slope = { path = "libraries/slope" }
 libm = "0.2.16"
 
 [lib]
@@ -42,9 +41,6 @@ members = [
 ]
 exclude = [
     "probes/c0",
-    "sources/push",
-    "target/c0-sources/push",
-    "target/c0-sources/granite",
 ]
 
 [workspace.package]

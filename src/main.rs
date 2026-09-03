@@ -78,7 +78,7 @@ use arach::process::package_manifest::{
     NATIVE_PACKAGE_ABI_VERSION, NativePackageManifest, package_name_hash,
 };
 use arach::process::runtime;
-use arach::process::service_registry::{self, CREST_SERVICE_CLASS};
+use arach::process::service_registry::{self, BOOTSTRAP_SERVICE_CLASS};
 use arach::process::x86_64::{
     DirectMapFrameMemory, FrameBackedAddressSpace, INITIAL_USER_STACK_PAGES, LinuxAuxiliaryVector,
 };
@@ -101,10 +101,9 @@ use core::sync::atomic::{AtomicUsize, Ordering, compiler_fence};
 core::arch::global_asm!(include_str!("bootstrap.S"), options(att_syntax));
 
 const COM1: u16 = 0x3f8;
-/// Crest's bounded first-light compositor and application state require a
-/// 1.5 MiB native stack. This is measured boot-time capacity, never pageable
-/// or influenced by Ring 3.
-const CREST_INITIAL_STACK_PAGES: usize = 384;
+/// The measured bootstrap service requires a bounded 1.5 MiB native stack.
+/// This is boot-time capacity, never pageable or influenced by Ring 3.
+const BOOTSTRAP_INITIAL_STACK_PAGES: usize = 384;
 const IDENTITY_MAP_END: u64 = 1024 * 1024 * 1024;
 const KERNEL_PHYSICAL_LOAD_BASE: u64 = 1024 * 1024;
 const MINIMUM_HEAP_SIZE: u64 = 64 * 1024;
@@ -378,53 +377,53 @@ unsafe impl Sync for E1000DmaCell {}
 static E1000_DMA: E1000DmaCell = E1000DmaCell(UnsafeCell::new(E1000DmaStorage::EMPTY));
 
 #[cfg(target_os = "none")]
-const PUSH_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_PUSH_SHA256"));
+const RUSTD_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_RUSTD_SHA256"));
 #[cfg(not(target_os = "none"))]
-const PUSH_EXPECTED_SHA256: [u8; 32] = [0; 32];
+const RUSTD_EXPECTED_SHA256: [u8; 32] = [0; 32];
 #[cfg(target_os = "none")]
-const PUSH_EXPECTED_BYTES: usize = parse_decimal(env!("SISYPHUS_PUSH_BYTES"));
+const RUSTD_EXPECTED_BYTES: usize = parse_decimal(env!("SISYPHUS_RUSTD_BYTES"));
 #[cfg(not(target_os = "none"))]
-const PUSH_EXPECTED_BYTES: usize = 0;
+const RUSTD_EXPECTED_BYTES: usize = 0;
 #[cfg(target_os = "none")]
-const PUSH_ENTRY_FILE_OFFSET: usize = parse_decimal(env!("SISYPHUS_PUSH_ENTRY_FILE_OFFSET"));
+const RUSTD_ENTRY_FILE_OFFSET: usize = parse_decimal(env!("SISYPHUS_RUSTD_ENTRY_FILE_OFFSET"));
 #[cfg(not(target_os = "none"))]
-const PUSH_ENTRY_FILE_OFFSET: usize = 0;
+const RUSTD_ENTRY_FILE_OFFSET: usize = 0;
 #[cfg(target_os = "none")]
-const RUSTD_INIT: bool = parse_decimal(env!("ARACH_RUSTD_INIT")) != 0;
+const BOOTSTRAP_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_BOOTSTRAP_SHA256"));
 #[cfg(not(target_os = "none"))]
-const RUSTD_INIT: bool = false;
+const BOOTSTRAP_EXPECTED_SHA256: [u8; 32] = [0; 32];
 #[cfg(target_os = "none")]
-const CREST_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_CREST_SHA256"));
+const BOOTSTRAP_EXPECTED_BYTES: usize = parse_decimal(env!("SISYPHUS_BOOTSTRAP_BYTES"));
 #[cfg(not(target_os = "none"))]
-const CREST_EXPECTED_SHA256: [u8; 32] = [0; 32];
+const BOOTSTRAP_EXPECTED_BYTES: usize = 0;
 #[cfg(target_os = "none")]
-const CREST_EXPECTED_BYTES: usize = parse_decimal(env!("SISYPHUS_CREST_BYTES"));
+const BOOTSTRAP_ENTRY_FILE_OFFSET: usize =
+    parse_decimal(env!("SISYPHUS_BOOTSTRAP_ENTRY_FILE_OFFSET"));
 #[cfg(not(target_os = "none"))]
-const CREST_EXPECTED_BYTES: usize = 0;
+const BOOTSTRAP_ENTRY_FILE_OFFSET: usize = 0;
 #[cfg(target_os = "none")]
-const CREST_ENTRY_FILE_OFFSET: usize = parse_decimal(env!("SISYPHUS_CREST_ENTRY_FILE_OFFSET"));
+const BOOTSTRAP_PACKAGE_VERSION: u16 =
+    parse_decimal(env!("SISYPHUS_BOOTSTRAP_PACKAGE_VERSION")) as u16;
 #[cfg(not(target_os = "none"))]
-const CREST_ENTRY_FILE_OFFSET: usize = 0;
+const BOOTSTRAP_PACKAGE_VERSION: u16 = 0;
 #[cfg(target_os = "none")]
-const CREST_PACKAGE_VERSION: u16 = parse_decimal(env!("SISYPHUS_CREST_PACKAGE_VERSION")) as u16;
+const BOOTSTRAP_PACKAGE_SERVICE_CLASS: u16 =
+    parse_decimal(env!("SISYPHUS_BOOTSTRAP_SERVICE_CLASS")) as u16;
 #[cfg(not(target_os = "none"))]
-const CREST_PACKAGE_VERSION: u16 = 0;
+const BOOTSTRAP_PACKAGE_SERVICE_CLASS: u16 = 0;
 #[cfg(target_os = "none")]
-const CREST_PACKAGE_SERVICE_CLASS: u16 = parse_decimal(env!("SISYPHUS_CREST_SERVICE_CLASS")) as u16;
+const BOOTSTRAP_PROVENANCE_ROOT: u64 =
+    parse_decimal(env!("SISYPHUS_BOOTSTRAP_PROVENANCE_ROOT")) as u64;
 #[cfg(not(target_os = "none"))]
-const CREST_PACKAGE_SERVICE_CLASS: u16 = 0;
+const BOOTSTRAP_PROVENANCE_ROOT: u64 = 0;
 #[cfg(target_os = "none")]
-const CREST_PROVENANCE_ROOT: u64 = parse_decimal(env!("SISYPHUS_CREST_PROVENANCE_ROOT")) as u64;
-#[cfg(not(target_os = "none"))]
-const CREST_PROVENANCE_ROOT: u64 = 0;
-#[cfg(target_os = "none")]
-const CREST_EXECUTION_ABI: arach::process::abi::ExecutionAbi =
-    match parse_decimal(env!("SISYPHUS_CREST_EXECUTION_ABI")) {
+const BOOTSTRAP_EXECUTION_ABI: arach::process::abi::ExecutionAbi =
+    match parse_decimal(env!("SISYPHUS_BOOTSTRAP_EXECUTION_ABI")) {
         1 => arach::process::abi::ExecutionAbi::LinuxX86_64,
         _ => arach::process::abi::ExecutionAbi::ArachNative,
     };
 #[cfg(not(target_os = "none"))]
-const CREST_EXECUTION_ABI: arach::process::abi::ExecutionAbi =
+const BOOTSTRAP_EXECUTION_ABI: arach::process::abi::ExecutionAbi =
     arach::process::abi::ExecutionAbi::ArachNative;
 
 #[cfg(target_os = "none")]
@@ -773,7 +772,7 @@ fn install_measured_service(
 
 #[cfg(target_os = "none")]
 const fn parse_sha256(encoded: &str) -> [u8; 32] {
-    assert!(encoded.len() == 64, "invalid embedded Push digest");
+    assert!(encoded.len() == 64, "invalid embedded artifact digest");
     let bytes = encoded.as_bytes();
     let mut digest = [0_u8; 32];
     let mut index = 0;
@@ -789,25 +788,28 @@ const fn hex_nibble(value: u8) -> u8 {
     match value {
         b'0'..=b'9' => value - b'0',
         b'a'..=b'f' => value - b'a' + 10,
-        _ => panic!("invalid embedded Push digest"),
+        _ => panic!("invalid embedded artifact digest"),
     }
 }
 
 #[cfg(target_os = "none")]
 const fn parse_decimal(encoded: &str) -> usize {
-    assert!(!encoded.is_empty(), "invalid embedded Push size");
+    assert!(!encoded.is_empty(), "invalid embedded artifact size");
     let bytes = encoded.as_bytes();
     let mut value = 0_usize;
     let mut index = 0;
     while index < bytes.len() {
-        assert!(bytes[index].is_ascii_digit(), "invalid embedded Push size");
+        assert!(
+            bytes[index].is_ascii_digit(),
+            "invalid embedded artifact size"
+        );
         value = match value.checked_mul(10) {
             Some(value) => value,
-            None => panic!("embedded Push size overflow"),
+            None => panic!("embedded artifact size overflow"),
         };
         value = match value.checked_add((bytes[index] - b'0') as usize) {
             Some(value) => value,
-            None => panic!("embedded Push size overflow"),
+            None => panic!("embedded artifact size overflow"),
         };
         index += 1;
     }
@@ -1022,76 +1024,73 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     } else {
         let _ = writeln!(serial, "Arach: no supported firmware framebuffer");
     }
-    let init_module_name: &[u8] = if RUSTD_INIT { b"rustd" } else { b"push" };
-    let push_module = match boot.module(init_module_name) {
+    let rustd_module = match boot.module(b"rustd") {
         Ok(module) => module,
         Err(error) => {
             let _ = writeln!(serial, "Arach: PID 1 boot module error: {error:?}");
             halt();
         }
     };
-    if push_module.length() as usize != PUSH_EXPECTED_BYTES
-        || push_module.end.as_u64() > EARLY_MAPPED_PHYSICAL_LIMIT
+    if rustd_module.length() as usize != RUSTD_EXPECTED_BYTES
+        || rustd_module.end.as_u64() > EARLY_MAPPED_PHYSICAL_LIMIT
     {
         let _ = writeln!(serial, "Arach: PID 1 boot module size or range mismatch");
         halt();
     }
-    let Some(push_virtual) = direct_map_address(push_module.start.as_u64()) else {
+    let Some(rustd_virtual) = direct_map_address(rustd_module.start.as_u64()) else {
         let _ = writeln!(serial, "Arach: PID 1 boot module is outside the direct map");
         halt();
     };
     // SAFETY: The validated module range is immutable bootloader-owned memory
     // covered by the retained direct map and reserved below before allocation.
-    let push_bytes = unsafe {
-        core::slice::from_raw_parts(push_virtual as *const u8, push_module.length() as usize)
+    let rustd_bytes = unsafe {
+        core::slice::from_raw_parts(rustd_virtual as *const u8, rustd_module.length() as usize)
     };
     let _ = writeln!(
         serial,
         "Arach: measured PID 1 module {} bytes at {:#x}..{:#x}",
-        push_bytes.len(),
-        push_module.start.as_u64(),
-        push_module.end.as_u64(),
+        rustd_bytes.len(),
+        rustd_module.start.as_u64(),
+        rustd_module.end.as_u64(),
     );
-    let bootstrap_module_name: &[u8] = if RUSTD_INIT {
-        b"arachos-bootstrap"
-    } else {
-        b"crest"
-    };
-    let crest_module = match boot.module(bootstrap_module_name) {
+    let bootstrap_module = match boot.module(b"arachos-bootstrap") {
         Ok(module) => module,
         Err(error) => {
-            let _ = writeln!(serial, "Arach: Crest boot module error: {error:?}");
+            let _ = writeln!(serial, "Arach: bootstrap module error: {error:?}");
             halt();
         }
     };
-    if crest_module.length() as usize != CREST_EXPECTED_BYTES
-        || crest_module.end.as_u64() > EARLY_MAPPED_PHYSICAL_LIMIT
+    if bootstrap_module.length() as usize != BOOTSTRAP_EXPECTED_BYTES
+        || bootstrap_module.end.as_u64() > EARLY_MAPPED_PHYSICAL_LIMIT
     {
-        let _ = writeln!(serial, "Arach: Crest boot module size or range mismatch");
+        let _ = writeln!(serial, "Arach: bootstrap module size or range mismatch");
         halt();
     }
-    let Some(crest_virtual) = direct_map_address(crest_module.start.as_u64()) else {
-        let _ = writeln!(serial, "Arach: Crest boot module is outside the direct map");
+    let Some(bootstrap_virtual) = direct_map_address(bootstrap_module.start.as_u64()) else {
+        let _ = writeln!(serial, "Arach: bootstrap module is outside the direct map");
         halt();
     };
     // SAFETY: The validated module range is immutable bootloader-owned memory
     // covered by the retained direct map and reserved below before allocation.
-    let crest_bytes = unsafe {
-        core::slice::from_raw_parts(crest_virtual as *const u8, crest_module.length() as usize)
+    let bootstrap_bytes = unsafe {
+        core::slice::from_raw_parts(
+            bootstrap_virtual as *const u8,
+            bootstrap_module.length() as usize,
+        )
     };
     let _ = writeln!(
         serial,
-        "Arach: measured Crest module {} bytes at {:#x}..{:#x}",
-        crest_bytes.len(),
-        crest_module.start.as_u64(),
-        crest_module.end.as_u64(),
+        "Arach: measured bootstrap module {} bytes at {:#x}..{:#x}",
+        bootstrap_bytes.len(),
+        bootstrap_module.start.as_u64(),
+        bootstrap_module.end.as_u64(),
     );
 
     #[cfg(target_os = "none")]
     let rustd_resolved_module = load_rustd_resolved_artifact(&mut serial, boot);
 
     // COSMIC is an atomic service bundle. If the opt-in native profile is
-    // enabled, accepting only a subset would leave Push with an apparently
+    // enabled, accepting only a subset would leave the kernel with an apparently
     // valid but unusable desktop graph, so every service is required here.
     //
     // The physical memory map has not been scanned yet at this point, so the
@@ -1101,7 +1100,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     if COSMIC_BOOT_ENABLED && KERNEL_HEAP.remaining() == 0 {
         // SAFETY: bootstrap is single-threaded; EARLY_HEAP_STORAGE lives for
         // the entire kernel lifetime and is exclusively owned by KERNEL_HEAP.
-        let start = unsafe { core::ptr::addr_of!(EARLY_HEAP_STORAGE) as usize };
+        let start = core::ptr::addr_of!(EARLY_HEAP_STORAGE) as usize;
         let size = MAXIMUM_HEAP_SIZE as usize;
         let _ = unsafe { KERNEL_HEAP.initialize(start, size) };
     }
@@ -1253,7 +1252,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                     let _ = writeln!(serial, "Arach: {} module is outside the direct map", $label);
                     halt();
                 };
-                // SAFETY: this bounded module range is supplied by Granite or
+                // SAFETY: this bounded module range is supplied by GRUB or
                 // Limine, lies in the retained direct map, and is immediately
                 // re-authenticated below before any device operation.
                 unsafe {
@@ -1348,8 +1347,8 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
 
     let mut protected_end = (kernel_physical_end as u64)
         .max((multiboot_physical_address + boot.total_size()) as u64)
-        .max(push_module.end.as_u64())
-        .max(crest_module.end.as_u64());
+        .max(rustd_module.end.as_u64())
+        .max(bootstrap_module.end.as_u64());
     #[cfg(target_os = "none")]
     if let Some(module) = rustd_resolved_module {
         protected_end = protected_end.max(module.end.as_u64());
@@ -1446,13 +1445,13 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
             ReservationKind::BootInformation,
         ),
         Reservation::new(
-            push_module.start,
-            push_module.end,
+            rustd_module.start,
+            rustd_module.end,
             ReservationKind::BootModule,
         ),
         Reservation::new(
-            crest_module.start,
-            crest_module.end,
+            bootstrap_module.start,
+            bootstrap_module.end,
             ReservationKind::BootModule,
         ),
         Reservation::new(
@@ -1918,9 +1917,9 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         controls,
         &mut process_backend,
         arach::blacklab::Pid1Source {
-            bytes: push_bytes,
-            expected_sha256: PUSH_EXPECTED_SHA256,
-            entry_file_offset: PUSH_ENTRY_FILE_OFFSET,
+            bytes: rustd_bytes,
+            expected_sha256: RUSTD_EXPECTED_SHA256,
+            entry_file_offset: RUSTD_ENTRY_FILE_OFFSET,
         },
     ) {
         Ok(initialized) => initialized,
@@ -1976,16 +1975,10 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         }
     }
 
-    let (pid1_argv, pid1_env): (&[&[u8]], &[&[u8]]) = if RUSTD_INIT {
-        (
-            &[b"/usr/lib/rustd/rustd"],
-            &[b"ARACH_PROCESS=rustd", b"ARACH_ABI=linux"],
-        )
-    } else {
-        (&[b"push"], &[b"SISYPHUS_PROCESS=push", b"SISYPHUS_ABI=1"])
-    };
-    let pid1_stack = if RUSTD_INIT {
-        let pid1_plan = match arach::module::loader::LoadPlan::parse(push_bytes) {
+    let pid1_argv: &[&[u8]] = &[b"/usr/lib/rustd/rustd"];
+    let pid1_env: &[&[u8]] = &[b"ARACH_PROCESS=rustd", b"ARACH_ABI=linux"];
+    let pid1_stack = {
+        let pid1_plan = match arach::module::loader::LoadPlan::parse(rustd_bytes) {
             Ok(plan) => plan,
             Err(error) => {
                 let _ = writeln!(serial, "Arach: RustD ELF plan unavailable: {error:?}");
@@ -2003,7 +1996,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                     runtime_linker_base: 0,
                     executable_entry_point: pid1_plan.entry_point,
                     executable_path: b"/usr/lib/rustd/rustd",
-                    random: PUSH_EXPECTED_SHA256[..16].try_into().unwrap(),
+                    random: RUSTD_EXPECTED_SHA256[..16].try_into().unwrap(),
                 },
             ) {
                 Ok(stack) => stack,
@@ -2026,17 +2019,6 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                 }
             },
         }
-    } else {
-        match process_backend.prepare_initial_stack(&pid1, pid1_argv, pid1_env) {
-            Ok(stack) => stack,
-            Err(error) => {
-                let _ = writeln!(
-                    serial,
-                    "Arach: PID1 argv/envp preparation failed: {error:?}"
-                );
-                halt();
-            }
-        }
     };
     let Some(pid1_info) = process_backend.process_info(&pid1) else {
         let _ = writeln!(serial, "Arach: retained PID1 handle became stale");
@@ -2055,125 +2037,131 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         );
         halt();
     }
-    let crest_manifest = NativePackageManifest {
+    let bootstrap_manifest = NativePackageManifest {
         schema_version: 1,
-        name_hash: package_name_hash(b"crest"),
-        version: CREST_PACKAGE_VERSION,
+        name_hash: package_name_hash(b"bootstrap"),
+        version: BOOTSTRAP_PACKAGE_VERSION,
         abi_version: NATIVE_PACKAGE_ABI_VERSION,
-        service_class: CREST_PACKAGE_SERVICE_CLASS,
-        artifact_bytes: CREST_EXPECTED_BYTES,
-        entry_file_offset: CREST_ENTRY_FILE_OFFSET,
-        artifact_sha256: CREST_EXPECTED_SHA256,
-        provenance_root: CREST_PROVENANCE_ROOT,
+        service_class: BOOTSTRAP_PACKAGE_SERVICE_CLASS,
+        artifact_bytes: BOOTSTRAP_EXPECTED_BYTES,
+        entry_file_offset: BOOTSTRAP_ENTRY_FILE_OFFSET,
+        artifact_sha256: BOOTSTRAP_EXPECTED_SHA256,
+        provenance_root: BOOTSTRAP_PROVENANCE_ROOT,
     };
-    if let Err(error) = crest_manifest.validate_artifact(
-        CREST_EXPECTED_BYTES,
-        CREST_ENTRY_FILE_OFFSET,
-        CREST_EXPECTED_SHA256,
+    if let Err(error) = bootstrap_manifest.validate_artifact(
+        BOOTSTRAP_EXPECTED_BYTES,
+        BOOTSTRAP_ENTRY_FILE_OFFSET,
+        BOOTSTRAP_EXPECTED_SHA256,
     ) {
-        let _ = writeln!(serial, "Arach: Crest package manifest rejected: {error:?}");
-        halt();
-    }
-    if crest_manifest.service_class != CREST_SERVICE_CLASS {
         let _ = writeln!(
             serial,
-            "Arach: Crest package service class is not boot-admitted"
+            "Arach: bootstrap package manifest rejected: {error:?}"
         );
         halt();
     }
-    let crest_artifact = match verify_artifact(
+    if bootstrap_manifest.service_class != BOOTSTRAP_SERVICE_CLASS {
+        let _ = writeln!(
+            serial,
+            "Arach: bootstrap package service class is not boot-admitted"
+        );
+        halt();
+    }
+    let bootstrap_artifact = match verify_artifact(
         ArtifactManifest {
             inode_id: 3,
             class: FractalClass::Executable,
             architecture: TargetArchitecture::X86_64,
-            entry_offset: CREST_ENTRY_FILE_OFFSET,
-            expected_sha256: CREST_EXPECTED_SHA256,
+            entry_offset: BOOTSTRAP_ENTRY_FILE_OFFSET,
+            expected_sha256: BOOTSTRAP_EXPECTED_SHA256,
         },
-        crest_bytes,
+        bootstrap_bytes,
     ) {
         Ok(artifact) => artifact,
         Err(error) => {
-            let _ = writeln!(serial, "Arach: Crest measurement failed: {error:?}");
+            let _ = writeln!(serial, "Arach: bootstrap measurement failed: {error:?}");
             halt();
         }
     };
-    let crest_image = match prepare_user_image(crest_artifact, &userland_image) {
+    let bootstrap_image = match prepare_user_image(bootstrap_artifact, &userland_image) {
         Ok(image) => image,
         Err(error) => {
-            let _ = writeln!(serial, "Arach: Crest load plan rejected: {error:?}");
+            let _ = writeln!(serial, "Arach: bootstrap load plan rejected: {error:?}");
             halt();
         }
     };
-    let installed_crest =
-        match install_user_image(crest_image, &mut process_backend, &process_install) {
+    let installed_bootstrap =
+        match install_user_image(bootstrap_image, &mut process_backend, &process_install) {
             Ok(image) => image,
             Err(error) => {
-                let _ = writeln!(serial, "Arach: Crest installation failed: {error:?}");
+                let _ = writeln!(serial, "Arach: bootstrap installation failed: {error:?}");
                 halt();
             }
         };
-    if installed_crest.measurement.bytes_written != crest_manifest.artifact_bytes
-        || installed_crest.measurement.entry_offset != crest_manifest.entry_file_offset
-        || installed_crest.measurement.sha256 != crest_manifest.artifact_sha256
+    if installed_bootstrap.measurement.bytes_written != bootstrap_manifest.artifact_bytes
+        || installed_bootstrap.measurement.entry_offset != bootstrap_manifest.entry_file_offset
+        || installed_bootstrap.measurement.sha256 != bootstrap_manifest.artifact_sha256
     {
         let _ = writeln!(
             serial,
-            "Arach: Crest package identity diverged after install"
+            "Arach: bootstrap package identity diverged after install"
         );
         halt();
     }
     if let Err(error) = process_backend.install_initial_stack_pages(
-        &installed_crest.process,
-        CREST_INITIAL_STACK_PAGES,
+        &installed_bootstrap.process,
+        BOOTSTRAP_INITIAL_STACK_PAGES,
         &process_install,
     ) {
-        let _ = writeln!(serial, "Arach: Crest stack installation failed: {error:?}");
+        let _ = writeln!(
+            serial,
+            "Arach: bootstrap stack installation failed: {error:?}"
+        );
         halt();
     }
-    let crest_stack = match process_backend.prepare_initial_stack(
-        &installed_crest.process,
-        &[b"crest"],
-        &[b"SISYPHUS_PROCESS=crest", b"SISYPHUS_ABI=1"],
+    let bootstrap_stack = match process_backend.prepare_initial_stack(
+        &installed_bootstrap.process,
+        &[b"bootstrap"],
+        &[b"ARACH_PROCESS=bootstrap", b"ARACH_ABI=1"],
     ) {
         Ok(stack) => stack,
         Err(error) => {
             let _ = writeln!(
                 serial,
-                "Arach: Crest argv/envp preparation failed: {error:?}"
+                "Arach: bootstrap argv/envp preparation failed: {error:?}"
             );
             halt();
         }
     };
-    // SAFETY: Crest is fully installed but not yet published to the lifecycle;
+    // SAFETY: The bootstrap service is fully installed but not yet published to the lifecycle;
     // bootstrap still owns the only execution thread and restores the kernel root.
-    if let Err(error) =
-        unsafe { process_backend.validate_activation(&installed_crest.process, &process_install) }
-    {
-        let _ = writeln!(serial, "Arach: Crest CR3 activation failed: {error:?}");
+    if let Err(error) = unsafe {
+        process_backend.validate_activation(&installed_bootstrap.process, &process_install)
+    } {
+        let _ = writeln!(serial, "Arach: bootstrap CR3 activation failed: {error:?}");
         halt();
     }
-    let Some(crest_info) = process_backend.process_info(&installed_crest.process) else {
-        let _ = writeln!(serial, "Arach: retained Crest handle became stale");
+    let Some(bootstrap_info) = process_backend.process_info(&installed_bootstrap.process) else {
+        let _ = writeln!(serial, "Arach: retained bootstrap handle became stale");
         halt();
     };
-    let Some(crest_root) = crest_info.address_space_root else {
-        let _ = writeln!(serial, "Arach: retained Crest has no page-table root");
+    let Some(bootstrap_root) = bootstrap_info.address_space_root else {
+        let _ = writeln!(serial, "Arach: retained bootstrap has no page-table root");
         halt();
     };
-    if crest_info.initial_stack_pointer != Some(crest_stack)
-        || crest_info.entry_point != installed_crest.entry_point
-        || crest_info.segment_count == 0
+    if bootstrap_info.initial_stack_pointer != Some(bootstrap_stack)
+        || bootstrap_info.entry_point != installed_bootstrap.entry_point
+        || bootstrap_info.segment_count == 0
     {
         let _ = writeln!(
             serial,
-            "Arach: retained Crest image metadata is inconsistent"
+            "Arach: retained bootstrap image metadata is inconsistent"
         );
         halt();
     }
     let _ = writeln!(
         serial,
-        "Arach: Crest measured image root={crest_root:#x}, frames={}, segments={}, launch=sealed",
-        crest_info.owned_frames, crest_info.segment_count,
+        "Arach: bootstrap measured image root={bootstrap_root:#x}, frames={}, segments={}, launch=sealed",
+        bootstrap_info.owned_frames, bootstrap_info.segment_count,
     );
 
     #[cfg(target_os = "none")]
@@ -2268,7 +2256,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     // collapsing the GPU strategy set. No driver key is a repeated literal.
     let gpu_boot_counter = <arach::arch::Active as arach::arch::Architecture>::counter_sample();
     let gpu_domains = match arach::drivernet_host::derive_gpu_boot_domains(
-        PUSH_EXPECTED_SHA256,
+        RUSTD_EXPECTED_SHA256,
         gpu_boot_counter,
         &pci_inventory,
         boot_framebuffer,
@@ -3906,7 +3894,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
 
     // The boot framebuffer is a retained firmware resource in its own right.
     // A native PCI strategy may legitimately win Drivernet arbitration, but it
-    // must not make the already verified Crest first-light surface disappear.
+    // must not make the already verified first-light surface disappear.
     // Prefer the broker's object when it selected firmware fallback; otherwise
     // inspect and retain the immutable boot evidence under Arach's display
     // authority.
@@ -3966,12 +3954,12 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         }
         if let Err(error) = arach::drivers::firmware_display::bind_crest_presenter(firmware_object)
         {
-            let _ = writeln!(serial, "Arach: Crest presenter binding failed: {error:?}");
+            let _ = writeln!(serial, "Arach: display presenter binding failed: {error:?}");
             halt();
         }
         let _ = writeln!(
             serial,
-            "Arach: Crest presentation capability bound to retained firmware scanout"
+            "Arach: display presentation capability bound to retained firmware scanout"
         );
     }
 
@@ -3979,7 +3967,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     arach::manifold_orchestrator::boot_after_drivernet(
         &pci_inventory,
         &drivernet,
-        PUSH_EXPECTED_SHA256,
+        RUSTD_EXPECTED_SHA256,
         &mut serial,
     );
 
@@ -4161,7 +4149,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     );
 
     let mut image_measurement_root = 0_u64;
-    for (index, chunk) in PUSH_EXPECTED_SHA256.chunks_exact(8).enumerate() {
+    for (index, chunk) in RUSTD_EXPECTED_SHA256.chunks_exact(8).enumerate() {
         let word = u64::from_le_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
         ]);
@@ -4174,36 +4162,41 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         ^ formal_attestation.authority_root.rotate_left(7)
         ^ u64::from(blacklab.pid1_install_generation))
     .max(1);
-    let crest_package =
-        match crest_manifest.bind_formal_authority(formal_attestation.authority_root) {
+    let bootstrap_package =
+        match bootstrap_manifest.bind_formal_authority(formal_attestation.authority_root) {
             Ok(package) => package,
             Err(error) => {
-                let _ = writeln!(serial, "Arach: Crest package authority rejected: {error:?}");
+                let _ = writeln!(
+                    serial,
+                    "Arach: bootstrap package authority rejected: {error:?}"
+                );
                 halt();
             }
         };
     let _ = writeln!(
         serial,
-        "Arach: Crest package v{} ABI={} class={} provenance={:#x} manifest-root={:#x}",
-        crest_manifest.version,
-        crest_manifest.abi_version,
-        crest_manifest.service_class,
-        crest_manifest.provenance_root,
-        crest_package.image_measurement_root,
+        "Arach: bootstrap package v{} ABI={} class={} provenance={:#x} manifest-root={:#x}",
+        bootstrap_manifest.version,
+        bootstrap_manifest.abi_version,
+        bootstrap_manifest.service_class,
+        bootstrap_manifest.provenance_root,
+        bootstrap_package.image_measurement_root,
     );
-    let crest_launch = ProcessLaunch {
-        address_space_root: crest_root,
-        entry_point: crest_info.entry_point,
-        user_stack_pointer: crest_stack,
+    let bootstrap_launch = ProcessLaunch {
+        address_space_root: bootstrap_root,
+        entry_point: bootstrap_info.entry_point,
+        user_stack_pointer: bootstrap_stack,
         kernel_stack_pointer: privilege_info.kernel_stack_top as u64,
-        image_measurement_root: crest_package.image_measurement_root,
-        capability_root: crest_package.capability_root,
-        service_class: CREST_SERVICE_CLASS,
+        image_measurement_root: bootstrap_package.image_measurement_root,
+        capability_root: bootstrap_package.capability_root,
+        service_class: BOOTSTRAP_SERVICE_CLASS,
         priority: 1,
-        abi: CREST_EXECUTION_ABI,
+        abi: BOOTSTRAP_EXECUTION_ABI,
     };
-    if let Err(error) = service_registry::install_crest(crest_launch, installed_crest.process) {
-        let _ = writeln!(serial, "Arach: Crest launch registry failed: {error:?}");
+    if let Err(error) =
+        service_registry::install_bootstrap(bootstrap_launch, installed_bootstrap.process)
+    {
+        let _ = writeln!(serial, "Arach: bootstrap launch registry failed: {error:?}");
         halt();
     }
     #[cfg(target_os = "none")]
@@ -4257,11 +4250,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         capability_root,
         service_class: 1,
         priority: u8::MAX,
-        abi: if RUSTD_INIT {
-            arach::process::abi::ExecutionAbi::LinuxX86_64
-        } else {
-            arach::process::abi::ExecutionAbi::ArachNative
-        },
+        abi: arach::process::abi::ExecutionAbi::LinuxX86_64,
     };
     let pid1_handle = match lifecycle::register_init(pid1_launch) {
         Ok(handle) => handle,
@@ -4321,7 +4310,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     };
     let _ = writeln!(
         serial,
-        "Arach: transferring to measured Push PID1 authority {}:{} through Ring 3 domain {}:{} at {:#x}, measurement={:#x}",
+        "Arach: transferring to measured RustD PID1 authority {}:{} through Ring 3 domain {}:{} at {:#x}, measurement={:#x}",
         pid1_handle.pid,
         pid1_handle.generation,
         pid1_domain.slot(),
@@ -4352,7 +4341,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                 halt();
             }
         };
-    // SAFETY: Push's measured W^X image, retained hierarchy, and RW+NX stack
+    // SAFETY: RustD's measured W^X image, retained hierarchy, and RW+NX stack
     // remain owned by the persistent process runtime, all kernel entry mappings are
     // inherited, and this terminal transfer intentionally abandons the
     // bootstrap stack without running destructors.

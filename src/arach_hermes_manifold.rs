@@ -1,4 +1,4 @@
-//! OS-wide Hermes phase manifold shared by Boulder, Crest, and formal proofs.
+//! OS-wide Hermes phase manifold shared by Arach services and formal proofs.
 //!
 //! The lattice mirrors `formal/idris2/HermesAuthority.idr`: Online is never a
 //! free jump from Probe. Callers publish evidence; this module only advances
@@ -261,7 +261,7 @@ impl HermesManifold {
 
     /// Snapshot flag contribution for Quantum Crest publication.
     pub const fn snapshot_flags(self) -> u64 {
-        use crate::quantum_crest::{
+        use crate::arach_quantum_crest::{
             SNAPSHOT_FLAG_DMA_REVOKED, SNAPSHOT_FLAG_HERMES_ONLINE,
             SNAPSHOT_FLAG_QUARANTINE_ACTIVE, SNAPSHOT_FLAG_RECOVERY_PENDING,
         };
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(manifold.phase, HermesPhase::Online);
         assert_ne!(manifold.certificate.unwrap().root, 0);
         assert_ne!(
-            manifold.snapshot_flags() & crate::quantum_crest::SNAPSHOT_FLAG_HERMES_ONLINE,
+            manifold.snapshot_flags() & crate::arach_quantum_crest::SNAPSHOT_FLAG_HERMES_ONLINE,
             0
         );
     }
@@ -461,12 +461,12 @@ mod tests {
         assert!(manifold.detect_fault(false).is_ok());
         assert!(manifold.phase.is_degraded());
         assert_eq!(
-            manifold.snapshot_flags() & crate::quantum_crest::SNAPSHOT_FLAG_RECOVERY_PENDING,
-            crate::quantum_crest::SNAPSHOT_FLAG_RECOVERY_PENDING
+            manifold.snapshot_flags() & crate::arach_quantum_crest::SNAPSHOT_FLAG_RECOVERY_PENDING,
+            crate::arach_quantum_crest::SNAPSHOT_FLAG_RECOVERY_PENDING
         );
         assert!(manifold.contain().is_ok());
         assert_ne!(
-            manifold.snapshot_flags() & crate::quantum_crest::SNAPSHOT_FLAG_QUARANTINE_ACTIVE,
+            manifold.snapshot_flags() & crate::arach_quantum_crest::SNAPSHOT_FLAG_QUARANTINE_ACTIVE,
             0
         );
         assert!(manifold.release().is_ok());
