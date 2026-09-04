@@ -113,6 +113,49 @@ pub fn device_for(path: &[u8]) -> u64 {
         .map_or(1, |entry| entry.device)
 }
 
+/// Return the initial contents of a bounded cgroup-v2 control file.
+///
+/// Arach's first Linux personality keeps the VFS deliberately in-memory, so
+/// the cgroup mount exposes the small control-file surface RustD needs rather
+/// than pretending that a block-backed hierarchy exists. Files are materialized
+/// lazily by `linux_file::open` when a manager first reads them; files opened
+/// for writing are created through the normal VFS path and retain their value.
+pub fn default_file_contents(path: &[u8]) -> Option<&'static [u8]> {
+    let mounts = MOUNTS.lock();
+    if !mounts.iter().any(|entry| {
+        entry.used && entry.filesystem == Filesystem::Cgroup2 && contains(entry.target(), path)
+    }) {
+        return None;
+    }
+    let name = path.rsplit(|byte| *byte == b'/').next()?;
+    default_cgroup_file_contents(name)
+}
+
+fn default_cgroup_file_contents(name: &[u8]) -> Option<&'static [u8]> {
+    match name {
+        b"cgroup.controllers" => Some(b"cpu io memory pids\n"),
+        b"cgroup.procs" | b"cgroup.subtree_control" => Some(b""),
+        b"cgroup.events" => Some(b"populated 0\nfrozen 0\n"),
+        b"cgroup.freeze" | b"memory.oom.group" => Some(b"0\n"),
+        b"cpu.stat" => Some(
+            b"usage_usec 0\nuser_usec 0\nsystem_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\n",
+        ),
+        b"io.stat" => Some(b""),
+        b"memory.events" => Some(
+            b"low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+        ),
+        b"memory.current" | b"memory.peak" | b"memory.swap.current" | b"pids.current" => {
+            Some(b"0\n")
+        }
+        b"memory.max"
+        | b"memory.high"
+        | b"memory.swap.max"
+        | b"memory.zswap.max"
+        | b"pids.max" => Some(b"max\n"),
+        _ => None,
+    }
+}
+
 fn contains(target: &[u8], path: &[u8]) -> bool {
     path == target
         || path
@@ -148,5 +191,18 @@ mod tests {
         assert!(contains(b"/proc", b"/proc"));
         assert!(contains(b"/proc", b"/proc/1/status"));
         assert!(!contains(b"/proc", b"/process"));
+    }
+
+    #[test]
+    fn cgroup_control_defaults_are_bounded_and_explicit() {
+        assert_eq!(
+            default_cgroup_file_contents(b"cgroup.controllers"),
+            Some(&b"cpu io memory pids\n"[..])
+        );
+        assert_eq!(
+            default_cgroup_file_contents(b"cgroup.events"),
+            Some(&b"populated 0\nfrozen 0\n"[..])
+        );
+        assert_eq!(default_cgroup_file_contents(b"unknown.control"), None);
     }
 }

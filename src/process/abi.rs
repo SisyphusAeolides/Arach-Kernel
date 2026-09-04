@@ -27,9 +27,17 @@ pub enum LinuxSyscall {
     Read,
     Write,
     Writev,
+    Access,
+    Faccessat,
     Open,
     Close,
     Stat,
+    Readlink,
+    ReadlinkAt,
+    Chmod,
+    Fchmod,
+    FchmodAt,
+    FchmodAt2,
     Fstat,
     Poll,
     Pipe,
@@ -90,6 +98,8 @@ pub enum LinuxSyscall {
     EpollCtl,
     EpollPwait,
     Eventfd2,
+    Signalfd,
+    Signalfd4,
     TimerfdCreate,
     TimerfdSettime,
     TimerfdGettime,
@@ -126,10 +136,14 @@ impl LinuxSyscall {
             0 => Some(Self::Read),
             1 => Some(Self::Write),
             20 => Some(Self::Writev),
+            21 => Some(Self::Access),
             2 => Some(Self::Open),
             3 => Some(Self::Close),
             4 => Some(Self::Stat),
             5 => Some(Self::Fstat),
+            89 => Some(Self::Readlink),
+            90 => Some(Self::Chmod),
+            91 => Some(Self::Fchmod),
             7 => Some(Self::Poll),
             22 => Some(Self::Pipe),
             8 => Some(Self::Lseek),
@@ -190,6 +204,9 @@ impl LinuxSyscall {
             257 => Some(Self::OpenAt),
             258 => Some(Self::MkdirAt),
             262 => Some(Self::Newfstatat),
+            267 => Some(Self::ReadlinkAt),
+            269 => Some(Self::Faccessat),
+            268 => Some(Self::FchmodAt),
             263 => Some(Self::UnlinkAt),
             271 => Some(Self::Ppoll),
             272 => Some(Self::Unshare),
@@ -197,10 +214,12 @@ impl LinuxSyscall {
             274 => Some(Self::GetRobustList),
             281 => Some(Self::EpollPwait),
             283 => Some(Self::TimerfdCreate),
+            282 => Some(Self::Signalfd),
             286 => Some(Self::TimerfdSettime),
             287 => Some(Self::TimerfdGettime),
             288 => Some(Self::Accept4),
             290 => Some(Self::Eventfd2),
+            289 => Some(Self::Signalfd4),
             291 => Some(Self::EpollCreate1),
             292 => Some(Self::Dup3),
             293 => Some(Self::Pipe2),
@@ -216,6 +235,8 @@ impl LinuxSyscall {
             175 => Some(Self::InitModule),
             176 => Some(Self::DeleteModule),
             313 => Some(Self::FinitModule),
+            439 => Some(Self::Faccessat),
+            452 => Some(Self::FchmodAt2),
             _ => None,
         }
     }
@@ -235,6 +256,15 @@ mod tests {
     #[test]
     fn decodes_the_syscalls_needed_by_the_first_cosmic_boundary() {
         assert_eq!(LinuxSyscall::from_number(1), Some(LinuxSyscall::Write));
+        assert_eq!(LinuxSyscall::from_number(21), Some(LinuxSyscall::Access));
+        assert_eq!(LinuxSyscall::from_number(89), Some(LinuxSyscall::Readlink));
+        assert_eq!(LinuxSyscall::from_number(90), Some(LinuxSyscall::Chmod));
+        assert_eq!(LinuxSyscall::from_number(91), Some(LinuxSyscall::Fchmod));
+        assert_eq!(LinuxSyscall::from_number(268), Some(LinuxSyscall::FchmodAt));
+        assert_eq!(
+            LinuxSyscall::from_number(452),
+            Some(LinuxSyscall::FchmodAt2)
+        );
         assert_eq!(LinuxSyscall::from_number(9), Some(LinuxSyscall::Mmap));
         assert_eq!(LinuxSyscall::from_number(16), Some(LinuxSyscall::Ioctl));
         assert_eq!(LinuxSyscall::from_number(0), Some(LinuxSyscall::Read));
@@ -262,10 +292,23 @@ mod tests {
         );
         assert_eq!(LinuxSyscall::from_number(257), Some(LinuxSyscall::OpenAt));
         assert_eq!(
+            LinuxSyscall::from_number(267),
+            Some(LinuxSyscall::ReadlinkAt)
+        );
+        assert_eq!(
+            LinuxSyscall::from_number(269),
+            Some(LinuxSyscall::Faccessat)
+        );
+        assert_eq!(
             LinuxSyscall::from_number(294),
             Some(LinuxSyscall::InotifyInit1)
         );
         assert_eq!(LinuxSyscall::from_number(290), Some(LinuxSyscall::Eventfd2));
+        assert_eq!(LinuxSyscall::from_number(282), Some(LinuxSyscall::Signalfd));
+        assert_eq!(
+            LinuxSyscall::from_number(289),
+            Some(LinuxSyscall::Signalfd4)
+        );
         assert_eq!(
             LinuxSyscall::from_number(283),
             Some(LinuxSyscall::TimerfdCreate)

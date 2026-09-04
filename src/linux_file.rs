@@ -148,7 +148,30 @@ pub fn open(owner: ProcessHandle, path: &[u8], flags: u32, now: u64) -> Result<u
         return Err(FileError::Capacity);
     };
 
-    let capability = akashic_vfs::open(owner, path, mapped, now)?;
+    let capability = match akashic_vfs::open(owner, path, mapped, now) {
+        Ok(capability) => capability,
+        Err(VfsError::NotFound) => {
+            let Some(contents) = crate::linux_mount::default_file_contents(path) else {
+                return Err(FileError::Vfs(VfsError::NotFound));
+            };
+            // Seed a read-only-opened pseudo-file through a temporary
+            // read/write capability, then reopen it with the caller's exact
+            // flags so its cursor starts at byte zero.
+            let seed_flags = akashic_vfs::flags::READ_INTENT
+                | akashic_vfs::flags::WRITE_INTENT
+                | akashic_vfs::flags::CREATE_INTENT
+                | akashic_vfs::flags::EXCLUSIVE;
+            let seed = akashic_vfs::open(owner, path, seed_flags, now)?;
+            if let Err(error) = akashic_vfs::write(owner, seed, contents, now)
+                .and_then(|_| akashic_vfs::close(owner, seed).map(|()| contents.len()))
+            {
+                let _ = akashic_vfs::close(owner, seed);
+                return Err(FileError::Vfs(error));
+            }
+            akashic_vfs::open(owner, path, mapped, now)?
+        }
+        Err(error) => return Err(FileError::Vfs(error)),
+    };
     if require_directory {
         match akashic_vfs::stat_handle(owner, capability) {
             Ok(stat) if stat.kind == NodeKind::Directory => {}
@@ -209,7 +232,24 @@ pub fn fstat(owner: ProcessHandle, fd: u32) -> Result<Stat, FileError> {
 }
 
 pub fn stat(path: &[u8]) -> Result<Stat, FileError> {
-    akashic_vfs::stat(path).map_err(FileError::from)
+    match akashic_vfs::stat(path) {
+        Ok(stat) => Ok(stat),
+        Err(VfsError::NotFound) => {
+            let Some(contents) = crate::linux_mount::default_file_contents(path) else {
+                return Err(FileError::Vfs(VfsError::NotFound));
+            };
+            // Cgroup-v2 control files are materialized lazily on first open;
+            // expose their file identity to metadata probes in the meantime.
+            Ok(Stat {
+                size_bytes: contents.len() as u64,
+                created_ticks: 0,
+                modified_ticks: 0,
+                flags: 0,
+                kind: NodeKind::File,
+            })
+        }
+        Err(error) => Err(FileError::Vfs(error)),
+    }
 }
 
 pub fn readdir(owner: ProcessHandle, fd: u32) -> Result<Option<akashic_vfs::Dirent>, FileError> {

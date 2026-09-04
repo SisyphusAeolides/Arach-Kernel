@@ -640,6 +640,45 @@ fn load_rustd_resolved_artifact(
     Some(module)
 }
 
+#[cfg(target_os = "none")]
+const RUSTD_BOOT_UNITS: &[(&[u8], &[u8])] = &[
+    (
+        b"/etc/rustd/system/default.target",
+        b"[Unit]\nDescription=RustD Default System\nRequires=graphical.target\nAfter=graphical.target\nAllowIsolate=yes\n",
+    ),
+    (
+        b"/etc/rustd/system/graphical.target",
+        b"[Unit]\nDescription=RustD Graphical Interface\nRequires=multi-user.target\nAfter=multi-user.target\nAllowIsolate=yes\n",
+    ),
+    (
+        b"/etc/rustd/system/multi-user.target",
+        b"[Unit]\nDescription=RustD Multi-User System\nRequires=basic.target\nAfter=basic.target\n",
+    ),
+    (
+        b"/etc/rustd/system/basic.target",
+        b"[Unit]\nDescription=RustD Basic System\nRequires=sysinit.target\nAfter=sysinit.target\n",
+    ),
+    (
+        b"/etc/rustd/system/sysinit.target",
+        b"[Unit]\nDescription=RustD System Initialization\n",
+    ),
+];
+
+#[cfg(target_os = "none")]
+fn seed_rustd_boot_units(serial: &mut SerialPort, owner: lifecycle::ProcessHandle) {
+    let now = interrupts::monotonic_nanoseconds();
+    for &(path, contents) in RUSTD_BOOT_UNITS {
+        if let Err(error) = arach::akashic_vfs::seed_file(owner, path, contents, now) {
+            let _ = writeln!(
+                serial,
+                "Arach: RustD boot unit seed failed for {:?}: {error:?}",
+                path
+            );
+            halt();
+        }
+    }
+}
+
 /// Installs one immutable, build-bound service image. This is intentionally a
 /// fail-closed helper: a native COSMIC service cannot reach the registry until
 /// its ELF digest, package identity, page permissions, stack metadata, and
@@ -1958,6 +1997,15 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         let _ = writeln!(serial, "Arach: PID1 thermal page mapping failed: {error:?}");
         halt();
     }
+
+    #[cfg(target_os = "none")]
+    seed_rustd_boot_units(
+        &mut serial,
+        lifecycle::ProcessHandle {
+            pid: lifecycle::INIT_PID,
+            generation: 1,
+        },
+    );
 
     let cerebral_lease = match arach::nexus_runtime::initialize(&resonance_control) {
         Ok(token) => token,

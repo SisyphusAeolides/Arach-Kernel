@@ -584,6 +584,47 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
         Ok(())
     }
 
+    /// Install a small immutable-at-boot file tree before the first user
+    /// process runs.  The caller supplies the process identity that will own
+    /// the temporary write capability; the capability is always closed before
+    /// this function returns.
+    pub fn seed_file(
+        &mut self,
+        owner: ProcessHandle,
+        path: &[u8],
+        contents: &[u8],
+        now: u64,
+    ) -> Result<(), VfsError> {
+        self.ensure_initialized()?;
+        validate_owner(owner)?;
+        validate_path(path)?;
+        if contents.len() > FILE_BYTES {
+            return Err(VfsError::FileTooLarge);
+        }
+
+        // Unit files are seeded before any process can mutate the tree.  Build
+        // each missing parent in place so callers need only provide a full
+        // absolute path.
+        for (index, byte) in path.iter().enumerate().skip(1) {
+            if *byte != b'/' {
+                continue;
+            }
+            let parent = &path[..index];
+            if self.find_node(parent).is_none() {
+                self.mkdir(parent, now)?;
+            }
+        }
+        let token = self.open(
+            owner,
+            path,
+            flags::READ_INTENT | flags::WRITE_INTENT | flags::CREATE_INTENT | flags::EXCLUSIVE,
+            now,
+        )?;
+        let result = self.write(owner, token, contents, now);
+        let close_result = self.close(owner, token);
+        result.map(|_| ()).and(close_result)
+    }
+
     pub fn unlink(&mut self, path: &[u8]) -> Result<(), VfsError> {
         self.ensure_initialized()?;
         validate_path(path)?;
@@ -698,24 +739,32 @@ impl<const NODES: usize, const HANDLES: usize, const FILE_BYTES: usize>
         self.ensure_initialized()?;
         let handle_index = self.find_handle(owner, token)?;
         let handle = self.handles[handle_index];
-        let directory = self.nodes[usize::from(handle.node)];
+        let directory = &self.nodes[usize::from(handle.node)];
         if directory.kind != NodeKind::Directory {
             return Err(VfsError::NotDirectory);
         }
+        // Do not copy a complete `Node` here: each node owns a 64 KiB file
+        // buffer, and this path runs on the bounded syscall entry stack.
+        let directory_path_len = usize::from(directory.path_len);
+        let mut directory_path = [0_u8; MAXIMUM_PATH_BYTES];
+        directory_path[..directory_path_len].copy_from_slice(directory.path());
         let mut cursor = handle.cursor;
         while cursor < NODES {
-            let candidate = self.nodes[cursor];
+            let candidate = &self.nodes[cursor];
             cursor += 1;
             if !candidate.used {
                 continue;
             }
-            let Some(name) = direct_child_name(directory.path(), candidate.path()) else {
+            let Some(name) =
+                direct_child_name(&directory_path[..directory_path_len], candidate.path())
+            else {
                 continue;
             };
+            let kind = candidate.kind;
             let mut entry = Dirent::EMPTY;
             entry.name[..name.len()].copy_from_slice(name);
             entry.name_len = name.len() as u8;
-            entry.kind = candidate.kind;
+            entry.kind = kind;
             self.handles[handle_index].cursor = cursor;
             return Ok(Some(entry));
         }
@@ -868,6 +917,15 @@ pub fn stat_handle(owner: ProcessHandle, token: u64) -> Result<Stat, VfsError> {
 
 pub fn mkdir(path: &[u8], now: u64) -> Result<(), VfsError> {
     KERNEL_VFS.lock().mkdir(path, now)
+}
+
+pub fn seed_file(
+    owner: ProcessHandle,
+    path: &[u8],
+    contents: &[u8],
+    now: u64,
+) -> Result<(), VfsError> {
+    KERNEL_VFS.lock().seed_file(owner, path, contents, now)
 }
 
 pub fn unlink(path: &[u8]) -> Result<(), VfsError> {
@@ -1128,6 +1186,37 @@ mod tests {
         assert_eq!(vfs.unlink(b"/var"), Err(VfsError::Busy));
         vfs.close(owner, directory).unwrap();
         assert_eq!(vfs.unlink(b"/var"), Err(VfsError::DirectoryNotEmpty));
+    }
+
+    #[test]
+    fn seed_file_builds_parent_tree_and_closes_boot_handle() {
+        let mut vfs = TestVfs::new();
+        let owner = owner(10, 1);
+        let contents = b"[Unit]\nRequires=basic.target\n";
+
+        assert_eq!(
+            vfs.seed_file(owner, b"/etc/rustd/system/default.target", contents, 7),
+            Ok(())
+        );
+        assert_eq!(
+            vfs.stat(b"/etc/rustd/system").unwrap().kind,
+            NodeKind::Directory
+        );
+        let mut output = [0_u8; 64];
+        assert_eq!(
+            vfs.read_file(b"/etc/rustd/system/default.target", &mut output),
+            Ok(contents.len())
+        );
+        assert_eq!(&output[..contents.len()], contents);
+        assert_eq!(
+            vfs.open(
+                owner,
+                b"/etc/rustd/system/default.target",
+                flags::READ_INTENT | flags::CREATE_INTENT | flags::EXCLUSIVE,
+                8,
+            ),
+            Err(VfsError::AlreadyExists)
+        );
     }
 
     #[test]

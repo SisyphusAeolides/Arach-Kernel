@@ -18,6 +18,7 @@ use crate::sync::SpinLock;
 
 pub const AF_UNIX: u32 = 1;
 pub const SOCK_STREAM: u32 = 1;
+pub const SOCK_DGRAM: u32 = 2;
 pub const SOCK_NONBLOCK: u32 = 0x800;
 pub const SOCK_CLOEXEC: u32 = 0x80000;
 pub const SOCKET_TYPE_MASK: u32 = 0xf;

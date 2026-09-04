@@ -283,6 +283,40 @@ pub fn queue(owner: ProcessHandle, signal: u32) -> Result<(), SignalError> {
     Ok(())
 }
 
+/// Return the pending standard-signal bits for one exact thread generation.
+/// The snapshot is used by signalfd readiness and is intentionally bounded to
+/// the first 64 Linux signals represented by this personality.
+pub fn pending_mask(owner: ProcessHandle) -> u64 {
+    SIGNALS
+        .lock()
+        .threads
+        .iter()
+        .find(|slot| slot.occupied() && slot.owner == owner)
+        .map_or(0, |thread| thread.pending)
+}
+
+pub fn pending_for_signalfd(owner: ProcessHandle, mask: u64) -> bool {
+    pending_mask(owner) & mask != 0
+}
+
+/// Remove and return the lowest-numbered pending signal selected by a
+/// signalfd mask. Signals remain coalesced exactly as they are for ordinary
+/// delivery; consuming one here clears only that signal's pending bit.
+pub fn dequeue_for_signalfd(owner: ProcessHandle, mask: u64) -> Option<u32> {
+    let mut table = SIGNALS.lock();
+    let thread = table
+        .threads
+        .iter_mut()
+        .find(|slot| slot.occupied() && slot.owner == owner)?;
+    let selected = thread.pending & mask;
+    if selected == 0 {
+        return None;
+    }
+    let signal = selected.trailing_zeros() + 1;
+    thread.pending &= !(1_u64 << (signal - 1));
+    Some(signal)
+}
+
 pub fn delivery_pending(owner: ProcessHandle) -> bool {
     SIGNALS
         .lock()
