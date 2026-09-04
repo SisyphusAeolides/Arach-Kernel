@@ -53,6 +53,7 @@ pub enum LinuxSyscall {
     Uname,
     Getuid,
     Getgid,
+    Getdents64,
     Geteuid,
     Getegid,
     ArchPrctl,
@@ -64,8 +65,10 @@ pub enum LinuxSyscall {
     Wait4,
     Fcntl,
     Ftruncate,
+    Mount,
     Mkdir,
     MkdirAt,
+    Newfstatat,
     Socket,
     Connect,
     Accept,
@@ -148,6 +151,7 @@ impl LinuxSyscall {
             104 => Some(Self::Getgid),
             107 => Some(Self::Geteuid),
             108 => Some(Self::Getegid),
+            217 => Some(Self::Getdents64),
             110 => Some(Self::Getppid),
             158 => Some(Self::ArchPrctl),
             41 => Some(Self::Socket),
@@ -173,6 +177,7 @@ impl LinuxSyscall {
             61 => Some(Self::Wait4),
             72 => Some(Self::Fcntl),
             77 => Some(Self::Ftruncate),
+            165 => Some(Self::Mount),
             83 => Some(Self::Mkdir),
             202 => Some(Self::Futex),
             218 => Some(Self::SetTidAddress),
@@ -184,6 +189,7 @@ impl LinuxSyscall {
             233 => Some(Self::EpollCtl),
             257 => Some(Self::OpenAt),
             258 => Some(Self::MkdirAt),
+            262 => Some(Self::Newfstatat),
             263 => Some(Self::UnlinkAt),
             271 => Some(Self::Ppoll),
             272 => Some(Self::Unshare),
@@ -240,6 +246,10 @@ mod tests {
             Some(LinuxSyscall::ArchPrctl)
         );
         assert_eq!(LinuxSyscall::from_number(202), Some(LinuxSyscall::Futex));
+        assert_eq!(
+            LinuxSyscall::from_number(217),
+            Some(LinuxSyscall::Getdents64)
+        );
         assert_eq!(LinuxSyscall::from_number(62), Some(LinuxSyscall::Kill));
         assert_eq!(LinuxSyscall::from_number(234), Some(LinuxSyscall::Tgkill));
         assert_eq!(
@@ -303,6 +313,7 @@ mod tests {
         assert_eq!(LinuxSyscall::from_number(292), Some(LinuxSyscall::Dup3));
         assert_eq!(LinuxSyscall::from_number(293), Some(LinuxSyscall::Pipe2));
         assert_eq!(LinuxSyscall::from_number(77), Some(LinuxSyscall::Ftruncate));
+        assert_eq!(LinuxSyscall::from_number(165), Some(LinuxSyscall::Mount));
         assert_eq!(
             LinuxSyscall::from_number(319),
             Some(LinuxSyscall::MemfdCreate)
@@ -315,6 +326,10 @@ mod tests {
         assert_eq!(LinuxSyscall::from_number(233), Some(LinuxSyscall::EpollCtl));
         assert_eq!(LinuxSyscall::from_number(83), Some(LinuxSyscall::Mkdir));
         assert_eq!(LinuxSyscall::from_number(258), Some(LinuxSyscall::MkdirAt));
+        assert_eq!(
+            LinuxSyscall::from_number(262),
+            Some(LinuxSyscall::Newfstatat)
+        );
         assert_eq!(
             LinuxSyscall::from_number(281),
             Some(LinuxSyscall::EpollPwait)

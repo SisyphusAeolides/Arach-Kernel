@@ -58,6 +58,7 @@ pub mod linux_fd;
 pub mod linux_file;
 pub mod linux_futex;
 pub mod linux_memfd;
+pub mod linux_mount;
 pub mod linux_pipe;
 pub mod linux_robust;
 pub mod linux_signal;

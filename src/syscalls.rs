@@ -1395,8 +1395,10 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Pipe2) => linux_pipe(arguments, arguments[1]),
         Some(crate::process::abi::LinuxSyscall::Fcntl) => linux_fcntl(arguments),
         Some(crate::process::abi::LinuxSyscall::Ftruncate) => linux_ftruncate(arguments),
+        Some(crate::process::abi::LinuxSyscall::Mount) => linux_mount(arguments),
         Some(crate::process::abi::LinuxSyscall::Mkdir) => linux_mkdir(arguments),
         Some(crate::process::abi::LinuxSyscall::MkdirAt) => linux_mkdirat(arguments),
+        Some(crate::process::abi::LinuxSyscall::Newfstatat) => linux_newfstatat(arguments),
         Some(crate::process::abi::LinuxSyscall::Socket) => linux_socket(arguments),
         Some(crate::process::abi::LinuxSyscall::Connect) => linux_connect(arguments),
         Some(crate::process::abi::LinuxSyscall::Accept) => linux_accept(arguments, 0),
@@ -1423,6 +1425,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Gettid) => {
             crate::process::lifecycle::current_pid() as isize
         }
+        Some(crate::process::abi::LinuxSyscall::Getdents64) => linux_getdents64(arguments),
         Some(crate::process::abi::LinuxSyscall::SetTidAddress) => linux_set_tid_address(arguments),
         Some(crate::process::abi::LinuxSyscall::RtSigaction) => linux_rt_sigaction(arguments),
         Some(crate::process::abi::LinuxSyscall::RtSigprocmask) => linux_rt_sigprocmask(arguments),
@@ -1490,6 +1493,58 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         Some(crate::process::abi::LinuxSyscall::Rseq) => linux_rseq(arguments),
         Some(_) => ERROR_NOT_IMPLEMENTED,
         None => ERROR_NOT_IMPLEMENTED,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn linux_getdents64(arguments: [u64; 6]) -> isize {
+    const HEADER_BYTES: usize = 19;
+    const DIRECTORY_TYPE: u8 = 4;
+    const REGULAR_TYPE: u8 = 8;
+
+    let Ok(fd) = u32::try_from(arguments[0]) else {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    };
+    let Ok(capacity) = usize::try_from(arguments[2]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if capacity == 0 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let owner = match current_akashic_owner() {
+        Ok(owner) => owner,
+        Err(error) => return error,
+    };
+    let entry = match crate::linux_file::readdir(owner, fd) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return 0,
+        Err(error) => return map_linux_file_error(error),
+    };
+    let unaligned = match HEADER_BYTES.checked_add(entry.name().len() + 1) {
+        Some(value) => value,
+        None => return ERROR_INVALID_ARGUMENT,
+    };
+    let record_bytes = match unaligned.checked_add(7) {
+        Some(value) => value & !7,
+        None => return ERROR_INVALID_ARGUMENT,
+    };
+    if record_bytes > capacity || record_bytes > crate::akashic_vfs::MAXIMUM_PATH_BYTES + 32 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let mut record = [0_u8; crate::akashic_vfs::MAXIMUM_PATH_BYTES + 32];
+    let inode = stable_linux_inode(entry.name());
+    record[0..8].copy_from_slice(&inode.to_ne_bytes());
+    record[8..16].copy_from_slice(&(record_bytes as i64).to_ne_bytes());
+    record[16..18].copy_from_slice(&(record_bytes as u16).to_ne_bytes());
+    record[18] = match entry.kind {
+        crate::akashic_vfs::NodeKind::Directory => DIRECTORY_TYPE,
+        crate::akashic_vfs::NodeKind::File => REGULAR_TYPE,
+    };
+    record[HEADER_BYTES..HEADER_BYTES + entry.name().len()].copy_from_slice(entry.name());
+    if copy_to_user(arguments[1], &record[..record_bytes]).is_err() {
+        ERROR_BAD_ADDRESS
+    } else {
+        record_bytes as isize
     }
 }
 
@@ -3037,13 +3092,45 @@ fn linux_mkdir(arguments: [u64; 6]) -> isize {
 }
 
 #[cfg(target_os = "none")]
+fn linux_mount(arguments: [u64; 6]) -> isize {
+    let (target, target_len, target_absolute) = match copy_linux_path(arguments[1]) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    if !target_absolute {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let (filesystem, filesystem_len, filesystem_absolute) = match copy_linux_path(arguments[2]) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    if filesystem_absolute {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let filesystem = match crate::linux_mount::Filesystem::parse(&filesystem[1..filesystem_len]) {
+        Ok(value) => value,
+        Err(crate::linux_mount::MountError::UnsupportedFilesystem) => return ERROR_NOT_SUPPORTED,
+        Err(_) => return ERROR_INVALID_ARGUMENT,
+    };
+    match crate::linux_mount::mount(&target[..target_len], filesystem) {
+        Ok(_) => 0,
+        Err(crate::linux_mount::MountError::AlreadyMounted) => ERROR_BUSY,
+        Err(crate::linux_mount::MountError::Capacity) => ERROR_NO_SPACE,
+        Err(crate::linux_mount::MountError::NotFound) => ERROR_NO_ENTRY,
+        Err(crate::linux_mount::MountError::NotDirectory) => ERROR_NOT_DIRECTORY,
+        Err(crate::linux_mount::MountError::InvalidPath) => ERROR_INVALID_ARGUMENT,
+        Err(crate::linux_mount::MountError::UnsupportedFilesystem) => ERROR_NOT_SUPPORTED,
+    }
+}
+
+#[cfg(target_os = "none")]
 fn linux_mkdirat(arguments: [u64; 6]) -> isize {
     linux_mkdir_path(arguments[1], arguments[2], Some(arguments[0] as i64))
 }
 
 #[cfg(any(target_os = "none", test))]
 fn admitted_linux_directory_mode(mode: u64) -> bool {
-    mode == 0o755
+    mode & !0o777 == 0
 }
 
 #[cfg(any(target_os = "none", test))]
@@ -3082,7 +3169,37 @@ fn linux_stat(arguments: [u64; 6]) -> isize {
         Ok(stat) => stat,
         Err(error) => return map_linux_file_error(error),
     };
-    write_linux_stat(arguments[1], stat, stable_linux_inode(&path[..length]))
+    write_linux_stat(
+        arguments[1],
+        stat,
+        stable_linux_inode(&path[..length]),
+        crate::linux_mount::device_for(&path[..length]),
+    )
+}
+
+#[cfg(target_os = "none")]
+fn linux_newfstatat(arguments: [u64; 6]) -> isize {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    if arguments[3] & !AT_SYMLINK_NOFOLLOW != 0 {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let (path, length, was_absolute) = match copy_linux_path(arguments[1]) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    if !was_absolute && arguments[0] as i64 != LINUX_AT_FDCWD {
+        return ERROR_BAD_FILE_DESCRIPTOR;
+    }
+    let stat = match crate::linux_file::stat(&path[..length]) {
+        Ok(stat) => stat,
+        Err(error) => return map_linux_file_error(error),
+    };
+    write_linux_stat(
+        arguments[2],
+        stat,
+        stable_linux_inode(&path[..length]),
+        crate::linux_mount::device_for(&path[..length]),
+    )
 }
 
 #[cfg(target_os = "none")]
@@ -3098,7 +3215,7 @@ fn linux_fstat(arguments: [u64; 6]) -> isize {
         Ok(stat) => stat,
         Err(error) => return map_linux_descriptor_error(error),
     };
-    write_linux_descriptor_stat(arguments[1], stat)
+    write_linux_descriptor_stat(arguments[1], stat, 1)
 }
 
 #[cfg(target_os = "none")]
@@ -3180,7 +3297,12 @@ fn copy_linux_path(
 }
 
 #[cfg(target_os = "none")]
-fn write_linux_stat(destination: u64, stat: crate::akashic_vfs::Stat, inode: u64) -> isize {
+fn write_linux_stat(
+    destination: u64,
+    stat: crate::akashic_vfs::Stat,
+    inode: u64,
+    device: u64,
+) -> isize {
     let mode = match stat.kind {
         crate::akashic_vfs::NodeKind::File => 0o100_644,
         crate::akashic_vfs::NodeKind::Directory => 0o040_755,
@@ -3194,6 +3316,7 @@ fn write_linux_stat(destination: u64, stat: crate::akashic_vfs::Stat, inode: u64
             modified_ticks: stat.modified_ticks,
             inode,
         },
+        device,
     )
 }
 
@@ -3201,6 +3324,7 @@ fn write_linux_stat(destination: u64, stat: crate::akashic_vfs::Stat, inode: u64
 fn write_linux_descriptor_stat(
     destination: u64,
     metadata: crate::linux_fd::DescriptorMetadata,
+    device: u64,
 ) -> isize {
     let links = if metadata.mode & 0o170_000 == 0o040_000 {
         2
@@ -3211,7 +3335,7 @@ fn write_linux_descriptor_stat(
     let nanoseconds = (metadata.modified_ticks % 1_000_000_000) as i64;
     let size = core::cmp::min(metadata.size_bytes, i64::MAX as u64) as i64;
     let encoded = LinuxStat {
-        st_dev: 1,
+        st_dev: device,
         st_ino: metadata.inode.max(1),
         st_nlink: links,
         st_mode: metadata.mode,
@@ -5206,8 +5330,9 @@ mod tests {
     #[test]
     fn linux_directory_admission_is_exact_and_bounded() {
         assert!(admitted_linux_directory_mode(0o755));
-        assert!(!admitted_linux_directory_mode(0));
-        assert!(!admitted_linux_directory_mode(0o700));
+        assert!(admitted_linux_directory_mode(0));
+        assert!(admitted_linux_directory_mode(0o700));
+        assert!(admitted_linux_directory_mode(0o777));
         assert!(!admitted_linux_directory_mode(0o1755));
         assert!(admitted_linux_directory_base(true, None));
         assert!(admitted_linux_directory_base(true, Some(42)));

@@ -212,6 +212,11 @@ pub fn stat(path: &[u8]) -> Result<Stat, FileError> {
     akashic_vfs::stat(path).map_err(FileError::from)
 }
 
+pub fn readdir(owner: ProcessHandle, fd: u32) -> Result<Option<akashic_vfs::Dirent>, FileError> {
+    let slot = slot_for(owner, fd)?;
+    akashic_vfs::readdir(owner, slot.capability).map_err(FileError::from)
+}
+
 pub fn unlink(path: &[u8]) -> Result<(), FileError> {
     akashic_vfs::unlink(path).map_err(FileError::from)
 }
