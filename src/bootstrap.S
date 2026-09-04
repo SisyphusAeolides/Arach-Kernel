@@ -38,16 +38,24 @@ multiboot_header_end:
 
 // GRUB enters here after it has loaded the measured Arach image, built
 // the bounded Multiboot2-shaped handoff record, and exited UEFI boot services.
-// Unlike `_start`, firmware is already in 64-bit mode; this entry creates the
-// same initial page-table topology before joining the common higher-half path.
+// Its Multiboot2 EFI64 handoff keeps the information pointer in RBX and leaves
+// the firmware stack in RSP. Unlike `_start`, firmware is already in 64-bit
+// mode; this entry creates the same initial page-table topology before joining
+// the common higher-half path.
 .code64
 .global arach_entry
 .type arach_entry, @function
 arach_entry:
     cli
     cld
-    movq %rdi, %rbx
-    movq %rsi, %r12
+    // Multiboot2 EFI64 places the information structure in RBX. Preserve that
+    // physical address for arach_high_half_start, which creates its direct-map
+    // alias before calling the Rust entry point.
+    movq %rbx, %rdi
+    // GRUB intentionally leaves the EFI stack in RSP. Switch to the same
+    // kernel-owned bootstrap stack used by the BIOS path once the higher-half
+    // direct map is active; its physical address is below the link base.
+    movabsq $(stack_top - KERNEL_VIRTUAL_BASE), %r12
     lgdt gdt64_pointer
     movw $0x10, %ax
     movw %ax, %ds
