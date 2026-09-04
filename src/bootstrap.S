@@ -11,6 +11,17 @@ multiboot_header:
     .long 1024
     .long 768
     .long 32
+    // UEFI keeps boot services available while transferring control. The
+    // EFI64 entry tag below selects the 64-bit handoff instead of the legacy
+    // 32-bit `_start` ELF entry used by BIOS GRUB.
+    .short 7
+    .short 0
+    .long 8
+    .short 9
+    .short 0
+    .long 12
+    .long arach_entry
+    .long 0
     // Multiboot2 header tags are 8-byte aligned. The framebuffer payload is
     // 20 bytes, so its slot includes one 4-byte padding word before the end
     // tag.
