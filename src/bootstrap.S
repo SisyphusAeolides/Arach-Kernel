@@ -13,12 +13,10 @@ multiboot_header:
     .long 32
     // The framebuffer tag is 20 bytes long; align the next tag to 8 bytes.
     .long 0
-    // UEFI keeps boot services available while transferring control. The
-    // EFI64 entry tag below selects the 64-bit handoff instead of the legacy
-    // 32-bit `_start` ELF entry used by BIOS GRUB.
-    .short 7
-    .short 0
-    .long 8
+    // The EFI64 entry tag below selects the 64-bit handoff instead of the
+    // legacy 32-bit `_start` ELF entry used by BIOS GRUB. Do not request the
+    // EFI boot-services tag here: Arach needs GRUB to call ExitBootServices
+    // and include the final memory map in the Multiboot2 handoff.
     .short 9
     .short 0
     .long 12
