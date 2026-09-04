@@ -1266,10 +1266,10 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         self.linux_mmap_shared(&process, identity, hint, length, offset, permissions)
     }
 
-    /// Changes one complete runtime mapping while preserving W^X. Partial
-    /// ranges are rejected until VMA split/merge bookkeeping is admitted.
-    /// Every leaf is preflighted before mutation, and a failed write restores
-    /// all leaves already changed before the mapping record can be updated.
+    /// Changes a page-aligned range while preserving W^X. A partial static
+    /// mapping is split into prefix, protected range, and suffix records.
+    /// Every leaf and required ledger slot is preflighted before mutation, and
+    /// a failed write restores all leaves already changed.
     pub fn linux_mprotect(
         &mut self,
         process: &ProcessImageHandle,
@@ -1281,7 +1281,7 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         if self.active_slot.is_some()
             || virtual_address & (PAGE_SIZE as u64 - 1) != 0
             || length == 0
-            || !permissions.readable
+            || !permissions.readable && (permissions.writable || permissions.executable)
             || permissions.writable && permissions.executable
         {
             return Err(FrameBackedError::InvalidRange);
@@ -1290,20 +1290,60 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             .checked_add(PAGE_SIZE - 1)
             .map(|value| value & !(PAGE_SIZE - 1))
             .ok_or(FrameBackedError::InvalidRange)?;
+        let requested_end = virtual_address
+            .checked_add(length as u64)
+            .ok_or(FrameBackedError::InvalidRange)?;
         let mapping_index = self.slots[slot_index]
             .mappings
             .iter()
             .position(|mapping| {
                 mapping.occupied
                     && mapping.sealed
-                    && mapping.releasable
                     && !mapping.heap
                     && mapping.generation == self.slots[slot_index].generation
-                    && mapping.virtual_address == virtual_address
-                    && mapping.memory_size == length
+                    && virtual_address >= mapping.virtual_address
+                    && mapping
+                        .virtual_address
+                        .checked_add(mapping.memory_size as u64)
+                        .is_some_and(|end| requested_end <= end)
             })
             .ok_or(FrameBackedError::InvalidRange)?;
         let mapping = self.slots[slot_index].mappings[mapping_index];
+        let page_offset =
+            usize::try_from((virtual_address - mapping.virtual_address) / PAGE_SIZE as u64)
+                .map_err(|_| FrameBackedError::InvalidRange)?;
+        let page_count = length / PAGE_SIZE;
+        if page_count == 0
+            || page_offset
+                .checked_add(page_count)
+                .is_none_or(|end| end > usize::from(mapping.page_count))
+            || (mapping.releasable
+                && (page_offset != 0 || page_count != usize::from(mapping.page_count)))
+        {
+            return Err(FrameBackedError::InvalidRange);
+        }
+        let mut protected = mapping;
+        protected.virtual_address = virtual_address;
+        protected.memory_size = length;
+        protected.first_page = u16::try_from(usize::from(mapping.first_page) + page_offset)
+            .map_err(|_| FrameBackedError::CapacityExceeded)?;
+        protected.page_count =
+            u16::try_from(page_count).map_err(|_| FrameBackedError::CapacityExceeded)?;
+
+        let prefix_pages = page_offset;
+        let suffix_pages = usize::from(mapping.page_count) - page_offset - page_count;
+        let pieces_needed = usize::from(prefix_pages != 0) + usize::from(suffix_pages != 0);
+        let mut piece_slots = [usize::MAX; 2];
+        let mut found = 0;
+        for (index, candidate) in self.slots[slot_index].mappings.iter().enumerate() {
+            if index != mapping_index && !candidate.occupied && found < pieces_needed {
+                piece_slots[found] = index;
+                found += 1;
+            }
+        }
+        if found != pieces_needed {
+            return Err(FrameBackedError::CapacityExceeded);
+        }
         if usize::from(mapping.page_count)
             .checked_mul(PAGE_SIZE)
             .is_none_or(|mapped_bytes| mapped_bytes != mapping.memory_size)
@@ -1313,8 +1353,8 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
         {
             return Err(FrameBackedError::CorruptHierarchy);
         }
-        for page in 0..usize::from(mapping.page_count) {
-            let (_, _, entry) = self.checked_mapping_leaf(slot_index, mapping, page)?;
+        for page in 0..page_count {
+            let (_, _, entry) = self.checked_mapping_leaf(slot_index, protected, page)?;
             if normalized_user_mapping_entry(entry)
                 != user_mapping_entry(
                     self.frame_for_mapping_page(slot_index, mapping, page)?,
@@ -1328,12 +1368,12 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
             return Ok(());
         }
 
-        for page in 0..usize::from(mapping.page_count) {
-            let (table, index, entry) = self.checked_mapping_leaf(slot_index, mapping, page)?;
+        for page in 0..page_count {
+            let (table, index, entry) = self.checked_mapping_leaf(slot_index, protected, page)?;
             let updated = replace_user_mapping_permissions(entry, permissions);
             if let Err(error) = self.memory.write_entry(table, index, updated) {
                 let original = FrameBackedError::Memory(error);
-                self.rollback_mapping_permissions(slot_index, mapping, page)?;
+                self.rollback_mapping_permissions(slot_index, protected, page)?;
                 return Err(original);
             }
             match self.memory.read_entry(table, index) {
@@ -1341,17 +1381,38 @@ impl<Memory: ProcessFrameMemory> FrameBackedAddressSpace<Memory> {
                     if normalized_user_mapping_entry(observed)
                         == normalized_user_mapping_entry(updated) => {}
                 Ok(_) => {
-                    self.rollback_mapping_permissions(slot_index, mapping, page + 1)?;
+                    self.rollback_mapping_permissions(slot_index, protected, page + 1)?;
                     return Err(FrameBackedError::CorruptHierarchy);
                 }
                 Err(error) => {
                     let original = FrameBackedError::Memory(error);
-                    self.rollback_mapping_permissions(slot_index, mapping, page + 1)?;
+                    self.rollback_mapping_permissions(slot_index, protected, page + 1)?;
                     return Err(original);
                 }
             }
         }
-        self.slots[slot_index].mappings[mapping_index].permissions = permissions;
+        protected.permissions = permissions;
+        self.slots[slot_index].mappings[mapping_index] = protected;
+        let mut next_piece = 0;
+        if prefix_pages != 0 {
+            let mut prefix = mapping;
+            prefix.memory_size = prefix_pages * PAGE_SIZE;
+            prefix.page_count = prefix_pages as u16;
+            self.slots[slot_index].mappings[piece_slots[next_piece]] = prefix;
+            next_piece += 1;
+        }
+        if suffix_pages != 0 {
+            let mut suffix = mapping;
+            suffix.virtual_address = requested_end;
+            suffix.memory_size = suffix_pages * PAGE_SIZE;
+            suffix.first_page = (usize::from(protected.first_page) + page_count) as u16;
+            suffix.page_count = suffix_pages as u16;
+            self.slots[slot_index].mappings[piece_slots[next_piece]] = suffix;
+        }
+        for slot in piece_slots.into_iter().take(pieces_needed) {
+            self.slots[slot_index].mapping_count =
+                self.slots[slot_index].mapping_count.max(slot + 1);
+        }
         Ok(())
     }
 
@@ -2840,8 +2901,12 @@ pub enum FrameBackedError<MemoryError> {
 
 const fn user_mapping_entry(frame: PhysicalAddress, permissions: MappingPermissions) -> u64 {
     frame.as_u64()
-        | ENTRY_PRESENT
         | ENTRY_USER
+        | if permissions.readable {
+            ENTRY_PRESENT
+        } else {
+            0
+        }
         | if permissions.writable {
             ENTRY_WRITABLE
         } else {
@@ -2855,7 +2920,12 @@ const fn user_mapping_entry(frame: PhysicalAddress, permissions: MappingPermissi
 }
 
 const fn replace_user_mapping_permissions(entry: u64, permissions: MappingPermissions) -> u64 {
-    (entry & !(ENTRY_WRITABLE | ENTRY_NO_EXECUTE))
+    (entry & !(ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_NO_EXECUTE))
+        | if permissions.readable {
+            ENTRY_PRESENT
+        } else {
+            0
+        }
         | if permissions.writable {
             ENTRY_WRITABLE
         } else {

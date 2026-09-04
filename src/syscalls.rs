@@ -1381,6 +1381,7 @@ fn dispatch_linux_syscall(number: usize, arguments: [u64; 6]) -> isize {
         // local sockets, and shared memory files.
         Some(crate::process::abi::LinuxSyscall::Read) => linux_read(arguments),
         Some(crate::process::abi::LinuxSyscall::Write) => linux_write(arguments),
+        Some(crate::process::abi::LinuxSyscall::Writev) => linux_writev(arguments),
         Some(crate::process::abi::LinuxSyscall::Open) => linux_open(arguments),
         Some(crate::process::abi::LinuxSyscall::Close) => linux_close(arguments),
         Some(crate::process::abi::LinuxSyscall::Stat) => linux_stat(arguments),
@@ -2010,6 +2011,46 @@ fn linux_write(arguments: [u64; 6]) -> isize {
         Ok(crate::linux_fd::WriteResult::Console) => write_console_bytes(&staging[..length]),
         Err(error) => map_linux_descriptor_error(error),
     }
+}
+
+#[cfg(target_os = "none")]
+fn linux_writev(arguments: [u64; 6]) -> isize {
+    let Ok(count) = usize::try_from(arguments[2]) else {
+        return ERROR_INVALID_ARGUMENT;
+    };
+    if count > MAXIMUM_LINUX_IOVECTORS {
+        return ERROR_INVALID_ARGUMENT;
+    }
+    let mut written = 0_usize;
+    for index in 0..count {
+        let (base, length) = match read_linux_iovec(arguments[1], index) {
+            Ok(iovec) => iovec,
+            Err(error) => {
+                return if written == 0 {
+                    error
+                } else {
+                    written as isize
+                };
+            }
+        };
+        let result = linux_write([arguments[0], base, length as u64, 0, 0, 0]);
+        if result < 0 {
+            return if written == 0 {
+                result
+            } else {
+                written as isize
+            };
+        }
+        let result = result as usize;
+        written = match written.checked_add(result) {
+            Some(total) if total <= isize::MAX as usize => total,
+            _ => return ERROR_INVALID_ARGUMENT,
+        };
+        if result != length {
+            break;
+        }
+    }
+    written as isize
 }
 
 #[cfg(target_os = "none")]
@@ -3545,13 +3586,13 @@ const fn linux_mapping_permissions(
     const PROT_WRITE: u64 = 0x2;
     const PROT_EXEC: u64 = 0x4;
     if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0
-        || prot & PROT_READ == 0
+        || prot & PROT_READ == 0 && prot != 0
         || prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0
     {
         return None;
     }
     Some(crate::process::install::MappingPermissions {
-        readable: true,
+        readable: prot & PROT_READ != 0,
         writable: prot & PROT_WRITE != 0,
         executable: prot & PROT_EXEC != 0,
     })

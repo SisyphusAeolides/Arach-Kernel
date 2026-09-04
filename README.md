@@ -10,9 +10,9 @@
 Arach Kernel is the Rust-first monolithic kernel at the foundation of
 [ArachOS](https://github.com/SisyphusAeolides/ArachOS). It targets x86-64
 systems with a measured Linux-compatible userspace contract. Its production
-target is ArachOS: independent RPM/DNF userspace, GRUB, RustD as PID 1, and
-RustD-resolved as the native resolver. Desktop environments remain Anaconda
-software choices rather than kernel-bound components.
+target is ArachOS: an Arch Linux package base composed with ArchISO, GRUB,
+RustD as PID 1, and RustD-resolved as the native resolver. Desktop environments
+remain Calamares installation choices rather than kernel-bound components.
 
 Monolithic describes the kernel architecture: scheduling, memory, interrupts,
 devices, filesystems, and networking may execute in the kernel address space.
@@ -22,7 +22,7 @@ applications into ring 0.
 ## Design goals
 
 - Boot ArachOS directly through GRUB's Multiboot2 path.
-- Run the ArachOS RPM/DNF userspace with RustD as PID 1 and RustD-resolved as the
+- Run the ArachOS pacman userspace with RustD as PID 1 and RustD-resolved as the
   resolver, without a kernel-selected desktop environment.
 - Provide a measured Linux compatibility contract without silently claiming
   support that has not passed a gate.
@@ -41,7 +41,7 @@ ArachOS pins the exact qualified source revision.
 
 The ArachOS/GRUB path is not yet release-qualified. Persistent block-backed root
 storage, the complete RustD Linux ABI, cgroup v2, `/proc`, `/sys`, udev, D-Bus,
-RustD-resolved, networking, and graphical Anaconda must all pass in BIOS and
+RustD-resolved, networking, and graphical Calamares must all pass in BIOS and
 UEFI QEMU before Arach Kernel can be the only installed boot path. Retired
 legacy boot repositories are not part of the ArachOS architecture.
 
@@ -145,7 +145,7 @@ restart remain future compatibility slices.
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
 | Formal specifications | Idris 2 total specifications and Agda safe proof models compile in CI | Keep each proof artifact bound to a generated table, manifest, or runtime boundary |
-| ArachOS graphical stack | The independent RPM/DNF userspace and desktop selection belong to Anaconda | Qualify graphical Anaconda, the selected display manager, Wayland, login, suspend/resume, logout, and shutdown |
+| ArachOS graphical stack | The pacman userspace and desktop selection belong to Calamares | Qualify graphical Calamares, the selected display manager, Wayland, login, suspend/resume, logout, and shutdown |
 
 The current critical path is:
 
@@ -156,7 +156,7 @@ The current critical path is:
 3. Add scheduler-backed descriptor waits, filesystem socket nodes, and
    persistent block-backed storage on the unified open-object boundary.
 4. Boot the ArachOS package graph under RustD/RustD-resolved and qualify graphical
-   Anaconda plus user-selected desktop environments.
+   Calamares plus user-selected desktop environments.
 
 Every status statement is evidence-based. A source build or host unit test is
 useful progress, but it is not counted as runtime, desktop, persistence, or
@@ -227,12 +227,12 @@ artifacts before constructing GRUB media.
 ## ArachOS userspace target
 
 ArachOS owns the release, package repository, and installer composition. The
-generic RPM/DNF package ABI is used as a bootstrap package ecosystem, while RustD
-owns PID 1 and service management, RustD-resolved owns DNS, NSS, Varlink, and
+Arch Linux packages provide the bootstrap package ecosystem, while RustD owns
+PID 1 and service management, RustD-resolved owns DNS, NSS, Varlink, and
 the resolver compatibility boundary, and GRUB owns the BIOS and UEFI boot path.
 
 No desktop environment is compiled into or selected by Arach Kernel. ArachOS
-uses graphical Anaconda Software Selection, and each selected display-manager,
+uses graphical Calamares package selection, and each selected display-manager,
 Wayland, audio, portal, login, and suspend path must pass installed-system
 qualification on the same kernel and package set.
 

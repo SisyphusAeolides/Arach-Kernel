@@ -26,6 +26,7 @@ impl ExecutionAbi {
 pub enum LinuxSyscall {
     Read,
     Write,
+    Writev,
     Open,
     Close,
     Stat,
@@ -121,6 +122,7 @@ impl LinuxSyscall {
         match number {
             0 => Some(Self::Read),
             1 => Some(Self::Write),
+            20 => Some(Self::Writev),
             2 => Some(Self::Open),
             3 => Some(Self::Close),
             4 => Some(Self::Stat),
