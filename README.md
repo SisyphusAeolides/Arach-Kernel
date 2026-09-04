@@ -54,17 +54,23 @@ The Linux personality currently covers:
   memfd-backed `MAP_SHARED`, whole-range W^X `mprotect`/`munmap`, and `brk`;
 - one dense, generation-bound descriptor namespace for standard streams,
   regular files, eventfds, timerfds, epoll objects, anonymous pipes, and Unix
-  stream sockets, with
+  stream and datagram sockets, with
   open-object `dup`/`dup2`/`dup3`, bounded `fcntl`, descriptor-local
   close-on-exec, and poll/epoll readiness;
 - bounded `AF_UNIX` `SOCK_STREAM` and `socketpair` endpoints with pathname and
   abstract namespaces, connect/accept queues, full-duplex transfer,
   `sendmsg`/`recvmsg` vectors, bounded `SCM_RIGHTS`, peer identity, half-close,
   and generation-safe cross-process open-description lifetime;
+- bounded `AF_UNIX` `SOCK_DGRAM` endpoints with pathname binding, non-blocking
+  queues, `sendto`/`recvfrom`, `sendmsg`/`recvmsg`, `SO_PASSCRED`, and
+  generation-safe descriptor lifetime;
 - generation-bound `memfd_create`/`ftruncate` objects with shared physical
   frame aliases and VMA lifetime independent of the final descriptor;
 - bounded Akashic VFS-backed `open`, `openat`, `read`, `write`, `close`,
-  `stat`, `fstat`, `lseek`, `mkdir`, `mkdirat`, and `unlinkat` paths;
+  `stat`, `fstat`, `lseek`, `mkdir`, `mkdirat`, `unlinkat`, `access`,
+  `readlink`, and mode-change paths;
+- generation-bound `signalfd`/`signalfd4` descriptors that consume selected
+  pending standard signals as fixed-size Linux records;
 - generation-bound `set_tid_address`, with best-effort zeroing of the exact
   exiting PID generation's registered `clear_child_tid` word before zombie
   publication and descriptor cleanup;
@@ -124,11 +130,12 @@ block-backed filesystem. Anonymous pipes use a 4 KiB allocation-free ring,
 provide atomic bounded writes, EOF/HUP/EPIPE endpoint lifetime, and
 generation-stable epoll watch lifetime and last-close removal. Unix stream
 sockets use fixed 4 KiB queues and bounded endpoint, connection, and listen
-tables. Ancillary queues retain at most eight messages of eight transferable
+tables; datagram sockets use bounded message queues and explicit credential
+messages. Ancillary queues retain at most eight messages of eight transferable
 descriptors per direction. Operations that would block still return `EAGAIN`;
-scheduler-backed descriptor waits, `SIGPIPE`, explicit credential messages,
-cyclic socket/epoll transfer, filesystem socket inodes, datagram/seqpacket
-sockets, and persistent storage remain open gates.
+scheduler-backed descriptor waits, `SIGPIPE`, cyclic socket/epoll transfer,
+filesystem socket inodes, seqpacket sockets, and persistent storage remain open
+gates.
 The bounded clone admission
 accepts the shared VM/FS/files/sighand/thread/sysvsem profile plus TLS and TID
 publication flags; fork-like clone modes and individual leader `exit` with
@@ -140,7 +147,7 @@ restart remain future compatibility slices.
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the custom Multiboot2 image contract is warning-free with measured runtime inputs | Boot the complete ArachOS graph in BIOS and UEFI while extending the measured Linux surface without weakening its gates |
-| Linux userspace compatibility | Identity, anonymous and eager private file mappings, bounded memfd-backed shared mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll and Unix stream sockets with `SCM_RIGHTS`, bounded VFS file and directory calls, transactional static and measured `PT_INTERP` execution, an eight-object dependency engine measured with a deduplicated four-object diamond and canonical finite `DT_RUNPATH`, explicit and packed relative relocation, exact-size main-executable copy relocation and interposition, provider-first static/general-dynamic startup-TLS relocation, exact GNU symbol versions, deterministic eager external PLT binding with bounded weak-function semantics, dependency-first initialization, and reverse finalization, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed descriptor waits and filesystem socket nodes; add late-loaded TLS, TLSDESC, general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and broader relocations; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
+| Linux userspace compatibility | Identity, anonymous and eager private file mappings, bounded memfd-backed shared mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll, Unix stream and datagram sockets with `SCM_RIGHTS`/`SO_PASSCRED`, signalfd, bounded VFS file, directory, metadata, and mode-change calls, transactional static and measured `PT_INTERP` execution, an eight-object dependency engine measured with a deduplicated four-object diamond and canonical finite `DT_RUNPATH`, explicit and packed relative relocation, exact-size main-executable copy relocation and interposition, provider-first static/general-dynamic startup-TLS relocation, exact GNU symbol versions, deterministic eager external PLT binding with bounded weak-function semantics, dependency-first initialization, and reverse finalization, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed descriptor waits and filesystem socket nodes; add late-loaded TLS, TLSDESC, general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and broader relocations; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
 | System bootstrap | GRUB Multiboot2 entry exists and the source accepts measured RustD as Linux-ABI PID 1 | Boot the packaged ArachOS root under RustD and pass the complete service graph in BIOS and UEFI |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -187,6 +194,8 @@ src/linux_file.rs       regular-file backend for unified descriptors
 src/linux_memfd.rs      bounded memory-file metadata and shared-backing identity
 src/linux_pipe.rs       bounded anonymous-pipe backend
 src/linux_socket.rs     bounded Unix-domain stream-socket backend
+src/linux_unix_dgram.rs bounded Unix-domain datagram backend
+src/linux_signalfd.rs   generation-bound signalfd backend
 src/linux_thread.rs     generation-bound thread-exit identity
 core/                   bounded kernel primitives
 libraries/driver-abi/   stable foreign-driver boundary
