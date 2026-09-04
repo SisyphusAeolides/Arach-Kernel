@@ -829,14 +829,23 @@ unsafe extern "C" fn irq_test_handler(context: *mut c_void) {
 }
 
 fn map_acpi_region(physical_address: u64, length: usize) -> Option<*const u8> {
-    if length == 0
-        || physical_address
-            .checked_add(length as u64)
-            .is_none_or(|end| end > EARLY_MAPPED_PHYSICAL_LIMIT)
-    {
+    if length == 0 || physical_address.checked_add(length as u64).is_none() {
         return None;
     }
-    direct_map_address(physical_address).map(|address| address as *const u8)
+    if physical_address
+        .checked_add(length as u64)
+        .is_some_and(|end| end <= EARLY_MAPPED_PHYSICAL_LIMIT)
+    {
+        return direct_map_address(physical_address).map(|address| address as *const u8);
+    }
+
+    // Firmware commonly places ACPI tables near the top of guest RAM. Keep
+    // those read-only mappings in the dedicated uncached window instead of
+    // expanding the early identity map across device apertures.
+    kernel_mmio()
+        .map(physical_address, length, 0)
+        .ok()
+        .map(|mapping| mapping.pointer.as_ptr().cast_const())
 }
 
 /// Binds the e1000 to exactly the fixed DMA memory retained in Arach's
@@ -1579,8 +1588,8 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
             halt();
         }
     };
-    // SAFETY: Bootstrap paging keeps the first GiB stable in the direct map,
-    // and the mapper rejects every ACPI range outside that mapped window.
+    // SAFETY: Low ACPI ranges use the stable direct map. Higher firmware
+    // ranges are retained in the kernel's bounded uncached mapping window.
     let madt = match unsafe { discover_madt(rsdp, map_acpi_region) } {
         Ok(madt) => madt,
         Err(error) => {
