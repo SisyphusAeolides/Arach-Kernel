@@ -12,8 +12,11 @@ if command -v chezscheme >/dev/null 2>&1; then
     scheme="chezscheme"
 elif command -v scheme >/dev/null 2>&1; then
     scheme="scheme"
+elif command -v chez >/dev/null 2>&1; then
+    # Arch's chez-scheme package installs the executable as `chez`.
+    scheme="chez"
 else
-    printf '%s\n' 'Idris bootstrap requires Chez Scheme (chezscheme or scheme).' >&2
+    printf '%s\n' 'Idris bootstrap requires Chez Scheme (chezscheme, scheme, or chez).' >&2
     exit 1
 fi
 
