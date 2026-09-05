@@ -1,4 +1,5 @@
-//! Bounded Linux regular-file open objects backed by Akashic VFS.
+//! Bounded Linux regular-file open objects backed by Akashic VFS or the
+//! admitted persistent root.
 //!
 //! `linux_fd` assigns the public descriptor number. This module's private
 //! backend handle remains separate from the Akashic capability token and bound
@@ -80,6 +81,13 @@ struct FileSlot {
     owner: ProcessHandle,
     capability: u64,
     linux_flags: u32,
+    persistent: bool,
+    persistent_inode: u32,
+    persistent_size_bytes: u64,
+    persistent_offset: u64,
+    persistent_kind: Ext4NodeKind,
+    persistent_path: [u8; akashic_vfs::MAXIMUM_PATH_BYTES],
+    persistent_path_len: u16,
 }
 
 impl FileSlot {
@@ -90,15 +98,34 @@ impl FileSlot {
         },
         capability: 0,
         linux_flags: 0,
+        persistent: false,
+        persistent_inode: 0,
+        persistent_size_bytes: 0,
+        persistent_offset: 0,
+        persistent_kind: Ext4NodeKind::Other,
+        persistent_path: [0; akashic_vfs::MAXIMUM_PATH_BYTES],
+        persistent_path_len: 0,
     };
 
     const fn occupied(self) -> bool {
-        self.owner.pid != 0 && self.owner.generation != 0 && self.capability != 0
+        self.owner.pid != 0
+            && self.owner.generation != 0
+            && (self.persistent || self.capability != 0)
     }
 }
 
 static FILES: SpinLock<[FileSlot; MAXIMUM_FILE_DESCRIPTORS]> =
     SpinLock::new([FileSlot::EMPTY; MAXIMUM_FILE_DESCRIPTORS]);
+static NEXT_PERSISTENT_CAPABILITY: SpinLock<u64> = SpinLock::new(0);
+
+fn next_persistent_capability() -> u64 {
+    let mut next = NEXT_PERSISTENT_CAPABILITY.lock();
+    *next = next.wrapping_add(1);
+    if *next == 0 {
+        *next = 1;
+    }
+    *next
+}
 
 const fn index_for_fd(fd: u32) -> Option<usize> {
     if fd < FILE_DESCRIPTOR_BASE {
@@ -188,66 +215,21 @@ fn ensure_persistent_parents(path: &[u8], now: u64) -> Result<(), FileError> {
     Ok(())
 }
 
-/// Copy one small persistent-root file into the bounded VFS namespace.  This
-/// bridge is intentionally capped: larger executables must use the future
-/// direct block-backed file backend rather than being truncated or accepted
-/// as complete.
+/// Copy one persistent-root directory into the bounded VFS namespace. Regular
+/// files use the direct block-backed descriptor below so they are never
+/// truncated to the ephemeral VFS file limit.
 fn materialize_persistent_path(
-    owner: ProcessHandle,
     path: &[u8],
     metadata: storage::Ext4Metadata,
     now: u64,
 ) -> Result<(), FileError> {
+    if metadata.kind != Ext4NodeKind::Directory {
+        return Err(FileError::Vfs(VfsError::NotDirectory));
+    }
     ensure_persistent_parents(path, now)?;
-    if metadata.kind == Ext4NodeKind::Directory {
-        return match akashic_vfs::mkdir(path, now) {
-            Ok(()) | Err(VfsError::AlreadyExists) => Ok(()),
-            Err(error) => Err(FileError::Vfs(error)),
-        };
-    }
-    if metadata.kind != Ext4NodeKind::File
-        || metadata.size_bytes > akashic_vfs::MAXIMUM_FILE_BYTES as u64
-    {
-        return Err(FileError::Vfs(VfsError::FileTooLarge));
-    }
-    let seed_flags = akashic_vfs::flags::READ_INTENT
-        | akashic_vfs::flags::WRITE_INTENT
-        | akashic_vfs::flags::CREATE_INTENT
-        | akashic_vfs::flags::EXCLUSIVE;
-    let token = akashic_vfs::open(owner, path, seed_flags, now)?;
-    let mut result = Ok(());
-    let mut offset = 0_u64;
-    let mut chunk = [0_u8; 4096];
-    while offset < metadata.size_bytes {
-        let requested = core::cmp::min(chunk.len() as u64, metadata.size_bytes - offset) as usize;
-        match storage::persistent_root_read(path, offset, &mut chunk[..requested]) {
-            Ok(0) => {
-                result = Err(FileError::Vfs(VfsError::Unsupported));
-                break;
-            }
-            Ok(bytes) => match akashic_vfs::write(owner, token, &chunk[..bytes], now) {
-                Ok(written) if written == bytes => offset += bytes as u64,
-                Ok(_) => {
-                    result = Err(FileError::Vfs(VfsError::Unsupported));
-                    break;
-                }
-                Err(error) => {
-                    result = Err(FileError::Vfs(error));
-                    break;
-                }
-            },
-            Err(error) => {
-                result = Err(persistent_error(error));
-                break;
-            }
-        }
-    }
-    let close_result = akashic_vfs::close(owner, token);
-    if result.is_ok() {
-        close_result.map_err(FileError::from)
-    } else {
-        let _ = close_result;
-        result
+    match akashic_vfs::mkdir(path, now) {
+        Ok(()) | Err(VfsError::AlreadyExists) => Ok(()),
+        Err(error) => Err(FileError::Vfs(error)),
     }
 }
 
@@ -265,6 +247,7 @@ pub fn open(owner: ProcessHandle, path: &[u8], flags: u32, now: u64) -> Result<u
         return Err(FileError::Capacity);
     };
 
+    let mut persistent_metadata = None;
     let capability = match akashic_vfs::open(owner, path, mapped, now) {
         Ok(capability) => capability,
         Err(VfsError::NotFound) => {
@@ -277,8 +260,28 @@ pub fn open(owner: ProcessHandle, path: &[u8], flags: u32, now: u64) -> Result<u
                 if flags & O_EXCL != 0 {
                     return Err(FileError::Vfs(VfsError::AlreadyExists));
                 }
-                materialize_persistent_path(owner, path, metadata, now)?;
-                akashic_vfs::open(owner, path, mapped, now)?
+                if path.len() > akashic_vfs::MAXIMUM_PATH_BYTES {
+                    return Err(FileError::Vfs(VfsError::InvalidPath));
+                }
+                match metadata.kind {
+                    Ext4NodeKind::Directory => {
+                        // Directories remain represented by the VFS so
+                        // existing readdir and parent semantics stay
+                        // unchanged while the persistent reader grows.
+                        materialize_persistent_path(path, metadata, now)?;
+                        akashic_vfs::open(owner, path, mapped, now)?
+                    }
+                    Ext4NodeKind::File => {
+                        if require_directory {
+                            return Err(FileError::Vfs(VfsError::NotDirectory));
+                        }
+                        persistent_metadata = Some(metadata);
+                        0
+                    }
+                    Ext4NodeKind::Symlink | Ext4NodeKind::Other => {
+                        return Err(FileError::Vfs(VfsError::NotFile));
+                    }
+                }
             } else {
                 let Some(contents) = crate::linux_mount::default_file_contents(path) else {
                     return Err(FileError::Vfs(VfsError::NotFound));
@@ -302,7 +305,7 @@ pub fn open(owner: ProcessHandle, path: &[u8], flags: u32, now: u64) -> Result<u
         }
         Err(error) => return Err(FileError::Vfs(error)),
     };
-    if require_directory {
+    if require_directory && persistent_metadata.is_none() {
         match akashic_vfs::stat_handle(owner, capability) {
             Ok(stat) if stat.kind == NodeKind::Directory => {}
             Ok(_) => {
@@ -316,10 +319,35 @@ pub fn open(owner: ProcessHandle, path: &[u8], flags: u32, now: u64) -> Result<u
         }
     }
 
+    let persistent_capability = persistent_metadata
+        .is_some()
+        .then(next_persistent_capability)
+        .unwrap_or(0);
     *slot = FileSlot {
         owner,
-        capability,
+        capability: if persistent_metadata.is_some() {
+            persistent_capability
+        } else {
+            capability
+        },
         linux_flags: flags,
+        persistent: persistent_metadata.is_some(),
+        persistent_inode: persistent_metadata.map_or(0, |metadata| metadata.inode),
+        persistent_size_bytes: persistent_metadata.map_or(0, |metadata| metadata.size_bytes),
+        persistent_offset: 0,
+        persistent_kind: persistent_metadata.map_or(Ext4NodeKind::Other, |metadata| metadata.kind),
+        persistent_path: {
+            let mut stored = [0_u8; akashic_vfs::MAXIMUM_PATH_BYTES];
+            if persistent_metadata.is_some() {
+                stored[..path.len()].copy_from_slice(path);
+            }
+            stored
+        },
+        persistent_path_len: if persistent_metadata.is_some() {
+            path.len() as u16
+        } else {
+            0
+        },
     };
     Ok(fd_for_index(index))
 }
@@ -330,6 +358,31 @@ pub fn is_open(owner: ProcessHandle, fd: u32) -> bool {
 
 pub fn read(owner: ProcessHandle, fd: u32, output: &mut [u8]) -> Result<usize, FileError> {
     let slot = slot_for(owner, fd)?;
+    if slot.persistent {
+        if slot.linux_flags & O_ACCMODE != O_RDONLY {
+            return Err(FileError::Vfs(VfsError::PermissionDenied));
+        }
+        let path = &slot.persistent_path[..usize::from(slot.persistent_path_len)];
+        let copied = storage::persistent_root_read(path, slot.persistent_offset, output)
+            .map_err(persistent_error)?;
+        let next_offset = slot
+            .persistent_offset
+            .checked_add(copied as u64)
+            .ok_or(FileError::Capacity)?;
+        if let Some(index) = index_for_fd(fd) {
+            let mut table = FILES.lock();
+            let current = table[index];
+            if current.occupied()
+                && current.owner == owner
+                && current.persistent
+                && current.capability == slot.capability
+                && current.persistent_inode == slot.persistent_inode
+            {
+                table[index].persistent_offset = next_offset;
+            }
+        }
+        return Ok(copied);
+    }
     akashic_vfs::read(owner, slot.capability, output).map_err(FileError::from)
 }
 
@@ -342,22 +395,80 @@ pub fn snapshot_range(
     output: &mut [u8],
 ) -> Result<FileRangeSnapshot, FileError> {
     let slot = slot_for(owner, fd)?;
+    if slot.persistent {
+        if slot.linux_flags & O_ACCMODE != O_RDONLY {
+            return Err(FileError::Vfs(VfsError::PermissionDenied));
+        }
+        let offset = u64::try_from(offset).map_err(|_| FileError::Capacity)?;
+        if offset > slot.persistent_size_bytes {
+            return Err(FileError::Vfs(VfsError::InvalidSeek));
+        }
+        let file_bytes =
+            usize::try_from(slot.persistent_size_bytes).map_err(|_| FileError::Capacity)?;
+        let path = &slot.persistent_path[..usize::from(slot.persistent_path_len)];
+        let bytes =
+            storage::persistent_root_read(path, offset, output).map_err(persistent_error)?;
+        return Ok(FileRangeSnapshot {
+            inode_id: slot.persistent_inode,
+            file_bytes,
+            bytes,
+        });
+    }
     akashic_vfs::read_handle_range_snapshot(owner, slot.capability, offset, output)
         .map_err(FileError::from)
 }
 
 pub fn write(owner: ProcessHandle, fd: u32, input: &[u8], now: u64) -> Result<usize, FileError> {
     let slot = slot_for(owner, fd)?;
+    if slot.persistent {
+        return Err(FileError::Vfs(VfsError::PermissionDenied));
+    }
     akashic_vfs::write(owner, slot.capability, input, now).map_err(FileError::from)
 }
 
 pub fn seek(owner: ProcessHandle, fd: u32, offset: i64, whence: u32) -> Result<u64, FileError> {
     let slot = slot_for(owner, fd)?;
+    if slot.persistent {
+        let base = match whence {
+            akashic_vfs::seek::FROM_START => 0_i128,
+            akashic_vfs::seek::FROM_CURRENT => i128::from(slot.persistent_offset),
+            akashic_vfs::seek::FROM_END => i128::from(slot.persistent_size_bytes),
+            _ => return Err(FileError::Vfs(VfsError::InvalidSeek)),
+        };
+        let next = base + i128::from(offset);
+        if next < 0 || next > i128::from(u64::MAX) {
+            return Err(FileError::Vfs(VfsError::InvalidSeek));
+        }
+        let next = next as u64;
+        let index = index_for_fd(fd).ok_or(FileError::BadFileDescriptor)?;
+        let mut table = FILES.lock();
+        let current = table[index];
+        if !current.occupied() || current.owner != owner || !current.persistent {
+            return Err(FileError::BadFileDescriptor);
+        }
+        table[index].persistent_offset = next;
+        return Ok(next);
+    }
     akashic_vfs::seek(owner, slot.capability, offset, whence).map_err(FileError::from)
 }
 
 pub fn fstat(owner: ProcessHandle, fd: u32) -> Result<Stat, FileError> {
     let slot = slot_for(owner, fd)?;
+    if slot.persistent {
+        return Ok(Stat {
+            size_bytes: slot.persistent_size_bytes,
+            created_ticks: 0,
+            modified_ticks: 0,
+            flags: 0,
+            kind: match slot.persistent_kind {
+                Ext4NodeKind::Directory => NodeKind::Directory,
+                Ext4NodeKind::File => NodeKind::File,
+                Ext4NodeKind::Symlink | Ext4NodeKind::Other => {
+                    return Err(FileError::Vfs(VfsError::NotFile));
+                }
+            },
+        });
+    }
     akashic_vfs::stat_handle(owner, slot.capability).map_err(FileError::from)
 }
 
@@ -365,6 +476,23 @@ pub fn stat(path: &[u8]) -> Result<Stat, FileError> {
     match akashic_vfs::stat(path) {
         Ok(stat) => Ok(stat),
         Err(VfsError::NotFound) => {
+            if persistent_path_candidate(path)
+                && let Ok(metadata) = storage::persistent_root_metadata(path)
+            {
+                return Ok(Stat {
+                    size_bytes: metadata.size_bytes,
+                    created_ticks: 0,
+                    modified_ticks: 0,
+                    flags: 0,
+                    kind: match metadata.kind {
+                        Ext4NodeKind::Directory => NodeKind::Directory,
+                        Ext4NodeKind::File => NodeKind::File,
+                        Ext4NodeKind::Symlink | Ext4NodeKind::Other => {
+                            return Err(FileError::Vfs(VfsError::NotFile));
+                        }
+                    },
+                });
+            }
             let Some(contents) = crate::linux_mount::default_file_contents(path) else {
                 return Err(FileError::Vfs(VfsError::NotFound));
             };
@@ -384,6 +512,9 @@ pub fn stat(path: &[u8]) -> Result<Stat, FileError> {
 
 pub fn readdir(owner: ProcessHandle, fd: u32) -> Result<Option<akashic_vfs::Dirent>, FileError> {
     let slot = slot_for(owner, fd)?;
+    if slot.persistent {
+        return Err(FileError::Vfs(VfsError::NotDirectory));
+    }
     akashic_vfs::readdir(owner, slot.capability).map_err(FileError::from)
 }
 
@@ -407,7 +538,9 @@ pub fn close(owner: ProcessHandle, fd: u32) -> Result<(), FileError> {
     if !slot.occupied() || slot.owner != owner {
         return Err(FileError::BadFileDescriptor);
     }
-    akashic_vfs::close(owner, slot.capability)?;
+    if !slot.persistent {
+        akashic_vfs::close(owner, slot.capability)?;
+    }
     table[index] = FileSlot::EMPTY;
     Ok(())
 }
@@ -420,7 +553,9 @@ pub fn close_all(owner: ProcessHandle) -> usize {
     let mut closed = 0;
     for slot in table.iter_mut() {
         if slot.occupied() && slot.owner == owner {
-            let _ = akashic_vfs::close(owner, slot.capability);
+            if !slot.persistent {
+                let _ = akashic_vfs::close(owner, slot.capability);
+            }
             *slot = FileSlot::EMPTY;
             closed += 1;
         }
@@ -436,7 +571,9 @@ pub fn close_on_exec(owner: ProcessHandle) -> usize {
     let mut closed = 0;
     for slot in table.iter_mut() {
         if slot.occupied() && slot.owner == owner && slot.linux_flags & O_CLOEXEC != 0 {
-            let _ = akashic_vfs::close(owner, slot.capability);
+            if !slot.persistent {
+                let _ = akashic_vfs::close(owner, slot.capability);
+            }
             *slot = FileSlot::EMPTY;
             closed += 1;
         }
