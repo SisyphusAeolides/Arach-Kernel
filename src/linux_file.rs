@@ -418,6 +418,38 @@ pub fn snapshot_range(
         .map_err(FileError::from)
 }
 
+/// Read a complete executable or interpreter image through the same path
+/// contract used by Linux descriptors.  The descriptor is deliberately
+/// short-lived so a failed image replacement cannot leak a capability slot.
+pub fn read_path_snapshot(
+    owner: ProcessHandle,
+    path: &[u8],
+    output: &mut [u8],
+) -> Result<FileRangeSnapshot, FileError> {
+    let fd = open(owner, path, O_RDONLY, 0)?;
+    let result = snapshot_range(owner, fd, 0, output);
+    let close_result = close(owner, fd);
+    match (result, close_result) {
+        (Ok(snapshot), Ok(())) => Ok(snapshot),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+/// Read an executable and its runtime linker without falling back to the
+/// bounded ephemeral VFS.  Both descriptors are closed before returning.
+pub fn read_path_pair_snapshot(
+    owner: ProcessHandle,
+    executable: &[u8],
+    runtime_linker: &[u8],
+    executable_output: &mut [u8],
+    linker_output: &mut [u8],
+) -> Result<(FileRangeSnapshot, FileRangeSnapshot), FileError> {
+    let executable_snapshot = read_path_snapshot(owner, executable, executable_output)?;
+    let linker_snapshot = read_path_snapshot(owner, runtime_linker, linker_output)?;
+    Ok((executable_snapshot, linker_snapshot))
+}
+
 pub fn write(owner: ProcessHandle, fd: u32, input: &[u8], now: u64) -> Result<usize, FileError> {
     let slot = slot_for(owner, fd)?;
     if slot.persistent {

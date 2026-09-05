@@ -407,23 +407,25 @@ static CREST_PRESENT_STAGING: SpinLock<[u8; MAXIMUM_CREST_PRESENT_BYTES]> =
 static AKASHIC_IO_STAGING: SpinLock<[u8; MAXIMUM_AKASHIC_IO_BYTES]> =
     SpinLock::new([0; MAXIMUM_AKASHIC_IO_BYTES]);
 #[cfg(target_os = "none")]
-static MMAP_FILE_STAGING: SpinLock<[u8; crate::akashic_vfs::MAXIMUM_FILE_BYTES]> =
-    SpinLock::new([0; crate::akashic_vfs::MAXIMUM_FILE_BYTES]);
+const MAXIMUM_RUNTIME_FILE_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(target_os = "none")]
+static MMAP_FILE_STAGING: SpinLock<[u8; MAXIMUM_RUNTIME_FILE_BYTES]> =
+    SpinLock::new([0; MAXIMUM_RUNTIME_FILE_BYTES]);
 #[cfg(target_os = "none")]
 static EXEC_STAGING: SpinLock<ExecStaging> = SpinLock::new(ExecStaging::EMPTY);
 
 #[cfg(target_os = "none")]
 struct ExecStaging {
-    image: [u8; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
-    runtime_linker: [u8; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
+    image: [u8; MAXIMUM_RUNTIME_FILE_BYTES],
+    runtime_linker: [u8; MAXIMUM_RUNTIME_FILE_BYTES],
     strings: [u8; MAXIMUM_EXEC_STRING_BYTES],
 }
 
 #[cfg(target_os = "none")]
 impl ExecStaging {
     const EMPTY: Self = Self {
-        image: [0; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
-        runtime_linker: [0; crate::akashic_vfs::MAXIMUM_FILE_BYTES],
+        image: [0; MAXIMUM_RUNTIME_FILE_BYTES],
+        runtime_linker: [0; MAXIMUM_RUNTIME_FILE_BYTES],
         strings: [0; MAXIMUM_EXEC_STRING_BYTES],
     };
 }
@@ -906,11 +908,14 @@ fn schedule_linux_execve_return(
         Ok(vector) => vector,
         Err(error) => return resume_linux_result(saved, error),
     };
-    let mut snapshot =
-        match crate::akashic_vfs::read_file_snapshot(&path[..path_length], &mut staging.image) {
-            Ok(snapshot) => snapshot,
-            Err(error) => return resume_linux_result(saved, map_akashic_error(error)),
-        };
+    let mut snapshot = match crate::linux_file::read_path_snapshot(
+        current,
+        &path[..path_length],
+        &mut staging.image,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return resume_linux_result(saved, map_linux_file_error(error)),
+    };
     let initial_plan =
         match crate::module::loader::LoadPlan::parse(&staging.image[..snapshot.bytes]) {
             Ok(plan) => plan,
@@ -927,7 +932,8 @@ fn schedule_linux_execve_return(
             let interpreter_path_length = candidate.len();
             let pair = {
                 let staging = &mut *staging;
-                crate::akashic_vfs::read_file_pair_snapshot(
+                crate::linux_file::read_path_pair_snapshot(
+                    current,
                     &path[..path_length],
                     &interpreter_path[..interpreter_path_length],
                     &mut staging.image,
@@ -936,7 +942,7 @@ fn schedule_linux_execve_return(
             };
             let pair = match pair {
                 Ok(pair) => pair,
-                Err(error) => return resume_linux_result(saved, map_akashic_error(error)),
+                Err(error) => return resume_linux_result(saved, map_linux_file_error(error)),
             };
             let refreshed_plan = match crate::module::loader::LoadPlan::parse(
                 &staging.image[..pair.executable.bytes],
@@ -4090,7 +4096,7 @@ fn linux_mmap(arguments: [u64; 6]) -> isize {
                 permissions,
             )
         } else {
-            if rounded_length > crate::akashic_vfs::MAXIMUM_FILE_BYTES {
+            if rounded_length > MAXIMUM_RUNTIME_FILE_BYTES {
                 return ERROR_INVALID_ARGUMENT;
             }
             let mut staging = MMAP_FILE_STAGING.lock();

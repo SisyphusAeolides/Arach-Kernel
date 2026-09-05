@@ -545,6 +545,7 @@ const EXT4_MAXIMUM_BLOCK_SIZE: usize = 4096;
 const EXT4_MAXIMUM_EXTENT_DEPTH: u16 = 5;
 const EXT4_ROOT_INODE: u32 = 2;
 const EXT4_MAXIMUM_PATH_BYTES: usize = 4096;
+const EXT4_MAXIMUM_SYMLINK_DEPTH: usize = 8;
 const EXT4_SCRATCH_BLOCKS: usize = EXT4_MAXIMUM_EXTENT_DEPTH as usize + 3;
 
 struct Ext4Scratch {
@@ -717,14 +718,32 @@ impl Ext4ReadOnly {
     ) -> Result<usize, Ext4Error> {
         let mut scratch = EXT4_SCRATCH.lock();
         let inode = self.lookup(device, path, &mut scratch)?;
-        if inode.kind() == Ext4NodeKind::Directory {
-            return Err(Ext4Error::NotFile);
-        }
+        self.read_inode_contents(device, inode, offset, output, &mut scratch)
+    }
+
+    fn read_inode_contents<D: BlockDevice + ?Sized>(
+        &self,
+        device: &mut D,
+        inode: Ext4Inode,
+        offset: u64,
+        output: &mut [u8],
+        scratch: &mut Ext4Scratch,
+    ) -> Result<usize, Ext4Error> {
         if inode.kind() != Ext4NodeKind::File && inode.kind() != Ext4NodeKind::Symlink {
             return Err(Ext4Error::NotFile);
         }
         if offset >= inode.size_bytes || output.is_empty() {
             return Ok(0);
+        }
+        // ext4 stores short symlinks directly in the inode's 60-byte block
+        // map. Avoid interpreting those bytes as block numbers.
+        if inode.kind() == Ext4NodeKind::Symlink && inode.size_bytes <= 60 {
+            let start = usize::try_from(offset).map_err(|_| Ext4Error::Capacity)?;
+            let requested = output
+                .len()
+                .min(usize::try_from(inode.size_bytes).unwrap_or(usize::MAX) - start);
+            output[..requested].copy_from_slice(&inode.block_map[start..start + requested]);
+            return Ok(requested);
         }
         let remaining = inode.size_bytes - offset;
         let requested = output
@@ -739,7 +758,7 @@ impl Ext4ReadOnly {
             let logical = absolute / u64::from(self.block_size);
             let within = (absolute % u64::from(self.block_size)) as usize;
             let take = (block_size - within).min(requested - copied);
-            let physical = self.map_block(device, inode, logical, &mut scratch, 1)?;
+            let physical = self.map_block(device, inode, logical, scratch, 1)?;
             let block = scratch.block(0)?;
             block[..block_size].fill(0);
             if let Some(physical) = physical {
@@ -760,22 +779,77 @@ impl Ext4ReadOnly {
         if path.is_empty() || path.len() > EXT4_MAXIMUM_PATH_BYTES || path[0] != b'/' {
             return Err(Ext4Error::InvalidPath);
         }
-        let mut inode = self.read_inode(device, EXT4_ROOT_INODE, scratch)?;
-        let mut cursor = 0_usize;
-        while let Some(component) = next_component(path, &mut cursor)? {
-            if component == b"." {
-                continue;
+        let mut active = [0_u8; EXT4_MAXIMUM_PATH_BYTES];
+        active[..path.len()].copy_from_slice(path);
+        let mut active_len = path.len();
+        for _ in 0..=EXT4_MAXIMUM_SYMLINK_DEPTH {
+            let mut inode = self.read_inode(device, EXT4_ROOT_INODE, scratch)?;
+            let mut cursor = 0_usize;
+            loop {
+                let before = cursor;
+                let Some(component) = next_component(&active[..active_len], &mut cursor)? else {
+                    return Ok(inode);
+                };
+                let component_start = before
+                    + active[before..active_len]
+                        .iter()
+                        .take_while(|byte| **byte == b'/')
+                        .count();
+                if component == b"." {
+                    continue;
+                }
+                if inode.kind() != Ext4NodeKind::Directory {
+                    return Err(Ext4Error::NotDirectory);
+                }
+                let child = self.find_directory_entry(device, inode, component, scratch)?;
+                inode = self.read_inode(device, child, scratch)?;
+                if inode.kind() != Ext4NodeKind::Symlink {
+                    continue;
+                }
+
+                let mut target = [0_u8; EXT4_MAXIMUM_PATH_BYTES];
+                let target_len =
+                    self.read_inode_contents(device, inode, 0, &mut target, scratch)?;
+                if target_len == 0 {
+                    return Err(Ext4Error::InvalidPath);
+                }
+                let parent_len = if component_start <= 1 {
+                    1
+                } else {
+                    component_start - 1
+                };
+                let suffix = &active[cursor..active_len];
+                let mut combined = [0_u8; EXT4_MAXIMUM_PATH_BYTES];
+                let mut combined_len = 0_usize;
+                if target[0] != b'/' {
+                    combined[..parent_len].copy_from_slice(&active[..parent_len]);
+                    combined_len = parent_len;
+                    if combined_len > 1 && combined[combined_len - 1] != b'/' {
+                        combined[combined_len] = b'/';
+                        combined_len += 1;
+                    }
+                }
+                let target_end = combined_len
+                    .checked_add(target_len)
+                    .ok_or(Ext4Error::Capacity)?;
+                if target_end > combined.len() {
+                    return Err(Ext4Error::Capacity);
+                }
+                combined[combined_len..target_end].copy_from_slice(&target[..target_len]);
+                combined_len = target_end;
+                let suffix_end = combined_len
+                    .checked_add(suffix.len())
+                    .ok_or(Ext4Error::Capacity)?;
+                if suffix_end > combined.len() {
+                    return Err(Ext4Error::Capacity);
+                }
+                combined[combined_len..suffix_end].copy_from_slice(suffix);
+                let normalized_len = normalize_path(&combined[..suffix_end], &mut active)?;
+                active_len = normalized_len;
+                break;
             }
-            if component == b".." {
-                return Err(Ext4Error::InvalidPath);
-            }
-            if inode.kind() != Ext4NodeKind::Directory {
-                return Err(Ext4Error::NotDirectory);
-            }
-            let child = self.find_directory_entry(device, inode, component, scratch)?;
-            inode = self.read_inode(device, child, scratch)?;
         }
-        Ok(inode)
+        Err(Ext4Error::InvalidPath)
     }
 
     fn read_inode<D: BlockDevice + ?Sized>(
@@ -1056,6 +1130,47 @@ fn next_component<'path>(
         return Err(Ext4Error::InvalidPath);
     }
     Ok(Some(component))
+}
+
+fn normalize_path(
+    path: &[u8],
+    output: &mut [u8; EXT4_MAXIMUM_PATH_BYTES],
+) -> Result<usize, Ext4Error> {
+    if path.is_empty() || path[0] != b'/' {
+        return Err(Ext4Error::InvalidPath);
+    }
+    output[0] = b'/';
+    let mut output_len = 1_usize;
+    let mut cursor = 0_usize;
+    while let Some(component) = next_component(path, &mut cursor)? {
+        if component == b"." {
+            continue;
+        }
+        if component == b".." {
+            if output_len > 1 {
+                output_len -= 1;
+                while output_len > 1 && output[output_len - 1] != b'/' {
+                    output_len -= 1;
+                }
+            }
+            continue;
+        }
+        let separator = usize::from(output_len > 1);
+        let end = output_len
+            .checked_add(separator)
+            .and_then(|value| value.checked_add(component.len()))
+            .ok_or(Ext4Error::Capacity)?;
+        if end > output.len() {
+            return Err(Ext4Error::Capacity);
+        }
+        if separator != 0 {
+            output[output_len] = b'/';
+            output_len += 1;
+        }
+        output[output_len..end].copy_from_slice(component);
+        output_len = end;
+    }
+    Ok(output_len)
 }
 
 fn read_bytes<D: BlockDevice + ?Sized>(
