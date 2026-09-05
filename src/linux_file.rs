@@ -8,6 +8,7 @@
 use crate::akashic_vfs::{self, FileRangeSnapshot, NodeKind, Stat, VfsError};
 use crate::linux_eventfd::{READY_IN, READY_OUT};
 use crate::process::lifecycle::ProcessHandle;
+use crate::storage::{self, Ext4Error, Ext4NodeKind};
 use crate::sync::SpinLock;
 
 pub const O_ACCMODE: u32 = 0x3;
@@ -35,6 +36,30 @@ const ALLOWED_OPEN_FLAGS: u32 = O_ACCMODE
 
 pub const MAXIMUM_FILE_DESCRIPTORS: usize = 128;
 const FILE_DESCRIPTOR_BASE: u32 = 3;
+/// Paths below these directories are eligible for the installed-root reader.
+/// Device, process, runtime, and temporary namespaces remain owned by their
+/// dedicated kernel backends; probing the disk for those paths would add
+/// needless I/O to every early-manager lookup.
+fn persistent_path_candidate(path: &[u8]) -> bool {
+    path == b"/bin"
+        || path.starts_with(b"/bin/")
+        || path == b"/etc"
+        || path.starts_with(b"/etc/")
+        || path == b"/home"
+        || path.starts_with(b"/home/")
+        || path == b"/lib"
+        || path.starts_with(b"/lib/")
+        || path == b"/opt"
+        || path.starts_with(b"/opt/")
+        || path == b"/root"
+        || path.starts_with(b"/root/")
+        || path == b"/sbin"
+        || path.starts_with(b"/sbin/")
+        || path == b"/usr"
+        || path.starts_with(b"/usr/")
+        || path == b"/var"
+        || path.starts_with(b"/var/")
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileError {
@@ -134,6 +159,98 @@ fn slot_for(owner: ProcessHandle, fd: u32) -> Result<FileSlot, FileError> {
     Ok(slot)
 }
 
+fn persistent_error(error: Ext4Error) -> FileError {
+    let vfs = match error {
+        Ext4Error::NotDirectory => VfsError::NotDirectory,
+        Ext4Error::NotFile => VfsError::NotFile,
+        Ext4Error::NotFound => VfsError::NotFound,
+        Ext4Error::InvalidPath => VfsError::InvalidPath,
+        Ext4Error::Capacity => VfsError::Capacity,
+        Ext4Error::UnsupportedFeature
+        | Ext4Error::CorruptMetadata
+        | Ext4Error::InvalidGeometry
+        | Ext4Error::Io(_) => VfsError::Unsupported,
+    };
+    FileError::Vfs(vfs)
+}
+
+fn ensure_persistent_parents(path: &[u8], now: u64) -> Result<(), FileError> {
+    for (index, byte) in path.iter().enumerate().skip(1) {
+        if *byte != b'/' {
+            continue;
+        }
+        let parent = &path[..index];
+        match akashic_vfs::mkdir(parent, now) {
+            Ok(()) | Err(VfsError::AlreadyExists) => {}
+            Err(error) => return Err(FileError::Vfs(error)),
+        }
+    }
+    Ok(())
+}
+
+/// Copy one small persistent-root file into the bounded VFS namespace.  This
+/// bridge is intentionally capped: larger executables must use the future
+/// direct block-backed file backend rather than being truncated or accepted
+/// as complete.
+fn materialize_persistent_path(
+    owner: ProcessHandle,
+    path: &[u8],
+    metadata: storage::Ext4Metadata,
+    now: u64,
+) -> Result<(), FileError> {
+    ensure_persistent_parents(path, now)?;
+    if metadata.kind == Ext4NodeKind::Directory {
+        return match akashic_vfs::mkdir(path, now) {
+            Ok(()) | Err(VfsError::AlreadyExists) => Ok(()),
+            Err(error) => Err(FileError::Vfs(error)),
+        };
+    }
+    if metadata.kind != Ext4NodeKind::File
+        || metadata.size_bytes > akashic_vfs::MAXIMUM_FILE_BYTES as u64
+    {
+        return Err(FileError::Vfs(VfsError::FileTooLarge));
+    }
+    let seed_flags = akashic_vfs::flags::READ_INTENT
+        | akashic_vfs::flags::WRITE_INTENT
+        | akashic_vfs::flags::CREATE_INTENT
+        | akashic_vfs::flags::EXCLUSIVE;
+    let token = akashic_vfs::open(owner, path, seed_flags, now)?;
+    let mut result = Ok(());
+    let mut offset = 0_u64;
+    let mut chunk = [0_u8; 4096];
+    while offset < metadata.size_bytes {
+        let requested = core::cmp::min(chunk.len() as u64, metadata.size_bytes - offset) as usize;
+        match storage::persistent_root_read(path, offset, &mut chunk[..requested]) {
+            Ok(0) => {
+                result = Err(FileError::Vfs(VfsError::Unsupported));
+                break;
+            }
+            Ok(bytes) => match akashic_vfs::write(owner, token, &chunk[..bytes], now) {
+                Ok(written) if written == bytes => offset += bytes as u64,
+                Ok(_) => {
+                    result = Err(FileError::Vfs(VfsError::Unsupported));
+                    break;
+                }
+                Err(error) => {
+                    result = Err(FileError::Vfs(error));
+                    break;
+                }
+            },
+            Err(error) => {
+                result = Err(persistent_error(error));
+                break;
+            }
+        }
+    }
+    let close_result = akashic_vfs::close(owner, token);
+    if result.is_ok() {
+        close_result.map_err(FileError::from)
+    } else {
+        let _ = close_result;
+        result
+    }
+}
+
 pub fn open(owner: ProcessHandle, path: &[u8], flags: u32, now: u64) -> Result<u32, FileError> {
     if owner.pid == 0 || owner.generation == 0 {
         return Err(FileError::InvalidArgument);
@@ -151,24 +268,37 @@ pub fn open(owner: ProcessHandle, path: &[u8], flags: u32, now: u64) -> Result<u
     let capability = match akashic_vfs::open(owner, path, mapped, now) {
         Ok(capability) => capability,
         Err(VfsError::NotFound) => {
-            let Some(contents) = crate::linux_mount::default_file_contents(path) else {
-                return Err(FileError::Vfs(VfsError::NotFound));
-            };
-            // Seed a read-only-opened pseudo-file through a temporary
-            // read/write capability, then reopen it with the caller's exact
-            // flags so its cursor starts at byte zero.
-            let seed_flags = akashic_vfs::flags::READ_INTENT
-                | akashic_vfs::flags::WRITE_INTENT
-                | akashic_vfs::flags::CREATE_INTENT
-                | akashic_vfs::flags::EXCLUSIVE;
-            let seed = akashic_vfs::open(owner, path, seed_flags, now)?;
-            if let Err(error) = akashic_vfs::write(owner, seed, contents, now)
-                .and_then(|_| akashic_vfs::close(owner, seed).map(|()| contents.len()))
+            if persistent_path_candidate(path)
+                && let Ok(metadata) = storage::persistent_root_metadata(path)
             {
-                let _ = akashic_vfs::close(owner, seed);
-                return Err(FileError::Vfs(error));
+                if flags & O_ACCMODE != O_RDONLY || flags & (O_TRUNC | O_APPEND) != 0 {
+                    return Err(FileError::Vfs(VfsError::PermissionDenied));
+                }
+                if flags & O_EXCL != 0 {
+                    return Err(FileError::Vfs(VfsError::AlreadyExists));
+                }
+                materialize_persistent_path(owner, path, metadata, now)?;
+                akashic_vfs::open(owner, path, mapped, now)?
+            } else {
+                let Some(contents) = crate::linux_mount::default_file_contents(path) else {
+                    return Err(FileError::Vfs(VfsError::NotFound));
+                };
+                // Seed a read-only-opened pseudo-file through a temporary
+                // read/write capability, then reopen it with the caller's exact
+                // flags so its cursor starts at byte zero.
+                let seed_flags = akashic_vfs::flags::READ_INTENT
+                    | akashic_vfs::flags::WRITE_INTENT
+                    | akashic_vfs::flags::CREATE_INTENT
+                    | akashic_vfs::flags::EXCLUSIVE;
+                let seed = akashic_vfs::open(owner, path, seed_flags, now)?;
+                if let Err(error) = akashic_vfs::write(owner, seed, contents, now)
+                    .and_then(|_| akashic_vfs::close(owner, seed).map(|()| contents.len()))
+                {
+                    let _ = akashic_vfs::close(owner, seed);
+                    return Err(FileError::Vfs(error));
+                }
+                akashic_vfs::open(owner, path, mapped, now)?
             }
-            akashic_vfs::open(owner, path, mapped, now)?
         }
         Err(error) => return Err(FileError::Vfs(error)),
     };

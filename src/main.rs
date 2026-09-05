@@ -97,7 +97,7 @@ use arach::serial::SerialPort;
 use arach::shim::{
     AbyssAllocator, DriverHost, DriverServices, IrqService, LogService, MmioService,
 };
-use arach::storage::GptTable;
+use arach::storage::{Ext4ReadOnly, GptTable};
 use arach::sync::SpinLock;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
@@ -462,6 +462,35 @@ unsafe impl Sync for NvmeDmaCell {}
 static NVME_DMA: NvmeDmaCell = NvmeDmaCell(UnsafeCell::new(NvmeDmaStorage::EMPTY));
 
 static NVME_CONTROLLER: SpinLock<Option<NvmeController>> = SpinLock::new(None);
+
+#[cfg(target_os = "none")]
+static NVME_ROOT_RANGE: SpinLock<Option<(u64, u64)>> = SpinLock::new(None);
+
+/// Read one sector relative to the ext4 partition retained as the persistent
+/// root.  Storage syscalls reach the NVMe controller only through this narrow
+/// callback; they never receive MMIO or bus-master authority themselves.
+#[cfg(target_os = "none")]
+fn read_persistent_root_sector(
+    lba: u64,
+    sector: &mut [u8; arach::storage::SECTOR_BYTES],
+) -> Result<(), arach::storage::BlockError> {
+    let (start_lba, sector_count) = NVME_ROOT_RANGE
+        .lock()
+        .as_ref()
+        .copied()
+        .ok_or(arach::storage::BlockError::ReadFailure)?;
+    if lba >= sector_count {
+        return Err(arach::storage::BlockError::InvalidSector);
+    }
+    let physical_lba = start_lba
+        .checked_add(lba)
+        .ok_or(arach::storage::BlockError::InvalidSector)?;
+    let mut controller = NVME_CONTROLLER.lock();
+    let controller = controller
+        .as_mut()
+        .ok_or(arach::storage::BlockError::ReadFailure)?;
+    arach::storage::BlockDevice::read_sector(controller, physical_lba, sector)
+}
 
 #[cfg(target_os = "none")]
 const RUSTD_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_RUSTD_SHA256"));
@@ -3104,6 +3133,67 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                 gpt.first_usable_lba,
                 gpt.last_usable_lba,
             );
+            let mut persistent_root = None;
+            for partition in gpt.partitions() {
+                let mut view = match partition.open(&mut controller) {
+                    Ok(view) => view,
+                    Err(error) => {
+                        let _ = writeln!(
+                            serial,
+                            "Arach: GPT partition {} geometry rejected: {error:?}",
+                            partition.index,
+                        );
+                        continue;
+                    }
+                };
+                match Ext4ReadOnly::probe(&mut view) {
+                    Ok(filesystem) => {
+                        if persistent_root.is_some() {
+                            let _ = writeln!(
+                                serial,
+                                "Arach: multiple ext4 root candidates; persistent root remains unavailable"
+                            );
+                            persistent_root = None;
+                            break;
+                        }
+                        persistent_root =
+                            Some((partition.first_lba, partition.sector_count(), filesystem));
+                    }
+                    Err(error) => {
+                        let _ = writeln!(
+                            serial,
+                            "Arach: GPT partition {} is not an admitted Arach ext4 root: {error:?}",
+                            partition.index,
+                        );
+                    }
+                }
+            }
+            if let Some((start_lba, sector_count, filesystem)) = persistent_root {
+                *NVME_ROOT_RANGE.lock() = Some((start_lba, sector_count));
+                if let Err(error) = arach::storage::publish_persistent_root(
+                    filesystem,
+                    sector_count,
+                    read_persistent_root_sector,
+                ) {
+                    let _ = writeln!(
+                        serial,
+                        "Arach: persistent ext4 root publication rejected: {error:?}"
+                    );
+                    halt();
+                }
+                let _ = writeln!(
+                    serial,
+                    "Arach: persistent ext4 root validated start-lba={} sectors={} block-size={}",
+                    start_lba,
+                    sector_count,
+                    filesystem.block_size(),
+                );
+            } else {
+                let _ = writeln!(
+                    serial,
+                    "Arach: no unique admitted ext4 root; persistent root remains unavailable"
+                );
+            }
         } else {
             // A blank qualification disk is valid for transport bring-up, but
             // it is not a persistent root. Installed media must carry a

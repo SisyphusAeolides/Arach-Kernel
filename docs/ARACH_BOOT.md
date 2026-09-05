@@ -23,10 +23,12 @@ the Linux ABI surface exercised by RustD and records its markers in a serial
 transcript when run under QEMU. Host compilation and unit tests are useful
 evidence but do not replace a boot qualification run.
 
-When a namespace is present, the boot path also reads and validates its GPT
-header and bounded partition-entry table through the measured NVMe transport.
-That check proves partition metadata and CRC handling only; the kernel still
-does not mount a filesystem or claim a persistent root.
+When a namespace is present, the boot path reads and validates its GPT header,
+bounded partition-entry table, and admitted read-only ext4 superblock through
+the measured NVMe transport. A unique ext4 partition is published through a
+read-only root broker. Small regular files can be materialized into the
+bounded Linux VFS; writes, symlinks, large direct-backed files, and a complete
+mount namespace remain outside this qualification.
 
 For a local kernel contract build:
 

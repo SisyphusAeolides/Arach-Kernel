@@ -127,10 +127,12 @@ The Linux personality currently covers:
   provider, and executes eight finalizers in reverse dependency and array
   order through the x86-64 process-entry callback in QEMU.
 
-The file bridge is intentionally bounded and ephemeral. It is not a persistent
-block-backed filesystem. The boot-time NVMe path now validates a GPT header and
-partition table when the namespace provides one, but it does not mount a
-filesystem or publish a root. Anonymous pipes use a 4 KiB allocation-free ring,
+The file bridge is intentionally bounded and read-only. A validated ext4 root
+can supply small regular files through the measured NVMe path; those files are
+materialized into the bounded VFS and never written back to disk. Larger files,
+symlinks, metadata updates, and a complete mount namespace remain separate
+gates. The boot-time NVMe path validates a GPT header, partition table, and
+admitted ext4 root before publishing the root broker. Anonymous pipes use a 4 KiB allocation-free ring,
 provide atomic bounded writes, EOF/HUP/EPIPE endpoint lifetime, and
 generation-stable epoll watch lifetime and last-close removal. Unix stream
 sockets use fixed 4 KiB queues and bounded endpoint, connection, and listen
@@ -151,7 +153,7 @@ restart remain future compatibility slices.
 | Subsystem | Working today | Next acceptance gate |
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the custom Multiboot2 image contract is warning-free with measured runtime inputs | Boot the complete ArachOS graph in BIOS and UEFI while extending the measured Linux surface without weakening its gates |
-| Linux userspace compatibility | Identity, anonymous and eager private file mappings, bounded memfd-backed shared mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll, Unix stream and datagram sockets with `SCM_RIGHTS`/`SO_PASSCRED`, signalfd, bounded VFS file, directory, metadata, and mode-change calls, transactional static and measured `PT_INTERP` execution, an eight-object dependency engine measured with a deduplicated four-object diamond and canonical finite `DT_RUNPATH`, explicit and packed relative relocation, exact-size main-executable copy relocation and interposition, provider-first static/general-dynamic startup-TLS relocation, exact GNU symbol versions, deterministic eager external PLT binding with bounded weak-function semantics, dependency-first initialization, and reverse finalization, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed descriptor waits and filesystem socket nodes; add late-loaded TLS, TLSDESC, general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and broader relocations; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
+| Linux userspace compatibility | Identity, anonymous and eager private file mappings, bounded memfd-backed shared mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll, Unix stream and datagram sockets with `SCM_RIGHTS`/`SO_PASSCRED`, signalfd, bounded VFS file, directory, metadata, and mode-change calls, transactional static and measured `PT_INTERP` execution, an eight-object dependency engine measured with a deduplicated four-object diamond and canonical finite `DT_RUNPATH`, explicit and packed relative relocation, exact-size main-executable copy relocation and interposition, provider-first static/general-dynamic startup-TLS relocation, exact GNU symbol versions, deterministic eager external PLT binding with bounded weak-function semantics, dependency-first initialization, and reverse finalization, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, per-thread FS-base TLS, and bounded read-only ext4-root file access are implemented and tested | Add scheduler-backed descriptor waits and filesystem socket nodes; add late-loaded TLS, TLSDESC, general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and broader relocations; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, persistent writes, symlink handling, and a complete mount namespace |
 | System bootstrap | Limine Multiboot2 entry exists and the source accepts measured RustD as Linux-ABI PID 1 | Boot the packaged ArachOS root under RustD and pass the complete service graph in BIOS and UEFI |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
@@ -164,9 +166,10 @@ The current critical path is:
 2. Extend the measured bounded graph linker with late-loaded TLS and TLSDESC,
    general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and
    broader relocations.
-3. Add scheduler-backed descriptor waits, filesystem socket nodes, and
-   persistent block-backed storage on the unified open-object boundary. The
-   NVMe/GPT probe is evidence for that work, not a root-filesystem claim.
+3. Add scheduler-backed descriptor waits, filesystem socket nodes, and the
+   remaining persistent-storage operations on the unified open-object boundary.
+   The current NVMe/GPT/ext4 path is read-only and deliberately bounded; it is
+   not yet a complete mount namespace.
 4. Boot the ArachOS package graph under RustD/RustD-resolved and qualify graphical
    Calamares plus user-selected desktop environments.
 
@@ -202,7 +205,7 @@ src/linux_socket.rs     bounded Unix-domain stream-socket backend
 src/linux_unix_dgram.rs bounded Unix-domain datagram backend
 src/linux_signalfd.rs   generation-bound signalfd backend
 src/linux_thread.rs     generation-bound thread-exit identity
-src/storage.rs          checked sector I/O, GPT discovery, and partition views
+src/storage.rs          checked sector I/O, GPT discovery, and read-only ext4 root broker
 core/                   bounded kernel primitives
 libraries/driver-abi/   stable foreign-driver boundary
 src/arach_*.rs          typed Arach kernel service contracts
