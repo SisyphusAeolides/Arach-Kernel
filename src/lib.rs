@@ -110,6 +110,7 @@ pub mod sheaf_capability;
 pub mod shim;
 pub mod singularity;
 pub mod stabilizer_tableau;
+pub mod storage;
 pub mod sync;
 pub mod syntropic_ecc;
 pub mod syscalls;

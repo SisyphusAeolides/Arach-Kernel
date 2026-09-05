@@ -197,6 +197,7 @@ src/linux_socket.rs     bounded Unix-domain stream-socket backend
 src/linux_unix_dgram.rs bounded Unix-domain datagram backend
 src/linux_signalfd.rs   generation-bound signalfd backend
 src/linux_thread.rs     generation-bound thread-exit identity
+src/storage.rs          checked sector I/O, GPT discovery, and partition views
 core/                   bounded kernel primitives
 libraries/driver-abi/   stable foreign-driver boundary
 src/arach_*.rs          typed Arach kernel service contracts
