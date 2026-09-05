@@ -38,6 +38,13 @@ use arach::drivers::e1000::{
 };
 use arach::drivers::nvidia_gsp_bootstrap::TuringGspStagedBundle;
 use arach::drivers::nvidia_gsp_firmware::TuringGspBootstrapMaterial;
+#[cfg(target_os = "none")]
+use arach::drivers::nvme::{NvmeCommand, NvmeCompletion};
+use arach::drivers::nvme::{
+    NvmeController, NvmeDmaLayout, PCI_CLASS_MASS_STORAGE as NVME_PCI_CLASS,
+    PCI_PROGRAMMING_INTERFACE_NVM as NVME_PCI_INTERFACE, PCI_SUBCLASS_NVM as NVME_PCI_SUBCLASS,
+    PCI_VENDOR_ANY as NVME_VENDOR_ANY,
+};
 use arach::drivers::xhci::{
     XHCI_PROBE_DRIVER_ID, XhciMutationDebt, XhciProbeCensus, XhciRegisterTransport,
     XhciResetReadyController, activate_reset_ready,
@@ -96,6 +103,8 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::fmt::Write;
 use core::panic::PanicInfo;
+#[cfg(target_os = "none")]
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering, compiler_fence};
 
 core::arch::global_asm!(include_str!("bootstrap.S"), options(att_syntax));
@@ -114,6 +123,8 @@ const MINIMUM_HEAP_SIZE: u64 = 64 * 1024;
 const MAXIMUM_HEAP_SIZE: u64 = 32 * 1024 * 1024;
 const E1000_DRIVER_ID: u64 = 0x4531_3030_305f_4e45;
 const MAXIMUM_E1000_CONTROLLERS: usize = 1;
+const NVME_DRIVER_ID: u64 = 0x4e56_4d45_5f42_4f4f;
+const MAXIMUM_NVME_CONTROLLERS: usize = 1;
 
 /// Native COSMIC service artifacts are optional while the C0 probe remains
 /// the default boot profile. The build script emits a complete metadata set
@@ -375,6 +386,81 @@ struct E1000DmaCell(UnsafeCell<E1000DmaStorage>);
 unsafe impl Sync for E1000DmaCell {}
 
 static E1000_DMA: E1000DmaCell = E1000DmaCell(UnsafeCell::new(E1000DmaStorage::EMPTY));
+
+#[cfg(target_os = "none")]
+const NVME_QUEUE_DEPTH: usize = 16;
+
+#[cfg(target_os = "none")]
+#[repr(C, align(4096))]
+struct NvmeCommandQueue([NvmeCommand; NVME_QUEUE_DEPTH]);
+
+#[cfg(target_os = "none")]
+impl NvmeCommandQueue {
+    const EMPTY: Self = Self([NvmeCommand::ZERO; NVME_QUEUE_DEPTH]);
+}
+
+#[cfg(target_os = "none")]
+#[repr(C, align(4096))]
+struct NvmeCompletionQueue([NvmeCompletion; NVME_QUEUE_DEPTH]);
+
+#[cfg(target_os = "none")]
+impl NvmeCompletionQueue {
+    const EMPTY: Self = Self([NvmeCompletion::ZERO; NVME_QUEUE_DEPTH]);
+}
+
+#[cfg(target_os = "none")]
+#[repr(C, align(4096))]
+struct NvmeIdentifyPage([u8; 4096]);
+
+#[cfg(target_os = "none")]
+impl NvmeIdentifyPage {
+    const EMPTY: Self = Self([0; 4096]);
+}
+
+#[cfg(target_os = "none")]
+#[repr(C, align(4096))]
+struct NvmeSectorPage([u8; arach::storage::SECTOR_BYTES]);
+
+#[cfg(target_os = "none")]
+impl NvmeSectorPage {
+    const EMPTY: Self = Self([0; arach::storage::SECTOR_BYTES]);
+}
+
+#[cfg(target_os = "none")]
+#[repr(C, align(4096))]
+struct NvmeDmaStorage {
+    admin_submission: NvmeCommandQueue,
+    admin_completion: NvmeCompletionQueue,
+    io_submission: NvmeCommandQueue,
+    io_completion: NvmeCompletionQueue,
+    identify: NvmeIdentifyPage,
+    sector: NvmeSectorPage,
+}
+
+#[cfg(target_os = "none")]
+impl NvmeDmaStorage {
+    const EMPTY: Self = Self {
+        admin_submission: NvmeCommandQueue::EMPTY,
+        admin_completion: NvmeCompletionQueue::EMPTY,
+        io_submission: NvmeCommandQueue::EMPTY,
+        io_completion: NvmeCompletionQueue::EMPTY,
+        identify: NvmeIdentifyPage::EMPTY,
+        sector: NvmeSectorPage::EMPTY,
+    };
+}
+
+#[cfg(target_os = "none")]
+struct NvmeDmaCell(UnsafeCell<NvmeDmaStorage>);
+
+#[cfg(target_os = "none")]
+// SAFETY: the arena is initialized once during serialized boot and remains
+// owned by the retained NVMe controller for the rest of the kernel lifetime.
+unsafe impl Sync for NvmeDmaCell {}
+
+#[cfg(target_os = "none")]
+static NVME_DMA: NvmeDmaCell = NvmeDmaCell(UnsafeCell::new(NvmeDmaStorage::EMPTY));
+
+static NVME_CONTROLLER: SpinLock<Option<NvmeController>> = SpinLock::new(None);
 
 #[cfg(target_os = "none")]
 const RUSTD_EXPECTED_SHA256: [u8; 32] = parse_sha256(env!("SISYPHUS_RUSTD_SHA256"));
@@ -927,6 +1013,69 @@ fn prepare_e1000_dma_rings() -> Option<E1000DmaRings> {
     )?;
     compiler_fence(Ordering::SeqCst);
     E1000DmaRings::new(receive_descriptors, transmit_descriptors).ok()
+}
+
+/// Binds the NVMe controller to one page-aligned, kernel-owned DMA arena.
+/// Every queue and data page is translated explicitly before bus mastering is
+/// enabled; no physical address is inferred from an arbitrary pointer.
+#[cfg(target_os = "none")]
+fn prepare_nvme_dma_layout() -> Option<NvmeDmaLayout> {
+    // SAFETY: boot is still serialized and the arena has not been exposed to
+    // the controller. The returned layout is retained for the controller's
+    // entire lifetime.
+    let storage = unsafe { &mut *NVME_DMA.0.get() };
+    let admin_submission = NonNull::new(storage.admin_submission.0.as_mut_ptr())?;
+    let admin_completion = NonNull::new(storage.admin_completion.0.as_mut_ptr())?.cast();
+    let io_submission = NonNull::new(storage.io_submission.0.as_mut_ptr())?;
+    let io_completion = NonNull::new(storage.io_completion.0.as_mut_ptr())?.cast();
+    let identify = NonNull::new(storage.identify.0.as_mut_ptr())?;
+    let sector = NonNull::new(storage.sector.0.as_mut_ptr())?;
+
+    let admin_submission_physical = kernel_virtual_to_physical(
+        admin_submission.as_ptr() as usize,
+        core::mem::size_of::<NvmeCommand>() * NVME_QUEUE_DEPTH,
+    )?;
+    let admin_completion_physical = kernel_virtual_to_physical(
+        admin_completion.as_ptr() as usize,
+        core::mem::size_of::<NvmeCompletion>() * NVME_QUEUE_DEPTH,
+    )?;
+    let io_submission_physical = kernel_virtual_to_physical(
+        io_submission.as_ptr() as usize,
+        core::mem::size_of::<NvmeCommand>() * NVME_QUEUE_DEPTH,
+    )?;
+    let io_completion_physical = kernel_virtual_to_physical(
+        io_completion.as_ptr() as usize,
+        core::mem::size_of::<NvmeCompletion>() * NVME_QUEUE_DEPTH,
+    )?;
+    let identify_physical = kernel_virtual_to_physical(
+        identify.as_ptr() as usize,
+        core::mem::size_of::<NvmeIdentifyPage>(),
+    )?;
+    let sector_physical = kernel_virtual_to_physical(
+        sector.as_ptr() as usize,
+        core::mem::size_of::<NvmeSectorPage>(),
+    )?;
+    compiler_fence(Ordering::SeqCst);
+    let layout = NvmeDmaLayout {
+        admin_submission,
+        admin_submission_physical,
+        admin_completion,
+        admin_completion_physical,
+        io_submission,
+        io_submission_physical,
+        io_completion,
+        io_completion_physical,
+        identify,
+        identify_physical,
+        sector,
+        sector_physical,
+    };
+    layout.validate().ok().map(|_| layout)
+}
+
+#[cfg(not(target_os = "none"))]
+fn prepare_nvme_dma_layout() -> Option<NvmeDmaLayout> {
+    None
 }
 
 #[unsafe(no_mangle)]
@@ -2420,15 +2569,43 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
             halt();
         }
     };
+    let nvme_route = DriverBindingManifest {
+        driver_id: NVME_DRIVER_ID,
+        family: arach::drivers::device_census::DeviceFamily::StorageController,
+        vendor_id: NVME_VENDOR_ANY,
+        device_id_mask: 0,
+        device_id_value: 0,
+        class_code_mask: u8::MAX,
+        class_code_value: NVME_PCI_CLASS,
+        subclass_mask: u8::MAX,
+        subclass_value: NVME_PCI_SUBCLASS,
+        programming_interface_mask: u8::MAX,
+        programming_interface_value: NVME_PCI_INTERFACE,
+        revision_minimum: 0,
+        revision_maximum: u8::MAX,
+        required_evidence: EVIDENCE_IDENTITY | EVIDENCE_CLASS_TUPLE | EVIDENCE_PCI_CONFIGURATION,
+        requested_authority: AUTHORITY_MMIO | AUTHORITY_DMA | AUTHORITY_PCI_CONFIG,
+    };
+    let nvme_claims = match device_census.claim_family::<MAXIMUM_NVME_CONTROLLERS>(
+        nvme_route,
+        AUTHORITY_MMIO | AUTHORITY_DMA | AUTHORITY_PCI_CONFIG,
+    ) {
+        Ok(claims) => claims,
+        Err(error) => {
+            let _ = writeln!(serial, "Arach: NVMe routing claim failed: {error:?}");
+            halt();
+        }
+    };
     let detected_devices = device_census.summary();
     let _ = writeln!(
         serial,
-        "Arach: device census detected total={} display={} audio={} multimedia-video={} network={} wireless={} usb-host={} input={} other={} root={:#x}",
+        "Arach: device census detected total={} display={} audio={} multimedia-video={} network={} storage={} wireless={} usb-host={} input={} other={} root={:#x}",
         detected_devices.total,
         detected_devices.display,
         detected_devices.audio,
         detected_devices.multimedia_video,
         detected_devices.network,
+        detected_devices.storage,
         detected_devices.wireless,
         detected_devices.usb_hosts,
         detected_devices.input,
@@ -2725,6 +2902,178 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         }
         // The retained bus-master lease names the exact same kernel-only DMA
         // arena now owned by the published link controller.
+        core::mem::forget(bus_master);
+    }
+    let nvme_mmio = authority.grant::<DeviceMemoryControl>();
+    let nvme_pci_configuration = authority.grant::<PciConfigurationControl>();
+    let nvme_dma_authority = authority.grant::<DmaControl>();
+    for claim in nvme_claims.claims().iter().copied() {
+        let address = claim.address();
+        let Some(evidence) = device_census
+            .evidence()
+            .find(|evidence| evidence.address == address)
+            .copied()
+        else {
+            let _ = writeln!(serial, "Arach: NVMe claim lost its device evidence");
+            halt();
+        };
+        if evidence.class_code != NVME_PCI_CLASS
+            || evidence.subclass != NVME_PCI_SUBCLASS
+            || evidence.programming_interface != NVME_PCI_INTERFACE
+        {
+            let _ = writeln!(serial, "Arach: NVMe class identity changed after claim");
+            halt();
+        }
+        let _authorization = match device_census.authorize(
+            claim,
+            NVME_DRIVER_ID,
+            AUTHORITY_MMIO | AUTHORITY_DMA | AUTHORITY_PCI_CONFIG,
+        ) {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                let _ = writeln!(serial, "Arach: NVMe live authorization failed: {error:?}");
+                halt();
+            }
+        };
+        let Some(pci_address) = pci::PciAddress::new(address.bus, address.slot, address.function)
+        else {
+            let _ = writeln!(serial, "Arach: NVMe PCI address was malformed");
+            halt();
+        };
+        let Some(device) = pci_inventory
+            .devices()
+            .iter()
+            .copied()
+            .find(|device| device.address == pci_address)
+        else {
+            let _ = writeln!(serial, "Arach: NVMe PCI function disappeared");
+            halt();
+        };
+        let Some(expected) = pci::PciExpectedConfiguration::from_device(device) else {
+            let _ = writeln!(serial, "Arach: NVMe PCI configuration was incomplete");
+            halt();
+        };
+        let interrupt_guard = arach::capability::InterruptGuard::<arach::arch::Active>::enter();
+        // SAFETY: this is the sole boot-time owner of the measured function;
+        // bus mastering is still clear and no NVMe interrupt source is live.
+        let quiescence = unsafe {
+            pci::BarProbeQuiescence::asserted(
+                expected.address(),
+                nvme_pci_configuration.reborrow(),
+                interrupt_guard.proof(),
+            )
+        };
+        let aperture = match pci::measure_bar0_aperture(quiescence, expected) {
+            Ok(aperture) => aperture,
+            Err(error) => {
+                let _ = writeln!(serial, "Arach: NVMe BAR measurement rejected: {error:?}");
+                halt();
+            }
+        };
+        drop(interrupt_guard);
+        let Some(dma) = prepare_nvme_dma_layout() else {
+            let _ = writeln!(serial, "Arach: NVMe DMA arena was not physically retained");
+            halt();
+        };
+        let bus_master = match pci::enable_bus_master(
+            aperture,
+            expected,
+            nvme_dma_authority.reborrow(),
+            nvme_pci_configuration.reborrow(),
+        ) {
+            Ok(lease) => lease,
+            Err(error) => {
+                let _ = writeln!(serial, "Arach: NVMe bus-master enable rejected: {error:?}");
+                halt();
+            }
+        };
+        let window_length = match usize::try_from(bus_master.aperture().length()) {
+            Ok(length) => length,
+            Err(_) => {
+                let _ = pci::revoke_bus_master(
+                    bus_master,
+                    nvme_dma_authority.reborrow(),
+                    nvme_pci_configuration.reborrow(),
+                );
+                let _ = writeln!(serial, "Arach: NVMe BAR length did not fit the MMIO mapper");
+                halt();
+            }
+        };
+        let window = match arach::mmio::MmioWindow::map(
+            bus_master.aperture().physical_base(),
+            window_length,
+            &nvme_mmio,
+        ) {
+            Ok(window) => window,
+            Err(error) => {
+                let _ = pci::revoke_bus_master(
+                    bus_master,
+                    nvme_dma_authority.reborrow(),
+                    nvme_pci_configuration.reborrow(),
+                );
+                let _ = writeln!(serial, "Arach: NVMe MMIO map rejected: {error:?}");
+                halt();
+            }
+        };
+        let mut controller = match NvmeController::initialize(window, dma) {
+            Ok(controller) => controller,
+            Err(error) => {
+                // Initialization consumes the mapping. Its Drop path still
+                // quiesces the controller before the PCI lease is revoked.
+                let _ = writeln!(serial, "Arach: NVMe initialization rejected: {error:?}");
+                let _ = pci::revoke_bus_master(
+                    bus_master,
+                    nvme_dma_authority.reborrow(),
+                    nvme_pci_configuration.reborrow(),
+                );
+                halt();
+            }
+        };
+        let mut sector = [0_u8; arach::storage::SECTOR_BYTES];
+        if let Err(error) =
+            arach::storage::BlockDevice::read_sector(&mut controller, 0, &mut sector)
+        {
+            let _ = writeln!(serial, "Arach: NVMe namespace read failed: {error:?}");
+            if controller.shutdown(&nvme_mmio).is_ok() {
+                let _ = pci::revoke_bus_master(
+                    bus_master,
+                    nvme_dma_authority.reborrow(),
+                    nvme_pci_configuration.reborrow(),
+                );
+            }
+            halt();
+        }
+        let namespace_sectors = controller.namespace_sectors();
+        let operational_root = namespace_sectors.rotate_left(17)
+            ^ (u64::from(address.bus) << 24)
+            ^ (u64::from(address.slot) << 16)
+            ^ (u64::from(address.function) << 8)
+            ^ 0x4e56_4d45_5f52_4f4f;
+        if let Err(error) = device_census.commit(claim, operational_root | 1) {
+            let _ = writeln!(serial, "Arach: NVMe operational commit rejected: {error:?}");
+            if controller.shutdown(&nvme_mmio).is_ok() {
+                let _ = pci::revoke_bus_master(
+                    bus_master,
+                    nvme_dma_authority.reborrow(),
+                    nvme_pci_configuration.reborrow(),
+                );
+            }
+            halt();
+        }
+        let _ = writeln!(
+            serial,
+            "Arach: NVMe namespace online pci={:02x}:{:02x}.{} sectors={} lba0-read=verified",
+            address.bus, address.slot, address.function, namespace_sectors,
+        );
+        if NVME_CONTROLLER.lock().is_some() {
+            let _ = writeln!(serial, "Arach: duplicate retained NVMe controller");
+            halt();
+        }
+        *NVME_CONTROLLER.lock() = Some(controller);
+        // The retained controller owns the MMIO window and the static DMA
+        // arena. Keep the PCI lease live for as long as that controller can
+        // issue commands; the runtime storage broker will eventually consume
+        // the retained controller through this serialized slot.
         core::mem::forget(bus_master);
     }
     let xhci_secret = census_secret.rotate_left(23) | 1;

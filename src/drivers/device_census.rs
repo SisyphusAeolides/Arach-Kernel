@@ -27,6 +27,7 @@ pub const AUTHORITY_CLOCK: u64 = 1 << 4;
 pub const AUTHORITY_PUBLISH: u64 = 1 << 5;
 pub const AUTHORITY_PCI_CONFIG: u64 = 1 << 6;
 
+const PCI_CLASS_MASS_STORAGE: u8 = 0x01;
 const PCI_CLASS_NETWORK: u8 = 0x02;
 const PCI_CLASS_DISPLAY: u8 = 0x03;
 const PCI_CLASS_MULTIMEDIA: u8 = 0x04;
@@ -37,6 +38,8 @@ const PCI_SUBCLASS_MULTIMEDIA_VIDEO: u8 = 0x00;
 const PCI_SUBCLASS_MULTIMEDIA_AUDIO: u8 = 0x01;
 const PCI_SUBCLASS_HD_AUDIO: u8 = 0x03;
 const PCI_SUBCLASS_USB: u8 = 0x03;
+const PCI_SUBCLASS_NVM: u8 = 0x08;
+const PCI_PROGRAMMING_INTERFACE_NVM: u8 = 0x02;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -49,6 +52,7 @@ pub enum DeviceFamily {
     UsbHostController = 6,
     InputController = 7,
     Other = 8,
+    StorageController = 9,
 }
 
 impl DeviceFamily {
@@ -73,6 +77,13 @@ impl DeviceFamily {
                     | AUTHORITY_DMA
                     | AUTHORITY_IRQ
                     | AUTHORITY_CLOCK
+                    | AUTHORITY_PUBLISH
+                    | AUTHORITY_PCI_CONFIG
+            }
+            Self::StorageController => {
+                AUTHORITY_DELEGATE
+                    | AUTHORITY_MMIO
+                    | AUTHORITY_DMA
                     | AUTHORITY_PUBLISH
                     | AUTHORITY_PCI_CONFIG
             }
@@ -204,6 +215,7 @@ pub struct DeviceCensusSummary {
     pub audio: usize,
     pub multimedia_video: usize,
     pub network: usize,
+    pub storage: usize,
     pub wireless: usize,
     pub usb_hosts: usize,
     pub input: usize,
@@ -223,6 +235,7 @@ impl DeviceCensusSummary {
         audio: 0,
         multimedia_video: 0,
         network: 0,
+        storage: 0,
         wireless: 0,
         usb_hosts: 0,
         input: 0,
@@ -720,6 +733,7 @@ impl<const N: usize> DeviceCensus<N> {
                 DeviceFamily::AudioController => summary.audio += 1,
                 DeviceFamily::MultimediaVideoController => summary.multimedia_video += 1,
                 DeviceFamily::NetworkController => summary.network += 1,
+                DeviceFamily::StorageController => summary.storage += 1,
                 DeviceFamily::WirelessController => summary.wireless += 1,
                 DeviceFamily::UsbHostController => summary.usb_hosts += 1,
                 DeviceFamily::InputController => summary.input += 1,
@@ -763,6 +777,11 @@ fn validate_claim(
 
 const fn classify(device: PciDevice) -> DeviceFamily {
     match (device.class_code, device.subclass) {
+        (PCI_CLASS_MASS_STORAGE, PCI_SUBCLASS_NVM)
+            if device.programming_interface == PCI_PROGRAMMING_INTERFACE_NVM =>
+        {
+            DeviceFamily::StorageController
+        }
         (PCI_CLASS_DISPLAY, _) => DeviceFamily::DisplayAdapter,
         (PCI_CLASS_MULTIMEDIA, PCI_SUBCLASS_MULTIMEDIA_AUDIO | PCI_SUBCLASS_HD_AUDIO) => {
             DeviceFamily::AudioController
@@ -839,6 +858,7 @@ fn summary_root(secret: u64, slots: &[DeviceSlot], summary: DeviceCensusSummary)
     state = mix(state, summary.audio as u64);
     state = mix(state, summary.multimedia_video as u64);
     state = mix(state, summary.network as u64);
+    state = mix(state, summary.storage as u64);
     state = mix(state, summary.wireless as u64);
     state = mix(state, summary.usb_hosts as u64);
     state = mix(state, summary.input as u64);
@@ -948,9 +968,10 @@ mod tests {
             device(PciAddress::new(0, 4, 0).unwrap(), 0x0c, 0x03, 0x30),
             device(PciAddress::new(0, 5, 0).unwrap(), 0x09, 0x02, 0),
             device(PciAddress::new(0, 6, 0).unwrap(), 0x0d, 0x20, 0),
+            device(PciAddress::new(0, 7, 0).unwrap(), 0x01, 0x08, 0x02),
         ];
-        let census = DeviceCensus::<8>::measure_functions(&devices, 7, |_| false).unwrap();
-        let families: [DeviceFamily; 7] =
+        let census = DeviceCensus::<9>::measure_functions(&devices, 7, |_| false).unwrap();
+        let families: [DeviceFamily; 8] =
             core::array::from_fn(|index| census.evidence().nth(index).unwrap().family);
 
         assert_eq!(families[0], DeviceFamily::DisplayAdapter);
@@ -960,6 +981,7 @@ mod tests {
         assert_eq!(families[4], DeviceFamily::UsbHostController);
         assert_eq!(families[5], DeviceFamily::InputController);
         assert_eq!(families[6], DeviceFamily::WirelessController);
+        assert_eq!(families[7], DeviceFamily::StorageController);
     }
 
     #[test]

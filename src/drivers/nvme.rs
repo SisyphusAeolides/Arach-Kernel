@@ -9,8 +9,10 @@
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{Ordering, compiler_fence};
 
+use crate::capability::{Capability, DeviceMemoryRight};
 use crate::mmio::{MmioAccessError, MmioWindow};
 use crate::storage::{BlockDevice, BlockError, SECTOR_BYTES};
+use sisyphus_driver_abi::STATUS_OK;
 
 pub const PCI_CLASS_MASS_STORAGE: u8 = 0x01;
 pub const PCI_SUBCLASS_NVM: u8 = 0x08;
@@ -100,7 +102,9 @@ impl NvmeCommand {
         let mut command = Self::with_opcode(OPCODE_CREATE_IO_COMPLETION_QUEUE, cid);
         command.dwords[6] = queue_physical as u32;
         command.dwords[7] = (queue_physical >> 32) as u32;
-        command.dwords[10] = 1 | (u32::from(depth - 1) << 16);
+        // CDW10 carries the zero-based queue size in the low half and queue
+        // identifier 1 in the high half.
+        command.dwords[10] = u32::from(depth - 1) | (1 << 16);
         // PC (physically contiguous) is bit 0 of the completion-queue flags.
         command.dwords[11] = 1;
         Ok(command)
@@ -117,7 +121,9 @@ impl NvmeCommand {
         let mut command = Self::with_opcode(OPCODE_CREATE_IO_SUBMISSION_QUEUE, cid);
         command.dwords[6] = queue_physical as u32;
         command.dwords[7] = (queue_physical >> 32) as u32;
-        command.dwords[10] = 1 | (u32::from(depth - 1) << 16);
+        // CDW10 carries the zero-based queue size in the low half and queue
+        // identifier 1 in the high half.
+        command.dwords[10] = u32::from(depth - 1) | (1 << 16);
         // PC is bit 0 and the completion-queue identifier occupies the high
         // half of the queue-flags dword.
         command.dwords[11] = 1 | (1 << 16);
@@ -468,6 +474,27 @@ impl NvmeController {
         Err(NvmeError::ControllerTimeout)
     }
 
+    /// Stops the controller and releases its MMIO mapping after a failed
+    /// boot-time qualification.  If the controller cannot prove it is idle,
+    /// ownership is retained by `self` and the mapping is deliberately left
+    /// mapped so a caller cannot accidentally hand a live device back.
+    pub fn shutdown(
+        mut self,
+        authority: &Capability<'_, DeviceMemoryRight>,
+    ) -> Result<(), NvmeError> {
+        self.quiesce()?;
+        // `NvmeController` has a Drop implementation that repeats quiesce.
+        // Move the already-quiesced window out without running that Drop
+        // path, then close the exact mapping under device-memory authority.
+        let mmio = unsafe { ptr::read(&self.mmio) };
+        core::mem::forget(self);
+        if mmio.close(authority) == STATUS_OK {
+            Ok(())
+        } else {
+            Err(NvmeError::Mmio)
+        }
+    }
+
     fn reset(&mut self) -> Result<(), NvmeError> {
         if self.mmio.read_u32(CSTS)? & CSTS_FATAL != 0 {
             return Err(NvmeError::ControllerFatal);
@@ -558,7 +585,7 @@ impl NvmeController {
             self.dma.admin_completion,
             &mut self.admin,
             0,
-            1,
+            0,
         )
     }
 
@@ -730,13 +757,13 @@ mod tests {
         let completion = NvmeCommand::create_io_completion_queue(1, 0x8000, QUEUE_DEPTH).unwrap();
         assert_eq!(
             completion.dwords[10],
-            1 | (u32::from(QUEUE_DEPTH - 1) << 16)
+            u32::from(QUEUE_DEPTH - 1) | (1 << 16)
         );
         assert_eq!(completion.dwords[11], 1);
         let submission = NvmeCommand::create_io_submission_queue(2, 0x9000, QUEUE_DEPTH).unwrap();
         assert_eq!(
             submission.dwords[10],
-            1 | (u32::from(QUEUE_DEPTH - 1) << 16)
+            u32::from(QUEUE_DEPTH - 1) | (1 << 16)
         );
         assert_eq!(submission.dwords[11], 1 | (1 << 16));
         assert_eq!(
