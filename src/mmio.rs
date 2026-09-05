@@ -13,7 +13,9 @@ use crate::sync::SpinLock;
 pub const HIGHER_HALF_DIRECT_MAP_BASE: usize = 0xffff_8000_0000_0000;
 pub const KERNEL_VIRTUAL_BASE: usize = 0xffff_ffff_8000_0000;
 pub const MMIO_WINDOW_BASE: usize = 0xffff_8080_0000_0000;
-pub const EARLY_MAPPED_PHYSICAL_LIMIT: u64 = 1024 * 1024 * 1024;
+/// The bootstrap direct map covers the low 4 GiB so a Multiboot2 live-root
+/// module can be retained without truncating its 32-bit module address range.
+pub const EARLY_MAPPED_PHYSICAL_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 
 const PAGE_SIZE: usize = 4096;
 const MMIO_SLOTS: usize = 512;

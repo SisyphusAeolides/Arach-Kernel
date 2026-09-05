@@ -76,6 +76,18 @@ arach_gdt_ready:
     orq $3, %rax
     movq %rax, p3_table
 
+    movabsq $(p2_table + 4096), %rax
+    orq $3, %rax
+    movq %rax, p3_table+8
+
+    movabsq $(p2_table + 8192), %rax
+    orq $3, %rax
+    movq %rax, p3_table+16
+
+    movabsq $(p2_table + 12288), %rax
+    orq $3, %rax
+    movq %rax, p3_table+24
+
     movabsq $p3_table, %rax
     orq $3, %rax
     movq %rax, p4_table+2048
@@ -107,7 +119,7 @@ arach_map_p2:
     orl $0x83, %eax
     movq %rax, p2_table(,%rcx,8)
     incl %ecx
-    cmpl $512, %ecx
+    cmpl $2048, %ecx
     jne arach_map_p2
 
     movq %cr4, %rax
@@ -152,6 +164,21 @@ _start:
     orl $3, %eax
     movl %eax, p3_table
 
+    movl $(p2_table + 4096), %eax
+    orl $3, %eax
+    movl %eax, p3_table+8
+    movl $0, p3_table+12
+
+    movl $(p2_table + 8192), %eax
+    orl $3, %eax
+    movl %eax, p3_table+16
+    movl $0, p3_table+20
+
+    movl $(p2_table + 12288), %eax
+    orl $3, %eax
+    movl %eax, p3_table+24
+    movl $0, p3_table+28
+
     movl $p3_table, %eax
     orl $3, %eax
     movl %eax, p4_table+2048
@@ -188,7 +215,7 @@ map_p2:
     movl %eax, p2_table(,%ecx,8)
     movl $0, p2_table+4(,%ecx,8)
     incl %ecx
-    cmpl $512, %ecx
+    cmpl $2048, %ecx
     jne map_p2
 
     movl %cr4, %eax
@@ -287,7 +314,7 @@ p4_table:
 p3_table:
     .skip 4096
 p2_table:
-    .skip 4096
+    .skip 16384
 mmio_p3_table:
     .skip 4096
 mmio_p2_table:
