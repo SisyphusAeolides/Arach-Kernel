@@ -97,7 +97,7 @@ use arach::serial::SerialPort;
 use arach::shim::{
     AbyssAllocator, DriverHost, DriverServices, IrqService, LogService, MmioService,
 };
-use arach::storage::{Ext4ReadOnly, GptTable};
+use arach::storage::{BlockDevice, BlockError, Ext4ReadOnly, GptTable, SECTOR_BYTES};
 use arach::sync::SpinLock;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
@@ -465,6 +465,79 @@ static NVME_CONTROLLER: SpinLock<Option<NvmeController>> = SpinLock::new(None);
 
 #[cfg(target_os = "none")]
 static NVME_ROOT_RANGE: SpinLock<Option<(u64, u64)>> = SpinLock::new(None);
+
+#[cfg(target_os = "none")]
+static BOOT_ROOT_RANGE: SpinLock<Option<(u64, u64)>> = SpinLock::new(None);
+
+#[cfg(target_os = "none")]
+struct BootRootBlockDevice {
+    start: u64,
+    sectors: u64,
+}
+
+#[cfg(target_os = "none")]
+impl BlockDevice for BootRootBlockDevice {
+    fn sector_count(&self) -> u64 {
+        self.sectors
+    }
+
+    fn read_sector(&mut self, lba: u64, sector: &mut [u8; SECTOR_BYTES]) -> Result<(), BlockError> {
+        if lba >= self.sectors {
+            return Err(BlockError::InvalidSector);
+        }
+        let byte_offset = lba
+            .checked_mul(SECTOR_BYTES as u64)
+            .ok_or(BlockError::InvalidSector)?;
+        let physical = self
+            .start
+            .checked_add(byte_offset)
+            .ok_or(BlockError::InvalidSector)?;
+        let physical_end = physical
+            .checked_add(SECTOR_BYTES as u64)
+            .ok_or(BlockError::InvalidSector)?;
+        let root_end = self
+            .start
+            .checked_add(
+                self.sectors
+                    .checked_mul(SECTOR_BYTES as u64)
+                    .ok_or(BlockError::InvalidGeometry)?,
+            )
+            .ok_or(BlockError::InvalidGeometry)?;
+        if physical_end > root_end {
+            return Err(BlockError::InvalidSector);
+        }
+        let virtual_address = direct_map_address(physical).ok_or(BlockError::ReadFailure)?;
+        // SAFETY: the Multiboot2 root module was range-checked against the
+        // retained direct map before this reader is published; the module is
+        // immutable bootloader-owned memory for the kernel's lifetime.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                virtual_address as *const u8,
+                sector.as_mut_ptr(),
+                SECTOR_BYTES,
+            );
+        }
+        Ok(())
+    }
+
+    fn write_sector(&mut self, _lba: u64, _sector: &[u8; SECTOR_BYTES]) -> Result<(), BlockError> {
+        Err(BlockError::WriteFailure)
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        Err(BlockError::FlushFailure)
+    }
+}
+
+#[cfg(target_os = "none")]
+fn read_boot_root_sector(lba: u64, sector: &mut [u8; SECTOR_BYTES]) -> Result<(), BlockError> {
+    let (start, sectors) = BOOT_ROOT_RANGE
+        .lock()
+        .as_ref()
+        .copied()
+        .ok_or(BlockError::ReadFailure)?;
+    BootRootBlockDevice { start, sectors }.read_sector(lba, sector)
+}
 
 /// Read one sector relative to the ext4 partition retained as the persistent
 /// root.  Storage syscalls reach the NVMe controller only through this narrow
@@ -1313,6 +1386,70 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         bootstrap_module.end.as_u64(),
     );
 
+    // A live ArchISO profile carries its complete userspace as an immutable
+    // ext4 Multiboot2 module. Validate it before the allocator is given any
+    // chance to reuse its frames, then publish the same narrow reader used by
+    // an installed NVMe root. The module is optional for the standalone
+    // qualification bundle, but a malformed advertised module is fatal.
+    #[cfg(target_os = "none")]
+    let live_root_module = match boot.module(b"arachos-root") {
+        Ok(module) => {
+            let length = module.length();
+            if length == 0
+                || length % SECTOR_BYTES as u64 != 0
+                || module.end.as_u64() > EARLY_MAPPED_PHYSICAL_LIMIT
+                || direct_map_address(module.start.as_u64()).is_none()
+            {
+                let _ = writeln!(serial, "Arach: live ext4 root module range rejected");
+                halt();
+            }
+            let sectors = length / SECTOR_BYTES as u64;
+            let mut device = BootRootBlockDevice {
+                start: module.start.as_u64(),
+                sectors,
+            };
+            let filesystem = match Ext4ReadOnly::probe(&mut device) {
+                Ok(filesystem) => filesystem,
+                Err(error) => {
+                    let _ = writeln!(
+                        serial,
+                        "Arach: live ext4 root module metadata rejected: {error:?}"
+                    );
+                    halt();
+                }
+            };
+            *BOOT_ROOT_RANGE.lock() = Some((module.start.as_u64(), sectors));
+            if let Err(error) =
+                arach::storage::publish_persistent_root(filesystem, sectors, read_boot_root_sector)
+            {
+                let _ = writeln!(
+                    serial,
+                    "Arach: live ext4 root publication rejected: {error:?}"
+                );
+                halt();
+            }
+            let _ = writeln!(
+                serial,
+                "Arach: live ext4 root validated module-bytes={} sectors={} block-size={}",
+                length,
+                sectors,
+                filesystem.block_size(),
+            );
+            Some(module)
+        }
+        Err(arach::boot::multiboot2::BootError::MissingModule) => None,
+        Err(error) => {
+            let _ = writeln!(
+                serial,
+                "Arach: live ext4 root module tag rejected: {error:?}"
+            );
+            halt();
+        }
+    };
+
+    #[cfg(not(target_os = "none"))]
+    let live_root_module: Option<BootModule> = None;
+
     #[cfg(target_os = "none")]
     let rustd_resolved_module = load_rustd_resolved_artifact(&mut serial, boot);
 
@@ -1576,6 +1713,9 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         .max((multiboot_physical_address + boot.total_size()) as u64)
         .max(rustd_module.end.as_u64())
         .max(bootstrap_module.end.as_u64());
+    if let Some(module) = live_root_module {
+        protected_end = protected_end.max(module.end.as_u64());
+    }
     #[cfg(target_os = "none")]
     if let Some(module) = rustd_resolved_module {
         protected_end = protected_end.max(module.end.as_u64());
@@ -1695,6 +1835,17 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
     for reservation in required_reservations {
         if let Err(error) = reservations.push(reservation) {
             let _ = writeln!(serial, "Abyss: reservation table failed: {error:?}");
+            halt();
+        }
+    }
+
+    if let Some(module) = live_root_module {
+        if let Err(error) = reservations.push(Reservation::new(
+            module.start,
+            module.end,
+            ReservationKind::BootModule,
+        )) {
+            let _ = writeln!(serial, "Abyss: live root reservation failed: {error:?}");
             halt();
         }
     }
@@ -3169,25 +3320,36 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
                 }
             }
             if let Some((start_lba, sector_count, filesystem)) = persistent_root {
-                *NVME_ROOT_RANGE.lock() = Some((start_lba, sector_count));
-                if let Err(error) = arach::storage::publish_persistent_root(
-                    filesystem,
-                    sector_count,
-                    read_persistent_root_sector,
-                ) {
+                if arach::storage::persistent_root_present() {
+                    // A live ISO's immutable module is authoritative for the
+                    // installer session. Keep the discovered NVMe root
+                    // available for a later installed boot rather than
+                    // replacing the already-published live root.
                     let _ = writeln!(
                         serial,
-                        "Arach: persistent ext4 root publication rejected: {error:?}"
+                        "Arach: NVMe ext4 root discovered while live root is active; retaining module root"
                     );
-                    halt();
+                } else {
+                    *NVME_ROOT_RANGE.lock() = Some((start_lba, sector_count));
+                    if let Err(error) = arach::storage::publish_persistent_root(
+                        filesystem,
+                        sector_count,
+                        read_persistent_root_sector,
+                    ) {
+                        let _ = writeln!(
+                            serial,
+                            "Arach: persistent ext4 root publication rejected: {error:?}"
+                        );
+                        halt();
+                    }
+                    let _ = writeln!(
+                        serial,
+                        "Arach: persistent ext4 root validated start-lba={} sectors={} block-size={}",
+                        start_lba,
+                        sector_count,
+                        filesystem.block_size(),
+                    );
                 }
-                let _ = writeln!(
-                    serial,
-                    "Arach: persistent ext4 root validated start-lba={} sectors={} block-size={}",
-                    start_lba,
-                    sector_count,
-                    filesystem.block_size(),
-                );
             } else {
                 let _ = writeln!(
                     serial,
