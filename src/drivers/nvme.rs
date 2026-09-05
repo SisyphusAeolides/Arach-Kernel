@@ -102,9 +102,9 @@ impl NvmeCommand {
         let mut command = Self::with_opcode(OPCODE_CREATE_IO_COMPLETION_QUEUE, cid);
         command.dwords[6] = queue_physical as u32;
         command.dwords[7] = (queue_physical >> 32) as u32;
-        // CDW10 carries the zero-based queue size in the low half and queue
-        // identifier 1 in the high half.
-        command.dwords[10] = u32::from(depth - 1) | (1 << 16);
+        // CDW10 carries the queue identifier in the low half and the
+        // zero-based queue size in the high half.
+        command.dwords[10] = 1 | (u32::from(depth - 1) << 16);
         // PC (physically contiguous) is bit 0 of the completion-queue flags.
         command.dwords[11] = 1;
         Ok(command)
@@ -121,9 +121,9 @@ impl NvmeCommand {
         let mut command = Self::with_opcode(OPCODE_CREATE_IO_SUBMISSION_QUEUE, cid);
         command.dwords[6] = queue_physical as u32;
         command.dwords[7] = (queue_physical >> 32) as u32;
-        // CDW10 carries the zero-based queue size in the low half and queue
-        // identifier 1 in the high half.
-        command.dwords[10] = u32::from(depth - 1) | (1 << 16);
+        // CDW10 carries the queue identifier in the low half and the
+        // zero-based queue size in the high half.
+        command.dwords[10] = 1 | (u32::from(depth - 1) << 16);
         // PC is bit 0 and the completion-queue identifier occupies the high
         // half of the queue-flags dword.
         command.dwords[11] = 1 | (1 << 16);
@@ -762,13 +762,13 @@ mod tests {
         let completion = NvmeCommand::create_io_completion_queue(1, 0x8000, QUEUE_DEPTH).unwrap();
         assert_eq!(
             completion.dwords[10],
-            u32::from(QUEUE_DEPTH - 1) | (1 << 16)
+            1 | (u32::from(QUEUE_DEPTH - 1) << 16)
         );
         assert_eq!(completion.dwords[11], 1);
         let submission = NvmeCommand::create_io_submission_queue(2, 0x9000, QUEUE_DEPTH).unwrap();
         assert_eq!(
             submission.dwords[10],
-            u32::from(QUEUE_DEPTH - 1) | (1 << 16)
+            1 | (u32::from(QUEUE_DEPTH - 1) << 16)
         );
         assert_eq!(submission.dwords[11], 1 | (1 << 16));
         assert_eq!(
