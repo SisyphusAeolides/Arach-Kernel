@@ -1,7 +1,7 @@
 # Arach boot qualification
 
 The boot qualification covers one exact Arach-Kernel revision and the
-measured modules that GRUB passes to it:
+measured modules that Limine passes to it through the Multiboot2 protocol:
 
 1. the Arach Kernel Multiboot2 image;
 2. RustD as PID 1;
@@ -15,7 +15,7 @@ silently substitutes a host kernel.
 
 The kernel-side contract verifies that every module is a bounded ELF image,
 that the measured digest and entry offset match the build metadata, and that
-the GRUB configuration names the modules `rustd`, `rustd-resolved`, and
+the Limine configuration names the modules `rustd`, `rustd-resolved`, and
 `arachos-bootstrap`. A missing or mismatched artifact stops the build.
 
 The ring-3 probe remains a compatibility test, not an init system. It checks
@@ -39,6 +39,17 @@ ARACH_BOOTSTRAP_ABI=linux \
     -Z build-std-features=compiler-builtins-mem
 ```
 
-The resulting image must pass `grub-file --is-x86-multiboot2`. ArachOS then
+Build the standalone hybrid qualification image with:
+
+```sh
+ARACH_KERNEL_IMAGE=/path/to/arach \
+ARACH_RUSTD_IMAGE=/path/to/rustd \
+ARACH_BOOTSTRAP_IMAGE=/path/to/boot-probe \
+ARACH_RESOLVED_IMAGE=/path/to/rustd-resolved \
+    scripts/build-arachos-limine-bundle.sh
+```
+
+The script validates the Multiboot2 header, embeds the measured modules, and
+installs Limine's BIOS and UEFI loaders into the hybrid image. ArachOS then
 performs the BIOS and UEFI installer and installed-system checks before any
 release media is written.

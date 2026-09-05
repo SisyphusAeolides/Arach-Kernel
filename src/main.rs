@@ -667,7 +667,7 @@ fn load_rustd_resolved_artifact(
             if RUSTD_RESOLVED_EXPECTED_BYTES != 0 {
                 let _ = writeln!(
                     serial,
-                    "Arach: measured RustD-Resolved artifact is missing from the GRUB bundle"
+                    "Arach: measured RustD-Resolved artifact is missing from the Multiboot2 bundle"
                 );
                 halt();
             }
@@ -1178,7 +1178,7 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
         "Arach: kernel virtual {kernel_start:#x}..{kernel_end:#x}, physical {kernel_physical_start:#x}..{kernel_physical_end:#x}"
     );
 
-    // SAFETY: The bootstrap preserves GRUB's physical Multiboot2 pointer and
+    // SAFETY: The bootstrap preserves the loader's physical Multiboot2 pointer and
     // passes its mapped higher-half direct-map alias in the first argument.
     let boot = match unsafe { BootInformation::load(multiboot_address) } {
         Ok(boot) => boot,

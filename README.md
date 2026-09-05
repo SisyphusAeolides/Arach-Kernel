@@ -10,9 +10,10 @@
 Arach Kernel is the Rust-first monolithic kernel at the foundation of
 [ArachOS](https://github.com/SisyphusAeolides/ArachOS). It targets x86-64
 systems with a measured Linux-compatible userspace contract. Its production
-target is ArachOS: an Arch Linux package base composed with ArchISO, GRUB,
-RustD as PID 1, and RustD-resolved as the native resolver. Desktop environments
-remain Calamares installation choices rather than kernel-bound components.
+target is ArachOS: an Arch Linux package base composed with ArchISO, a Limine
+Multiboot2 qualification path, RustD as PID 1, and RustD-resolved as the native
+resolver. Desktop environments remain Calamares installation choices rather
+than kernel-bound components.
 
 Monolithic describes the kernel architecture: scheduling, memory, interrupts,
 devices, filesystems, and networking may execute in the kernel address space.
@@ -21,7 +22,7 @@ applications into ring 0.
 
 ## Design goals
 
-- Boot ArachOS directly through GRUB's Multiboot2 path.
+- Boot ArachOS directly through Limine's Multiboot2 path.
 - Run the ArachOS pacman userspace with RustD as PID 1 and RustD-resolved as the
   resolver, without a kernel-selected desktop environment.
 - Provide a measured Linux compatibility contract without silently claiming
@@ -35,11 +36,11 @@ applications into ring 0.
 
 Arach Kernel is under active development. Its host test suite passes and the
 custom Multiboot2 kernel contract builds with measured RustD, bootstrap, and
-RustD-resolved inputs. The ArachOS integration has a direct GRUB Multiboot2
+RustD-resolved inputs. The ArachOS integration has a direct Limine Multiboot2
 bundle contract and accepts a measured `rustd` module as Linux-ABI PID 1.
 ArachOS pins the exact qualified source revision.
 
-The ArachOS/GRUB path is not yet release-qualified. Persistent block-backed root
+The ArachOS/Limine path is not yet release-qualified. Persistent block-backed root
 storage, the complete RustD Linux ABI, cgroup v2, `/proc`, `/sys`, udev, D-Bus,
 RustD-resolved, networking, and graphical Calamares must all pass in BIOS and
 UEFI QEMU before Arach Kernel can be the only installed boot path. Retired
@@ -148,7 +149,7 @@ restart remain future compatibility slices.
 |---|---|---|
 | Kernel core | Memory, interrupt, process, capability, driver, filesystem, networking, and native/Linux execution-ABI metadata pass host tests; the custom Multiboot2 image contract is warning-free with measured runtime inputs | Boot the complete ArachOS graph in BIOS and UEFI while extending the measured Linux surface without weakening its gates |
 | Linux userspace compatibility | Identity, anonymous and eager private file mappings, bounded memfd-backed shared mappings, whole-range W^X protection transitions, lifecycle, a unified generation-bound descriptor/open-object table, bounded pipes/event/timer/poll/epoll, Unix stream and datagram sockets with `SCM_RIGHTS`/`SO_PASSCRED`, signalfd, bounded VFS file, directory, metadata, and mode-change calls, transactional static and measured `PT_INTERP` execution, an eight-object dependency engine measured with a deduplicated four-object diamond and canonical finite `DT_RUNPATH`, explicit and packed relative relocation, exact-size main-executable copy relocation and interposition, provider-first static/general-dynamic startup-TLS relocation, exact GNU symbol versions, deterministic eager external PLT binding with bounded weak-function semantics, dependency-first initialization, and reverse finalization, a shared-address-space clone profile, measured private robust-futex recovery, clear-child-tid wake, synchronous self-signal delivery/return, multi-member `exit_group`, and per-thread FS-base TLS are implemented and tested | Add scheduler-backed descriptor waits and filesystem socket nodes; add late-loaded TLS, TLSDESC, general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and broader relocations; add general VMA split/merge, demand paging, broader signals, complete leader-exit semantics, and persistent storage |
-| System bootstrap | GRUB Multiboot2 entry exists and the source accepts measured RustD as Linux-ABI PID 1 | Boot the packaged ArachOS root under RustD and pass the complete service graph in BIOS and UEFI |
+| System bootstrap | Limine Multiboot2 entry exists and the source accepts measured RustD as Linux-ABI PID 1 | Boot the packaged ArachOS root under RustD and pass the complete service graph in BIOS and UEFI |
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
 | Formal specifications | Idris 2 total specifications and Agda safe proof models compile in CI | Keep each proof artifact bound to a generated table, manifest, or runtime boundary |
@@ -156,7 +157,7 @@ restart remain future compatibility slices.
 
 The current critical path is:
 
-1. Boot the direct ArachOS GRUB bundle in BIOS and UEFI and retain serial evidence.
+1. Boot the direct ArachOS Limine bundle in BIOS and UEFI and retain serial evidence.
 2. Extend the measured bounded graph linker with late-loaded TLS and TLSDESC,
    general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and
    broader relocations.
@@ -224,7 +225,7 @@ ARACH_KERNEL_IMAGE=/path/to/arach \
 ARACH_RUSTD_IMAGE=/path/to/rustd \
 ARACH_BOOTSTRAP_IMAGE=/path/to/bootstrap \
 ARACH_RESOLVED_IMAGE=/path/to/rustd-resolved \
-    scripts/build-arachos-grub-bundle.sh
+    scripts/build-arachos-limine-bundle.sh
 ```
 
 The custom target is `x86_64-arach.json`. The `cargo kernel` alias selects the
@@ -232,14 +233,16 @@ The custom target is `x86_64-arach.json`. The `cargo kernel` alias selects the
 formal attestation and measured external PID 1 artifacts. Those inputs remain
 controlled by their own repositories and the ArachOS component lock. The
 ArachOS bundle validates the Multiboot2 kernel and measured RustD/RustD-resolved
-artifacts before constructing GRUB media.
+artifacts before constructing Limine media.
 
 ## ArachOS userspace target
 
 ArachOS owns the release, package repository, and installer composition. The
 Arch Linux packages provide the bootstrap package ecosystem, while RustD owns
 PID 1 and service management, RustD-resolved owns DNS, NSS, Varlink, and
-the resolver compatibility boundary, and GRUB owns the BIOS and UEFI boot path.
+the resolver compatibility boundary. Limine owns the standalone measured-kernel
+BIOS and UEFI path; the ArchISO/Calamares installed-system bootloader remains a
+separate qualification gate.
 
 No desktop environment is compiled into or selected by Arach Kernel. ArachOS
 uses graphical Calamares package selection, and each selected display-manager,

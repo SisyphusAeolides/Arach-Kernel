@@ -14,9 +14,9 @@ multiboot_header:
     // The framebuffer tag is 20 bytes long; align the next tag to 8 bytes.
     .long 0
     // The EFI64 entry tag below selects the 64-bit handoff instead of the
-    // legacy 32-bit `_start` ELF entry used by BIOS GRUB. Do not request the
-    // EFI boot-services tag here: Arach needs GRUB to call ExitBootServices
-    // and include the final memory map in the Multiboot2 handoff.
+    // legacy 32-bit `_start` ELF entry used by a BIOS Multiboot2 loader. Do
+    // not request the EFI boot-services tag here: Arach needs the loader to
+    // call ExitBootServices and include the final memory map in the handoff.
     .short 9
     .short 0
     .long 12
@@ -34,9 +34,9 @@ multiboot_header_end:
 .equ KERNEL_VIRTUAL_BASE, 0xffffffff80000000
 .equ HIGHER_HALF_DIRECT_MAP_BASE, 0xffff800000000000
 
-// GRUB enters here after it has loaded the measured Arach image, built
-// the bounded Multiboot2-shaped handoff record, and exited UEFI boot services.
-// Its Multiboot2 EFI64 handoff keeps the information pointer in RBX and leaves
+// A UEFI Multiboot2 loader enters here after it has loaded the measured Arach
+// image, built the bounded handoff record, and exited UEFI boot services. Its
+// EFI64 handoff keeps the information pointer in RBX and leaves
 // the firmware stack in RSP. Unlike `_start`, firmware is already in 64-bit
 // mode; this entry creates the same initial page-table topology before joining
 // the common higher-half path.
@@ -50,9 +50,9 @@ arach_entry:
     // physical address for arach_high_half_start, which creates its direct-map
     // alias before calling the Rust entry point.
     movq %rbx, %rdi
-    // GRUB intentionally leaves the EFI stack in RSP. Switch to the same
-    // kernel-owned bootstrap stack used by the BIOS path once the higher-half
-    // direct map is active; its physical address is below the link base.
+    // The loader leaves its EFI stack in RSP. Switch to the same kernel-owned
+    // bootstrap stack used by the BIOS path once the higher-half direct map is
+    // active; its physical address is below the link base.
     movabsq $(stack_top - KERNEL_VIRTUAL_BASE), %r12
     lgdt gdt64_pointer
     movw $0x10, %ax
@@ -118,7 +118,7 @@ arach_map_p2:
     movq %rax, %cr3
 
     // The UEFI image can occupy part of the linked high-kernel BSS range
-    // until ExitBootServices. GRUB deliberately leaves that zero-only
+    // until ExitBootServices. The loader deliberately leaves that zero-only
     // segment unclaimed; clear it from Arach's fresh identity map before
     // any high-half Rust state is observed.
     movabsq $__kernel_bss_physical_start, %rdi

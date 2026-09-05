@@ -410,7 +410,7 @@ fn emit_cosmic_defaults(label: &str) {
 /// Bind the optional RustD-Resolved boot module to the kernel artifact.
 ///
 /// RustD-Resolved is normally started from the installed RLC filesystem by
-/// RustD. When a GRUB bundle also carries an early resolver module, the kernel
+/// RustD. When a Multiboot2 bundle also carries an early resolver module, the kernel
 /// must know its exact size and digest so the module cannot overlap allocator
 /// memory or become an unauthenticated boot input. Leaving the variable unset
 /// keeps the module absent from the bundle contract.

@@ -28,7 +28,7 @@ are retained; do not create repositories by copying only the latest files.
 ## Dependency direction
 
 ```text
-GRUB ──measured modules──────► Arach Kernel
+Limine ──measured Multiboot2 modules────► Arach Kernel
                                 │
 Driver ABI ◄────────────────────┤
                                 ├──► RustD PID 1
@@ -58,7 +58,7 @@ Sisyphus-OS may be archived only after all of these are mechanically checked:
 2. every destination contains preserved history, license information, and a
    successful standalone CI run;
 3. a clean integration checkout can build without reading Sisyphus-OS;
-4. Arach boots through GRUB and launches the measured RustD artifact;
+4. Arach boots through Limine and launches the measured RustD artifact;
 5. the migration manifest maps retained commit IDs to destination commit IDs;
 6. the old repository README points to every new home or records the explicit
    retirement decision.

@@ -29,7 +29,7 @@ pub struct IgnitionSummary {
 /// Protocol-neutral ordering guard for the kernel bootstrap path.
 ///
 /// It records readiness evidence but does not initialize hardware itself. This
-/// lets the current Multiboot2 entry and a future Limine entry converge on the
+/// lets each Multiboot2 loader entry converge on the
 /// same checked sequence without installing competing `_start` symbols.
 pub struct IgnitionSequence {
     protocol: BootProtocol,
