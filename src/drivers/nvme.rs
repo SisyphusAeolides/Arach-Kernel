@@ -278,7 +278,7 @@ pub enum NvmeError {
     ControllerFatal,
     CompletionTimeout,
     CompletionMismatch,
-    CommandFailed(u16),
+    CommandFailed { opcode: u8, status: u16 },
     InvalidNamespace,
     UnsupportedLogicalBlockSize,
     InvalidSector,
@@ -300,7 +300,7 @@ impl From<NvmeError> for BlockError {
             NvmeError::UnsupportedLogicalBlockSize | NvmeError::UnsupportedVersion => {
                 Self::UnsupportedMetadata
             }
-            NvmeError::CommandFailed(_) | NvmeError::CompletionMismatch => Self::ReadFailure,
+            NvmeError::CommandFailed { .. } | NvmeError::CompletionMismatch => Self::ReadFailure,
             NvmeError::Mmio | NvmeError::ControllerTimeout | NvmeError::CompletionTimeout => {
                 Self::ReadFailure
             }
@@ -658,7 +658,10 @@ impl NvmeController {
             mmio.write_u32(completion_doorbell, u32::from(queue.completion_head))?;
             if !completion_entry.success(expected_phase) {
                 let status = completion_entry.status_code();
-                return Err(NvmeError::CommandFailed(status));
+                return Err(NvmeError::CommandFailed {
+                    opcode: command.opcode(),
+                    status,
+                });
             }
             return Ok(completion_entry);
         }
@@ -703,7 +706,9 @@ impl BlockDevice for NvmeController {
             self.dma.sector_physical,
         );
         self.submit_io(command).map_err(|error| match error {
-            NvmeError::CommandFailed(_) | NvmeError::CompletionMismatch => BlockError::WriteFailure,
+            NvmeError::CommandFailed { .. } | NvmeError::CompletionMismatch => {
+                BlockError::WriteFailure
+            }
             NvmeError::InvalidSector => BlockError::InvalidSector,
             _ => BlockError::WriteFailure,
         })?;
