@@ -23,8 +23,9 @@ applications into ring 0.
 ## Design goals
 
 - Boot ArachOS directly through Limine's Multiboot2 path.
-- Run the ArachOS pacman userspace with RustD as PID 1 and RustD-resolved as the
-  resolver, without a kernel-selected desktop environment.
+- Run the ArachOS ArchISO userspace with Corinth as the installed package
+  service, RustD as PID 1, and RustD-resolved as the resolver, without a
+  kernel-selected desktop environment.
 - Provide a measured Linux compatibility contract without silently claiming
   support that has not passed a gate.
 - Support real hardware through native drivers and qualified Linux-compatible
@@ -153,7 +154,7 @@ restart remain future compatibility slices.
 | Linux module compatibility | RHEL 10/Linux 6.12 and Ubuntu 24.04/Linux 6.8 modules pass ELF validation, ABI admission, relocation, measured `struct module` validation, native W^X mapping, and host-mode transaction tests | Complete production special-section, all-CPU TLB, and lifecycle execution backends, then initialize and remove a module in an Arach boot |
 | NVIDIA open modules | All four NVIDIA `610.43.03` open modules build and pass the static Linux-module gates | Resolve the live KPI surface and complete initialization, device operation, suspend/resume, and removal on Arach |
 | Formal specifications | Idris 2 total specifications and Agda safe proof models compile in CI | Keep each proof artifact bound to a generated table, manifest, or runtime boundary |
-| ArachOS graphical stack | The pacman userspace and desktop selection belong to Calamares | Qualify graphical Calamares, the selected display manager, Wayland, login, suspend/resume, logout, and shutdown |
+| ArachOS graphical stack | The ArchISO-assembled userspace and desktop selection belong to Calamares | Qualify graphical Calamares, the selected display manager, Wayland, login, suspend/resume, logout, and shutdown |
 
 The current critical path is:
 
