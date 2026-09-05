@@ -33,7 +33,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: target/formal/toolchains
-          key: arach-formal-idris2-0.8.0-agda-2.8.0-v1
+          key: arach-formal-idris2-0.8.0-5aaefadb587224eb44d3be0fbb7e2835b48bd7a6-agda-2.8.0-v2
       - run: scripts/bootstrap-formal-toolchains.sh
 
   arach-kernel-contract:
