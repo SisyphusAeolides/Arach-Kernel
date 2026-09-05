@@ -128,7 +128,9 @@ The Linux personality currently covers:
   order through the x86-64 process-entry callback in QEMU.
 
 The file bridge is intentionally bounded and ephemeral. It is not a persistent
-block-backed filesystem. Anonymous pipes use a 4 KiB allocation-free ring,
+block-backed filesystem. The boot-time NVMe path now validates a GPT header and
+partition table when the namespace provides one, but it does not mount a
+filesystem or publish a root. Anonymous pipes use a 4 KiB allocation-free ring,
 provide atomic bounded writes, EOF/HUP/EPIPE endpoint lifetime, and
 generation-stable epoll watch lifetime and last-close removal. Unix stream
 sockets use fixed 4 KiB queues and bounded endpoint, connection, and listen
@@ -163,7 +165,8 @@ The current critical path is:
    general loader search policy, weak data/TLS, GNU-unique/IFUNC binding, and
    broader relocations.
 3. Add scheduler-backed descriptor waits, filesystem socket nodes, and
-   persistent block-backed storage on the unified open-object boundary.
+   persistent block-backed storage on the unified open-object boundary. The
+   NVMe/GPT probe is evidence for that work, not a root-filesystem claim.
 4. Boot the ArachOS package graph under RustD/RustD-resolved and qualify graphical
    Calamares plus user-selected desktop environments.
 

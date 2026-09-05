@@ -216,23 +216,6 @@ impl GptTable {
             return Err(BlockError::UnsupportedMetadata);
         }
 
-        let expected_entries_crc = read_u32(&header, 88);
-        let mut entries = [0_u8; MAXIMUM_GPT_PARTITIONS * GPT_PARTITION_ENTRY_BYTES];
-        let mut sector = [0_u8; SECTOR_BYTES];
-        let mut entry_bytes = 0_usize;
-        let mut lba = entry_lba;
-        while entry_bytes < entry_count * entry_size {
-            device.read_sector(lba, &mut sector)?;
-            let remaining = entry_count * entry_size - entry_bytes;
-            let copied = remaining.min(SECTOR_BYTES);
-            entries[entry_bytes..entry_bytes + copied].copy_from_slice(&sector[..copied]);
-            entry_bytes += copied;
-            lba = lba.checked_add(1).ok_or(BlockError::InvalidSector)?;
-        }
-        if crc32(&entries[..entry_count * entry_size]) != expected_entries_crc {
-            return Err(BlockError::CorruptMetadata);
-        }
-
         let first_usable_lba = read_u64(&header, 40);
         let last_usable_lba = read_u64(&header, 48);
         if entry_lba < 2
@@ -242,37 +225,66 @@ impl GptTable {
         {
             return Err(BlockError::CorruptMetadata);
         }
+
+        let expected_entries_crc = read_u32(&header, 88);
+        let entry_bytes_total = entry_count * entry_size;
+        let mut entries_crc = Crc32::new();
+        let mut sector = [0_u8; SECTOR_BYTES];
+        let mut entry_bytes = 0_usize;
+        let mut lba = entry_lba;
         let mut partitions = [GptPartition::EMPTY; MAXIMUM_GPT_PARTITIONS];
         let mut partition_count = 0_usize;
-        for (index, raw) in entries[..entry_count * entry_size]
-            .chunks_exact(GPT_PARTITION_ENTRY_BYTES)
-            .enumerate()
-        {
-            if raw[..16].iter().all(|byte| *byte == 0) {
-                continue;
-            }
-            let first_lba = read_u64(raw, 32);
-            let last_lba = read_u64(raw, 40);
-            if first_lba < first_usable_lba || last_lba < first_lba || last_lba > last_usable_lba {
-                return Err(BlockError::CorruptMetadata);
-            }
-            let mut partition = GptPartition::EMPTY;
-            partition.index = index as u32;
-            partition.type_guid.copy_from_slice(&raw[..16]);
-            partition.unique_guid.copy_from_slice(&raw[16..32]);
-            partition.first_lba = first_lba;
-            partition.last_lba = last_lba;
-            partition.attributes = read_u64(raw, 48);
-            for unit in 0..MAXIMUM_GPT_PARTITION_NAME_UNITS {
-                let value = u16::from_le_bytes([raw[56 + unit * 2], raw[57 + unit * 2]]);
-                if value == 0 {
-                    break;
+        for _ in 0..entry_sectors {
+            device.read_sector(lba, &mut sector)?;
+            let remaining = entry_bytes_total - entry_bytes;
+            let copied = remaining.min(SECTOR_BYTES);
+            let entry_sector = &sector[..copied];
+            entries_crc.update(entry_sector);
+            // GPT entries are 128 bytes and therefore never straddle a
+            // 512-byte sector. The final sector may contain unused trailing
+            // bytes; those bytes are excluded from both the CRC and parsing.
+            for (offset, raw) in entry_sector
+                .chunks_exact(GPT_PARTITION_ENTRY_BYTES)
+                .enumerate()
+            {
+                let index = (entry_bytes / GPT_PARTITION_ENTRY_BYTES) + offset;
+                if raw[..16].iter().all(|byte| *byte == 0) {
+                    continue;
                 }
-                partition.name[unit] = value;
-                partition.name_len = (unit + 1) as u8;
+                let first_lba = read_u64(raw, 32);
+                let last_lba = read_u64(raw, 40);
+                if first_lba < first_usable_lba
+                    || last_lba < first_lba
+                    || last_lba > last_usable_lba
+                {
+                    return Err(BlockError::CorruptMetadata);
+                }
+                let mut partition = GptPartition::EMPTY;
+                partition.index = index as u32;
+                partition.type_guid.copy_from_slice(&raw[..16]);
+                partition.unique_guid.copy_from_slice(&raw[16..32]);
+                partition.first_lba = first_lba;
+                partition.last_lba = last_lba;
+                partition.attributes = read_u64(raw, 48);
+                for unit in 0..MAXIMUM_GPT_PARTITION_NAME_UNITS {
+                    let value = u16::from_le_bytes([raw[56 + unit * 2], raw[57 + unit * 2]]);
+                    if value == 0 {
+                        break;
+                    }
+                    partition.name[unit] = value;
+                    partition.name_len = (unit + 1) as u8;
+                }
+                if partition_count == MAXIMUM_GPT_PARTITIONS {
+                    return Err(BlockError::Capacity);
+                }
+                partitions[partition_count] = partition;
+                partition_count += 1;
             }
-            partitions[partition_count] = partition;
-            partition_count += 1;
+            entry_bytes += copied;
+            lba = lba.checked_add(1).ok_or(BlockError::InvalidSector)?;
+        }
+        if entries_crc.finish() != expected_entries_crc {
+            return Err(BlockError::CorruptMetadata);
         }
 
         for left in 0..partition_count {
@@ -329,16 +341,34 @@ fn read_array<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
     bytes[offset..offset + N].try_into().unwrap()
 }
 
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+struct Crc32 {
+    value: u32,
+}
+
+impl Crc32 {
+    const fn new() -> Self {
+        Self { value: u32::MAX }
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.value ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = 0_u32.wrapping_sub(self.value & 1);
+                self.value = (self.value >> 1) ^ (0xedb8_8320 & mask);
+            }
         }
     }
-    !crc
+
+    const fn finish(self) -> u32 {
+        !self.value
+    }
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = Crc32::new();
+    crc.update(bytes);
+    crc.finish()
 }
 
 /// Fixed-size block storage used by host tests and driver bring-up.
@@ -406,18 +436,26 @@ mod tests {
 
     fn valid_disk() -> MemoryBlockDevice<64> {
         let mut disk = MemoryBlockDevice::new();
-        let entries = disk.sector_mut(2).unwrap();
-        entries[..16].copy_from_slice(&TYPE_GUID);
-        entries[16..32].copy_from_slice(&UNIQUE_GUID);
-        put_u64(entries, 32, 34);
-        put_u64(entries, 40, 47);
-        entries[56..58].copy_from_slice(&(b'A' as u16).to_le_bytes());
-        entries[58..60].copy_from_slice(&(b'r' as u16).to_le_bytes());
-        entries[60..62].copy_from_slice(&(b'a' as u16).to_le_bytes());
-        entries[62..64].copy_from_slice(&(b'c' as u16).to_le_bytes());
-        entries[64..66].copy_from_slice(&(b'h' as u16).to_le_bytes());
-        entries[66..68].copy_from_slice(&(b'O' as u16).to_le_bytes());
-        entries[68..70].copy_from_slice(&(b'S' as u16).to_le_bytes());
+        let entries_crc = {
+            let entries = disk.sector_mut(2).unwrap();
+            entries[..16].copy_from_slice(&TYPE_GUID);
+            entries[16..32].copy_from_slice(&UNIQUE_GUID);
+            put_u64(entries, 32, 34);
+            put_u64(entries, 40, 47);
+            entries[56..58].copy_from_slice(&(b'A' as u16).to_le_bytes());
+            entries[58..60].copy_from_slice(&(b'r' as u16).to_le_bytes());
+            entries[60..62].copy_from_slice(&(b'a' as u16).to_le_bytes());
+            entries[62..64].copy_from_slice(&(b'c' as u16).to_le_bytes());
+            entries[64..66].copy_from_slice(&(b'h' as u16).to_le_bytes());
+            entries[66..68].copy_from_slice(&(b'O' as u16).to_le_bytes());
+            entries[68..70].copy_from_slice(&(b'S' as u16).to_le_bytes());
+            let mut crc = Crc32::new();
+            crc.update(entries);
+            // Eight entries occupy two sectors. The second sector is all
+            // zeroes, exercising the streaming parser's final-sector path.
+            crc.update(&[0; SECTOR_BYTES]);
+            crc.finish()
+        };
 
         let mut header = [0_u8; SECTOR_BYTES];
         header[..8].copy_from_slice(&GPT_SIGNATURE);
@@ -429,13 +467,9 @@ mod tests {
         put_u64(&mut header, 0x30, 62);
         header[56..72].copy_from_slice(&[3; 16]);
         put_u64(&mut header, 72, 2);
-        put_u32(&mut header, 80, 4);
+        put_u32(&mut header, 80, 8);
         put_u32(&mut header, 84, GPT_PARTITION_ENTRY_BYTES as u32);
-        put_u32(
-            &mut header,
-            88,
-            crc32(&entries[..4 * GPT_PARTITION_ENTRY_BYTES]),
-        );
+        put_u32(&mut header, 88, entries_crc);
         let header_crc = {
             let mut for_crc = header;
             for_crc[16..20].fill(0);

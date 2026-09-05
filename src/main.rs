@@ -97,6 +97,7 @@ use arach::serial::SerialPort;
 use arach::shim::{
     AbyssAllocator, DriverHost, DriverServices, IrqService, LogService, MmioService,
 };
+use arach::storage::GptTable;
 use arach::sync::SpinLock;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
@@ -3065,6 +3066,53 @@ pub extern "C" fn arach_main(multiboot_address: usize, multiboot_physical_addres
             "Arach: NVMe namespace online pci={:02x}:{:02x}.{} sectors={} lba0-read=verified",
             address.bus, address.slot, address.function, namespace_sectors,
         );
+        let mut gpt_header = [0_u8; arach::storage::SECTOR_BYTES];
+        if let Err(error) = arach::storage::BlockDevice::read_sector(
+            &mut controller,
+            arach::storage::GPT_HEADER_LBA,
+            &mut gpt_header,
+        ) {
+            let _ = writeln!(serial, "Arach: NVMe GPT header read failed: {error:?}");
+            if controller.shutdown(&nvme_mmio).is_ok() {
+                let _ = pci::revoke_bus_master(
+                    bus_master,
+                    nvme_dma_authority.reborrow(),
+                    nvme_pci_configuration.reborrow(),
+                );
+            }
+            halt();
+        }
+        if gpt_header[..8] == *b"EFI PART" {
+            let gpt = match GptTable::parse(&mut controller) {
+                Ok(table) => table,
+                Err(error) => {
+                    let _ = writeln!(serial, "Arach: NVMe GPT metadata rejected: {error:?}");
+                    if controller.shutdown(&nvme_mmio).is_ok() {
+                        let _ = pci::revoke_bus_master(
+                            bus_master,
+                            nvme_dma_authority.reborrow(),
+                            nvme_pci_configuration.reborrow(),
+                        );
+                    }
+                    halt();
+                }
+            };
+            let _ = writeln!(
+                serial,
+                "Arach: NVMe GPT metadata validated partitions={} first-usable={} last-usable={}",
+                gpt.partitions().len(),
+                gpt.first_usable_lba,
+                gpt.last_usable_lba,
+            );
+        } else {
+            // A blank qualification disk is valid for transport bring-up, but
+            // it is not a persistent root. Installed media must carry a
+            // validated GPT before the filesystem handoff can be admitted.
+            let _ = writeln!(
+                serial,
+                "Arach: NVMe namespace has no GPT metadata; persistent root remains unavailable"
+            );
+        }
         if NVME_CONTROLLER.lock().is_some() {
             let _ = writeln!(serial, "Arach: duplicate retained NVMe controller");
             halt();

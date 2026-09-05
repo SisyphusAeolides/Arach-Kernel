@@ -23,6 +23,11 @@ the Linux ABI surface exercised by RustD and records its markers in a serial
 transcript when run under QEMU. Host compilation and unit tests are useful
 evidence but do not replace a boot qualification run.
 
+When a namespace is present, the boot path also reads and validates its GPT
+header and bounded partition-entry table through the measured NVMe transport.
+That check proves partition metadata and CRC handling only; the kernel still
+does not mount a filesystem or claim a persistent root.
+
 For a local kernel contract build:
 
 ```sh
