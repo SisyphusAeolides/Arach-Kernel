@@ -12,6 +12,7 @@ pub mod net;
 pub mod nvidia_gsp_bootstrap;
 pub mod nvidia_gsp_firmware;
 pub mod nvidia_turing_wpr;
+pub mod nvme;
 pub mod ps2_pointer;
 pub mod xhci;
 pub mod xhci_dma;
