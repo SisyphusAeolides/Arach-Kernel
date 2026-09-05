@@ -114,7 +114,7 @@ const COM1: u16 = 0x3f8;
 /// This is boot-time capacity, never pageable or influenced by Ring 3.
 const BOOTSTRAP_INITIAL_STACK_PAGES: usize = 384;
 const IDENTITY_MAP_END: u64 = 1024 * 1024 * 1024;
-const KERNEL_PHYSICAL_LOAD_BASE: u64 = 1024 * 1024;
+const KERNEL_PHYSICAL_LOAD_BASE: u64 = 16 * 1024 * 1024;
 const MINIMUM_HEAP_SIZE: u64 = 64 * 1024;
 // The heap carries the frame bitmap, measured boot allocations, and the
 // heap-backed process address-space metadata pool. Keep this reservation

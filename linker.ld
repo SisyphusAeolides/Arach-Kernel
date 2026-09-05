@@ -4,7 +4,10 @@ KERNEL_VIRTUAL_BASE = 0xffffffff80000000;
 
 SECTIONS
 {
-    . = 1M;
+    /* Keep the complete image inside one conventional-memory extent on UEFI.
+       Firmware commonly leaves a hole between 8 MiB and 9 MiB; the kernel's
+       BSS is large enough that a 1 MiB base would cross it. */
+    . = 16M;
     __bootstrap_physical_start = .;
 
     .multiboot_header ALIGN(8) :
