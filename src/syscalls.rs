@@ -940,23 +940,23 @@ fn schedule_linux_execve_return(
                     &mut staging.runtime_linker,
                 )
             };
-            let pair = match pair {
+            let (executable_snapshot, linker_snapshot) = match pair {
                 Ok(pair) => pair,
                 Err(error) => return resume_linux_result(saved, map_linux_file_error(error)),
             };
             let refreshed_plan = match crate::module::loader::LoadPlan::parse(
-                &staging.image[..pair.executable.bytes],
+                &staging.image[..executable_snapshot.bytes],
             ) {
                 Ok(plan) => plan,
                 Err(_) => return resume_linux_result(saved, ERROR_EXEC_FORMAT),
             };
-            match refreshed_plan.interpreter_path(&staging.image[..pair.executable.bytes]) {
+            match refreshed_plan.interpreter_path(&staging.image[..executable_snapshot.bytes]) {
                 Ok(Some(refreshed))
                     if refreshed == &interpreter_path[..interpreter_path_length] => {}
                 _ => return resume_linux_result(saved, ERROR_TRY_AGAIN),
             }
-            snapshot = pair.executable;
-            interpreter_snapshot = Some(pair.interpreter);
+            snapshot = executable_snapshot;
+            interpreter_snapshot = Some(linker_snapshot);
         }
         Ok(None) => {}
         Err(_) => return resume_linux_result(saved, ERROR_EXEC_FORMAT),
