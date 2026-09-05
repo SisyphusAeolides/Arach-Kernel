@@ -4,7 +4,10 @@ set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 tools="${FORMAL_TOOLCHAIN_ROOT:-$root/target/formal/toolchains}"
 downloads="$tools/downloads"
-idris_root="$tools/Idris2-0.8.0"
+idris_version="0.8.0"
+idris_commit="5aaefadb587224eb44d3be0fbb7e2835b48bd7a6"
+idris_source_sha256="b05e982313b7532be84f0482b808f222a2c5065a50d896690cce8f11a738753c"
+idris_root="$tools/Idris2-$idris_version-$idris_commit"
 agda_root="$tools/Agda-v2.8.0-linux"
 mkdir -p "$downloads"
 
@@ -21,18 +24,18 @@ else
 fi
 
 if [[ ! -x "$idris_root/build/exec/idris2" ]]; then
-    archive="$downloads/idris2-0.8.0.tgz"
+    archive="$downloads/idris2-$idris_commit.tar.gz"
     curl --fail --location --retry 3 \
-        --output "$archive" https://www.idris-lang.org/releases/idris2-0.8.0.tgz
+        --output "$archive" \
+        "https://github.com/idris-lang/Idris2/archive/$idris_commit.tar.gz"
     printf '%s  %s\n' \
-        940a283cb66b0097cab0d24fe10341274fab75cb3af58dc715944d6ca7230665 \
+        "$idris_source_sha256" \
         "$archive" | sha256sum --check --strict
     staging="$(mktemp -d "$tools/.idris.XXXXXXXX")"
-    trap 'rm -rf -- "$staging"' EXIT
-    tar -xzf "$archive" -C "$staging"
-    make -C "$staging/Idris2-0.8.0" bootstrap SCHEME="$scheme"
-    mv "$staging/Idris2-0.8.0" "$idris_root"
-    rmdir "$staging"
+    trap 'find "$staging" -depth -delete 2>/dev/null || :' EXIT
+    tar -xzf "$archive" --strip-components=1 -C "$staging"
+    make -C "$staging" bootstrap SCHEME="$scheme"
+    mv "$staging" "$idris_root"
     trap - EXIT
 fi
 
@@ -44,7 +47,7 @@ if [[ ! -x "$agda_root/agda" ]]; then
         824081b8dcbe431289a50ac6bd83e451f390c51c3884ac7a8c4a5c0df2632faf \
         "$archive" | sha256sum --check --strict
     staging="$(mktemp -d "$tools/.agda.XXXXXXXX")"
-    trap 'rm -rf -- "$staging"' EXIT
+    trap 'find "$staging" -depth -delete 2>/dev/null || :' EXIT
     tar -xJf "$archive" -C "$staging"
     mkdir "$agda_root"
     mv "$staging/agda" "$agda_root/agda"
