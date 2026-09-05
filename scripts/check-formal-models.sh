@@ -51,6 +51,12 @@ cleanup() { find "$scratch" -depth -delete 2>/dev/null || :; }
 trap cleanup EXIT
 mkdir -p "$scratch/idris2" "$scratch/agda" "$scratch/agda-data" "$scratch/agda-config"
 
+# Arch's Agda package keeps its bundled primitive library under /usr/share,
+# which is intentionally not writable by a normal build user.  Populate a
+# private data directory so Agda can cache primitive interfaces without
+# changing the host installation.
+Agda_datadir="$scratch/agda-data" "$agda" --setup >/dev/null 2>&1
+
 for name in "${idris_sources[@]}"; do
     cp -- "$root/formal/idris2/$name" "$scratch/idris2/"
 done
@@ -64,6 +70,7 @@ done
 for name in "${agda_sources[@]}"; do
     (
         cd -- "$scratch/agda"
+        Agda_datadir="$scratch/agda-data" \
         XDG_DATA_HOME="$scratch/agda-data" \
         XDG_CONFIG_HOME="$scratch/agda-config" \
             "$agda" --no-libraries --safe --without-K "$name"
